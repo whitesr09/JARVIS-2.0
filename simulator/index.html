@@ -1,0 +1,1575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis — JARVIS-2.0 Web Simulator</title>
+<style>
+/* ============ JARVIS-2.0 SIMULATOR — Sunset replica design system ============
+   Tokens (replica-design roles): bg gradient pair, surface(card), ink, muted,
+   accent, on-accent. Boldness is spent on ONE element: the particle orb. */
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+:root{--z-nav:20;--z-float:40;--z-sub:30;--z-modal:60;--z-toast:70}
+html,body{height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  background:radial-gradient(1200px 800px at 50% 18%,#232032 0%,#12101c 55%,#0b0a12 100%);
+  min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:20px 10px 14px;color:#EDEAF4;
+}
+.caption{font-size:13px;letter-spacing:.02em;color:#9d97b5;text-align:center;margin-bottom:12px}
+.caption b{color:#e8e4f5;font-weight:600}
+.phone{
+  --bg1:#FFF7EE;--bg2:#FFDFC9;--card:rgba(255,255,255,.78);--card-brd:rgba(255,255,255,.95);
+  --ink:#2E1A12;--muted:#85573F;--faint:#96603F;--accent:#FF6A3D;--accent-deep:#C2410C;
+  --btn1:#B23A0A;--btn2:#CE470F;
+  --accent2:#FF9E7A;--chip:#FFE7D6;--nav:rgba(255,253,250,.88);--line:rgba(120,60,30,.10);
+  --orb1:#FF6A3D;--orb2:#FF8FA3;--orb3:#FFB59E;--orb4:#FF5C8A;
+  --shadow:0 12px 32px rgba(216,90,40,.14);--field:rgba(255,255,255,.65);
+  position:relative;width:min(410px,100vw);height:min(892px,calc(100dvh - 86px));min-height:600px;
+  border:11px solid #15151d;border-radius:52px;overflow:hidden;color:var(--ink);
+  background:linear-gradient(168deg,var(--bg1) 0%,var(--bg2) 130%);
+  box-shadow:0 40px 90px rgba(0,0,0,.55),0 4px 18px rgba(0,0,0,.5);
+  display:flex;flex-direction:column;
+}
+.phone[data-theme="light"]{--bg1:#FFFFFF;--bg2:#EEF1F7;--card:#FFFFFF;--card-brd:#EDF0F5;--ink:#22222C;--muted:#5D6376;--faint:#8A90A5;--chip:#EFF1F6;--nav:rgba(255,255,255,.92);--line:rgba(30,30,60,.09);--shadow:0 10px 26px rgba(40,50,90,.08);--field:#F4F6FA}
+.phone[data-theme="dark"]{--bg1:#1B1526;--bg2:#0C0913;--card:rgba(255,255,255,.055);--card-brd:rgba(255,255,255,.10);--ink:#F7EFE9;--muted:#C4AEA2;--faint:#9A8578;--chip:rgba(255,255,255,.08);--nav:rgba(18,14,26,.92);--line:rgba(255,255,255,.09);--shadow:0 12px 30px rgba(0,0,0,.35);--field:rgba(255,255,255,.06);--orb1:#FF7A4D;--orb2:#FF9FB4;--orb3:#FFC0A8;--orb4:#FF6C96}
+.phone[data-theme="red"]{--bg1:#40100D;--bg2:#1D0403;--card:rgba(255,255,255,.07);--card-brd:rgba(255,255,255,.12);--ink:#FFEFE9;--muted:#E5B3A6;--faint:#B98376;--accent:#FF5347;--accent-deep:#FF8A75;--accent2:#FF8A70;--chip:rgba(255,255,255,.10);--nav:rgba(32,6,4,.93);--line:rgba(255,255,255,.10);--shadow:0 12px 30px rgba(0,0,0,.4);--field:rgba(255,255,255,.07);--orb1:#FF5347;--orb2:#FF8A70;--orb3:#FFB59E;--orb4:#FF2E4D}
+/* status bar */
+.statusbar{position:absolute;top:0;left:0;right:0;height:46px;z-index:25;display:flex;align-items:flex-end;justify-content:space-between;padding:0 26px 4px;font-size:13.5px;font-weight:600;pointer-events:none}
+.statusbar .sicons{display:flex;gap:6px;align-items:center;font-size:11px;font-weight:600;color:var(--ink);opacity:.85}
+/* screens */
+.screen{position:absolute;inset:0;padding:56px 18px 112px;overflow-y:auto;overflow-x:hidden;display:none;scrollbar-width:none}
+.screen::-webkit-scrollbar{display:none}
+.screen.active{display:block;animation:scrIn .28s ease both}
+@keyframes scrIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+/* generic ui */
+h1.pagetitle{font-size:27px;font-weight:800;letter-spacing:-.02em;line-height:1.12}
+.pagesub{font-size:13.5px;color:var(--muted);margin-top:3px}
+.card{background:var(--card);border:1px solid var(--card-brd);border-radius:24px;box-shadow:var(--shadow);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.group-label{font-size:11.5px;font-weight:700;letter-spacing:.14em;color:var(--faint);margin:22px 4px 9px}
+.row{display:flex;align-items:center;gap:13px;padding:14px 16px;min-height:64px;width:100%;background:none;border:none;text-align:left;font:inherit;color:inherit;cursor:pointer}
+.row + .row{border-top:1px solid var(--line)}
+.row .ric{width:42px;height:42px;flex:0 0 42px;border-radius:14px;background:var(--chip);display:flex;align-items:center;justify-content:center;color:var(--accent-deep)}
+.row .ric svg{width:22px;height:22px}
+.row .rtx{flex:1;min-width:0}
+.row .rt{font-size:15.5px;font-weight:650;line-height:1.25}
+.row .rs{font-size:12.5px;color:var(--muted);margin-top:2px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.row .chev{color:var(--faint);flex:0 0 auto}
+.badge{font-size:10.5px;font-weight:800;letter-spacing:.06em;padding:4px 9px;border-radius:99px;background:var(--chip);color:var(--accent-deep);white-space:nowrap}
+.badge.ok{background:#E3F6E9;color:#177245}
+.phone[data-theme="dark"] .badge.ok,.phone[data-theme="red"] .badge.ok{background:rgba(60,200,120,.18);color:#7CE3A5}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:none;cursor:pointer;font:inherit;font-weight:700;border-radius:99px;min-height:48px;padding:0 22px;font-size:15px;transition:transform .15s ease,opacity .15s ease}
+.btn:active{transform:scale(.97)}
+.btn-accent{background:linear-gradient(135deg,var(--btn1),var(--btn2));color:#fff;box-shadow:0 8px 20px rgba(255,106,61,.35)}
+.btn-ghost{background:var(--card);color:var(--ink);border:1.5px solid var(--line)}
+.btn-small{min-height:40px;padding:0 16px;font-size:13.5px}
+.btn[disabled]{opacity:.55;pointer-events:none}
+.switch{position:relative;width:52px;height:31px;flex:0 0 52px;border-radius:99px;background:rgba(120,120,140,.35);border:none;cursor:pointer;transition:background .2s}
+.switch::after{content:"";position:absolute;top:3px;left:3px;width:25px;height:25px;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.25);transition:left .2s}
+.switch[aria-checked="true"]{background:var(--accent)}
+.switch[aria-checked="true"]::after{left:24px}
+.seg{display:flex;background:var(--chip);border-radius:99px;padding:4px;gap:4px}
+.seg button{flex:1;border:none;background:transparent;font:inherit;font-size:13px;font-weight:650;color:var(--muted);min-height:38px;border-radius:99px;cursor:pointer;padding:0 8px}
+.seg button.on{background:var(--card);color:var(--ink);box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.field{margin:0 0 14px}
+.field label{display:block;font-size:13px;font-weight:650;margin:0 2px 7px}
+.field .hint{font-size:12px;color:var(--muted);margin-top:6px;line-height:1.45}
+input[type=text],input[type=password],input[type=url],select,textarea{
+  width:100%;font:inherit;font-size:15px;color:var(--ink);background:var(--field);
+  border:1.5px solid var(--line);border-radius:16px;padding:13px 15px;min-height:48px;outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(255,106,61,.22)}
+.keywrap{position:relative}
+.keywrap input{padding-right:118px}
+.keywrap .keytools{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;gap:2px}
+.keywrap .keytools button{width:36px;height:36px;border:none;background:transparent;border-radius:10px;cursor:pointer;color:var(--muted);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.keywrap .keytools button svg{width:19px;height:19px}
+:focus-visible{outline:3px solid rgba(255,106,61,.55);outline-offset:2px;border-radius:12px}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chipbtn{border:1.5px solid var(--line);background:var(--card);color:var(--ink);font:inherit;font-size:13px;font-weight:650;min-height:40px;padding:0 15px;border-radius:99px;cursor:pointer}
+.chipbtn.on{background:linear-gradient(135deg,var(--btn1),var(--btn2));border-color:var(--btn1);color:#fff}
+/* header for sub screens */
+.subhead{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.backbtn{width:44px;height:44px;flex:0 0 44px;border-radius:15px;border:1px solid var(--card-brd);background:var(--card);color:var(--ink);cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow)}
+.backbtn svg{width:20px;height:20px}
+.subhead .st{font-size:21px;font-weight:800;letter-spacing:-.01em;line-height:1.15}
+.subhead .ss{font-size:12.5px;color:var(--muted)}
+/* sub screens */
+.sub{position:absolute;inset:0;z-index:var(--z-sub);padding:56px 18px 34px;overflow-y:auto;scrollbar-width:none;
+  background:linear-gradient(168deg,var(--bg1) 0%,var(--bg2) 130%);transform:translateX(103%);transition:transform .38s cubic-bezier(.32,.72,.24,1);visibility:hidden}
+.sub::-webkit-scrollbar{display:none}
+.sub.open{transform:none;visibility:visible}
+/* ============ HOME ============ */
+.home-top{display:flex;align-items:flex-start;justify-content:space-between}
+.iconbtn{width:48px;height:48px;border-radius:17px;border:1px solid var(--card-brd);background:var(--card);box-shadow:var(--shadow);color:var(--ink);cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative}
+.iconbtn svg{width:22px;height:22px}
+.wordmark{font-family:"Brush Script MT","Segoe Script","Snell Roundhand",cursive;font-size:44px;line-height:1;text-align:center;color:var(--ink);font-weight:600}
+.greet{text-align:center;font-size:15px;font-weight:650;margin-top:2px}
+.orbzone{position:relative;width:320px;height:320px;margin:8px auto 0}
+.orbglow{position:absolute;inset:26px;border-radius:50%;background:radial-gradient(circle,rgba(255,120,80,.4) 0%,rgba(255,120,80,.12) 55%,transparent 72%);filter:blur(6px);transition:opacity .4s}
+#orb{position:absolute;inset:0;width:320px;height:320px;cursor:pointer;border-radius:50%}
+.orbring{position:absolute;inset:8px;border-radius:50%;border:1.5px solid rgba(255,106,61,.22);pointer-events:none}
+.statuspill{display:flex;align-items:center;gap:9px;margin:2px auto 0;width:max-content;max-width:100%;padding:11px 20px;border-radius:99px;background:var(--card);border:1px solid var(--card-brd);box-shadow:var(--shadow);font-size:12.5px;font-weight:800;letter-spacing:.09em;color:var(--muted);cursor:pointer;font-family:inherit;min-height:44px}
+.statuspill .dot{width:9px;height:9px;border-radius:50%;background:#B9A08F;flex:0 0 9px}
+.statuspill.on{color:var(--accent-deep)}
+.statuspill.on .dot{background:#2FBF71;box-shadow:0 0 0 0 rgba(47,191,113,.5);animation:pulse 1.6s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(47,191,113,.45)}70%{box-shadow:0 0 0 9px rgba(47,191,113,0)}100%{box-shadow:0 0 0 0 rgba(47,191,113,0)}}
+.tapnote{text-align:center;font-size:12.5px;color:var(--muted);margin-top:9px}
+.weather{margin-top:18px;padding:18px 20px;display:flex;align-items:center;gap:14px}
+.weather .temp{font-size:31px;font-weight:800;letter-spacing:-.02em}
+.weather .wt{flex:1}
+.weather .wt .a{font-size:14.5px;font-weight:700}
+.weather .wt .b{font-size:12.5px;color:var(--muted);margin-top:2px}
+.weather .wicon{color:var(--accent)}
+.weather .wicon svg{width:42px;height:42px}
+.tiles{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px}
+.tile{border:1px solid var(--card-brd);background:var(--card);box-shadow:var(--shadow);border-radius:20px;padding:13px 12px;min-height:64px;cursor:pointer;font:inherit;color:var(--ink);text-align:left;display:flex;flex-direction:column;gap:7px}
+.tile svg{width:20px;height:20px;color:var(--accent-deep)}
+.tile .tt{font-size:13px;font-weight:700;line-height:1.2}
+.tile .ts{font-size:11px;color:var(--muted)}
+.demotask{width:100%;margin-top:12px}
+/* ============ CHAT ============ */
+.chathead{display:flex;align-items:center;gap:10px}
+.chathead .ct{flex:1;text-align:center}
+.chathead .ct .a{font-size:19px;font-weight:800}
+.chathead .ct .b{font-size:12px;color:var(--accent-deep);font-weight:650;margin-top:1px}
+#chatList{display:flex;flex-direction:column;gap:10px;padding:16px 2px 8px}
+.msg{max-width:84%;padding:12px 15px;border-radius:21px;font-size:15px;line-height:1.5;word-wrap:break-word;overflow-wrap:anywhere}
+.msg.user{align-self:flex-end;background:linear-gradient(135deg,var(--btn1),var(--btn2));color:#fff;border-bottom-right-radius:8px}
+.msg.ai{align-self:flex-start;background:var(--card);border:1px solid var(--card-brd);box-shadow:var(--shadow);border-bottom-left-radius:8px}
+.msg.sys{align-self:center;background:transparent;color:var(--muted);font-size:12.5px;text-align:center;box-shadow:none;border:none;padding:2px 10px}
+.msg .src{font-size:11px;color:var(--muted);margin-top:7px;font-weight:650}
+.msg.typing{display:flex;gap:5px;align-items:center;padding:16px 18px}
+.msg.typing i{width:7px;height:7px;border-radius:50%;background:var(--faint);animation:ty 1s infinite}
+.msg.typing i:nth-child(2){animation-delay:.15s}.msg.typing i:nth-child(3){animation-delay:.3s}
+@keyframes ty{0%,60%,100%{transform:none;opacity:.5}30%{transform:translateY(-4px);opacity:1}}
+.msg pre{position:relative;background:#22131F;color:#F6E8EF;border-radius:14px;padding:13px 13px;font-size:12.8px;line-height:1.55;overflow-x:auto;margin:9px 0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.msg pre .copybtn{position:absolute;top:7px;right:7px;background:rgba(255,255,255,.14);color:#fff;border:none;font-size:11px;font-weight:700;padding:6px 10px;border-radius:8px;cursor:pointer;min-height:30px}
+.msg code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em;background:rgba(140,80,50,.14);padding:1px 6px;border-radius:6px}
+.msg pre code{background:none;padding:0}
+.msg .tk-k{color:#FF9EC7}.msg .tk-s{color:#A8E6A1}.msg .tk-n{color:#FFC98A}.msg .tk-c{color:#8E7E93;font-style:italic}.msg .tk-f{color:#8AD6FF}
+.msg p{margin:0 0 8px}.msg p:last-child{margin-bottom:0}
+.msg ul{margin:2px 0 8px 18px}
+.composer{position:absolute;left:14px;right:14px;bottom:104px;z-index:15;background:var(--card);border:1px solid var(--card-brd);box-shadow:var(--shadow);border-radius:26px;padding:12px 12px 10px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+#screen-chat{padding-bottom:252px}
+.composer textarea{border:none;background:transparent;resize:none;min-height:26px;max-height:96px;padding:4px 6px;font-size:15.5px}
+.composer textarea:focus{box-shadow:none;border:none}
+.comp-row{display:flex;align-items:center;gap:8px;margin-top:6px}
+.modepill{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line);background:transparent;color:var(--muted);font:inherit;font-size:13px;font-weight:700;min-height:38px;padding:0 14px;border-radius:99px;cursor:pointer}
+.modepill.on{background:var(--ink);color:var(--bg1);border-color:var(--ink)}
+.modepill svg{width:15px;height:15px}
+.plusbtn{margin-left:auto;width:40px;height:40px;border-radius:50%;border:none;background:transparent;color:var(--ink);font-size:23px;cursor:pointer;line-height:1}
+.sendbtn{width:46px;height:46px;border-radius:50%;border:none;background:linear-gradient(135deg,var(--btn1),var(--btn2));color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 16px rgba(255,90,61,.4)}
+.sendbtn svg{width:20px;height:20px}
+/* ============ BOTTOM NAV ============ */
+.bottomnav{position:absolute;left:14px;right:14px;bottom:14px;height:78px;z-index:var(--z-nav);background:var(--nav);border:1px solid var(--card-brd);border-radius:28px;box-shadow:0 16px 36px rgba(60,20,0,.16);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);display:flex;align-items:stretch;padding:7px 8px}
+.navbtn{flex:1;border:none;background:transparent;font:inherit;color:var(--muted);cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-size:11px;font-weight:650;border-radius:20px;min-height:60px}
+.navbtn svg{width:22px;height:22px}
+.navbtn.on{color:var(--accent-deep)}
+.navbtn.on .nic{background:var(--chip);border-radius:14px;padding:4px 12px}
+.nic{display:flex;padding:4px 12px;border-radius:14px}
+.micbtn{flex:0 0 62px;margin:-24px 2px 0;width:62px;height:62px;border-radius:50%;border:4px solid var(--bg1);background:linear-gradient(145deg,#FFE9DC,#FFD9C2);color:#B96A45;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 10px 22px rgba(216,90,40,.3);align-self:flex-start}
+.micbtn svg{width:26px;height:26px}
+.micbtn.live{background:linear-gradient(135deg,var(--btn1),var(--btn2));color:#fff;animation:pulse 1.6s infinite}
+/* settings operator card */
+.opcard{padding:18px}
+.op-top{display:flex;align-items:center;gap:14px}
+.op-ava{width:58px;height:58px;border-radius:19px;background:var(--chip);display:flex;align-items:center;justify-content:center;color:var(--accent-deep);position:relative;flex:0 0 58px}
+.op-ava svg{width:30px;height:30px}
+.op-ava::after{content:"";position:absolute;right:-2px;bottom:-2px;width:14px;height:14px;border-radius:50%;background:#2FBF71;border:3px solid var(--bg1)}
+.op-name{font-size:19px;font-weight:800}
+.op-sub{font-size:11.5px;font-weight:700;letter-spacing:.07em;color:var(--muted);margin-top:2px}
+.op-badges{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+.op-badge{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:800;letter-spacing:.05em;padding:7px 12px;border-radius:99px;border:1.5px solid var(--line);color:var(--accent-deep);background:transparent;cursor:pointer;min-height:34px;font-family:inherit}
+.op-badge svg{width:13px;height:13px}
+.editgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+.editgrid .field{margin:0}
+.editgrid input{min-height:44px;padding:10px 12px;font-size:14px;border-radius:13px}
+.editgrid label{font-size:11.5px}
+/* avatar grid */
+.avgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:11px;margin-top:6px}
+.avtile{position:relative;border:1.5px solid var(--line);background:var(--card);border-radius:22px;padding:15px 6px 11px;cursor:pointer;font:inherit;color:var(--ink);display:flex;flex-direction:column;align-items:center;gap:8px;min-height:104px}
+.avtile .avsvg{width:56px;height:56px}
+.avtile .avn{font-size:13px;font-weight:650}
+.avtile.on{border-color:var(--accent);box-shadow:0 0 0 3px rgba(255,106,61,.2)}
+.avtile .avcheck{position:absolute;top:8px;right:8px;width:21px;height:21px;border-radius:50%;background:var(--accent);color:#fff;display:none;align-items:center;justify-content:center;font-size:12px;font-weight:800}
+.avtile.on .avcheck{display:flex}
+/* personas */
+.persona{padding:17px;margin-bottom:12px;width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer;display:block}
+.persona .ph{display:flex;align-items:center;gap:12px}
+.persona .pic{width:46px;height:46px;border-radius:16px;display:flex;align-items:center;justify-content:center;flex:0 0 46px}
+.persona .pic svg{width:24px;height:24px}
+.persona .pt{font-size:16.5px;font-weight:750;flex:1}
+.persona .pd{font-size:13px;color:var(--muted);line-height:1.5;margin-top:9px}
+.persona.on{border-color:var(--accent);box-shadow:0 0 0 3px rgba(255,106,61,.18),var(--shadow)}
+.persona.later{opacity:.55;cursor:default}
+.radio-dot{width:23px;height:23px;border-radius:50%;border:2px solid var(--faint);flex:0 0 23px;display:flex;align-items:center;justify-content:center}
+.radio-dot.on{border-color:var(--accent)}
+.radio-dot.on::after{content:"";width:12px;height:12px;border-radius:50%;background:var(--accent)}
+/* memory */
+.memitem{display:flex;gap:11px;padding:14px 16px;align-items:flex-start}
+.memitem + .memitem{border-top:1px solid var(--line)}
+.memitem .mt{flex:1;font-size:14.5px;line-height:1.5}
+.memitem .mc{font-size:11px;font-weight:800;letter-spacing:.05em;color:var(--accent-deep);margin-bottom:3px}
+.memdel{width:40px;height:40px;border:none;background:transparent;color:var(--faint);cursor:pointer;font-size:17px;border-radius:11px;flex:0 0 40px}
+.searchwrap{position:relative;margin-bottom:12px}
+.searchwrap input{padding-left:44px;border-radius:99px}
+.searchwrap svg{position:absolute;left:15px;top:50%;transform:translateY(-50%);width:19px;height:19px;color:var(--faint)}
+/* permissions */
+.perm{display:flex;gap:13px;padding:15px 16px;align-items:flex-start}
+.perm + .perm{border-top:1px solid var(--line)}
+.perm .pic2{width:42px;height:42px;flex:0 0 42px;border-radius:50%;border:1.5px solid var(--line);display:flex;align-items:center;justify-content:center;color:var(--accent-deep)}
+.perm .pic2 svg{width:20px;height:20px}
+.perm .ptx{flex:1;min-width:0}
+.perm .pt2{font-size:15px;font-weight:700}
+.perm .ps2{font-size:12.5px;color:var(--muted);line-height:1.45;margin-top:2px}
+.perm .pstat{font-size:12px;font-weight:700;margin-top:4px;color:#B3402A}
+.perm .pstat.ok{color:#177245}
+.phone[data-theme="dark"] .perm .pstat.ok,.phone[data-theme="red"] .perm .pstat.ok{color:#7CE3A5}
+.permbtn{flex:0 0 auto;border:none;cursor:pointer;font:inherit;font-size:11px;font-weight:800;letter-spacing:.05em;min-height:36px;padding:0 15px;border-radius:99px;background:linear-gradient(135deg,var(--btn1),var(--btn2));color:#fff}
+.permbtn.done{background:var(--chip);color:var(--accent-deep)}
+/* enroll */
+.sample{display:flex;align-items:center;gap:13px;padding:15px 16px}
+.sample + .sample{border-top:1px solid var(--line)}
+.wave{display:flex;gap:3px;align-items:center;height:26px;flex:1}
+.wave i{width:4px;border-radius:2px;background:var(--accent2);height:30%}
+.wave i:nth-child(3n){height:80%}.wave i:nth-child(4n){height:55%}.wave i:nth-child(5n){height:100%}
+.wave.empty i{background:var(--line)}
+/* floating avatar + HUD */
+#floatAv{position:absolute;z-index:var(--z-float);width:60px;height:60px;border-radius:50%;background:var(--card);border:1.5px solid var(--card-brd);box-shadow:0 12px 28px rgba(60,20,0,.28);display:none;align-items:center;justify-content:center;cursor:grab;touch-action:none;backdrop-filter:blur(10px)}
+#floatAv.show{display:flex}
+#floatAv svg{width:44px;height:44px;pointer-events:none}
+#floatAv.working{animation:avbob 1.1s ease-in-out infinite}
+@keyframes avbob{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+#hud{position:absolute;z-index:var(--z-float);width:262px;background:var(--card);border:1px solid var(--card-brd);border-radius:22px;box-shadow:0 18px 40px rgba(60,20,0,.25);padding:15px 16px;display:none;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+#hud.show{display:block;animation:scrIn .25s ease both}
+#hud .hg{font-size:13px;font-weight:800;letter-spacing:.02em;margin-bottom:9px}
+#hud .hstep{display:flex;gap:10px;align-items:flex-start;font-size:13px;padding:5px 0;color:var(--muted);line-height:1.4}
+#hud .hstep .hs-ic{width:20px;height:20px;flex:0 0 20px;border-radius:50%;border:2px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;margin-top:1px}
+#hud .hstep.active{color:var(--ink);font-weight:650}
+#hud .hstep.active .hs-ic{border-color:var(--accent);border-top-color:transparent;animation:spin .7s linear infinite}
+#hud .hstep.done{color:var(--ink)}
+#hud .hstep.done .hs-ic{background:#2FBF71;border-color:#2FBF71;color:#fff;animation:none}
+#hud .hstep.failed .hs-ic{background:#E5484D;border-color:#E5484D;color:#fff}
+@keyframes spin{to{transform:rotate(360deg)}}
+#hud .hbar{height:6px;border-radius:99px;background:var(--line);margin-top:10px;overflow:hidden}
+#hud .hbar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:99px;transition:width .5s ease}
+#hud .hnarr{font-size:12px;color:var(--muted);margin-top:9px;line-height:1.45}
+/* modal + sheet */
+.modalwrap{position:absolute;inset:0;z-index:var(--z-modal);background:rgba(35,12,4,.38);display:none;align-items:flex-end;justify-content:center;backdrop-filter:blur(2px)}
+.modalwrap.show{display:flex}
+.sheet{background:linear-gradient(168deg,var(--bg1),var(--bg2));width:100%;max-height:82%;overflow-y:auto;border-radius:30px 30px 0 0;padding:14px 20px 26px;animation:sheetUp .3s cubic-bezier(.32,.72,.24,1) both;scrollbar-width:none}
+.sheet::-webkit-scrollbar{display:none}
+@keyframes sheetUp{from{transform:translateY(40px);opacity:.4}to{transform:none;opacity:1}}
+.sheet .grab{width:44px;height:5px;border-radius:99px;background:var(--line);margin:0 auto 16px}
+.sheet h3{font-size:19px;font-weight:800;margin-bottom:12px}
+.langrow{display:flex;align-items:center;gap:12px;width:100%;padding:13px 6px;border:none;background:none;font:inherit;font-size:15.5px;color:var(--ink);cursor:pointer;min-height:50px;text-align:left}
+.langrow + .langrow{border-top:1px solid var(--line)}
+.langrow .lr{margin-left:auto}
+.centerwrap{align-items:center;padding:0 26px}
+.dialog{background:linear-gradient(168deg,var(--bg1),var(--bg2));border-radius:28px;padding:24px 22px;width:100%;animation:sheetUp .25s ease both}
+.dialog h3{font-size:18.5px;font-weight:800;margin-bottom:8px}
+.dialog p{font-size:14px;color:var(--muted);line-height:1.55}
+.dialog .drow{display:flex;gap:10px;margin-top:18px}
+.dialog .drow .btn{flex:1}
+/* toast */
+#toast{position:absolute;left:50%;transform:translateX(-50%) translateY(16px);bottom:196px;z-index:var(--z-toast);background:#2B1B16;color:#FFF3EA;font-size:13.5px;font-weight:600;padding:13px 19px;border-radius:16px;box-shadow:0 14px 34px rgba(0,0,0,.35);opacity:0;pointer-events:none;transition:all .3s ease;max-width:86%;text-align:center;line-height:1.4}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+/* themes */
+.themegrid{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.themecard{border:1.5px solid var(--line);border-radius:22px;padding:12px;cursor:pointer;font:inherit;color:var(--ink);background:var(--card);text-align:left;min-height:104px}
+.themecard .tp{height:46px;border-radius:13px;margin-bottom:9px;border:1px solid rgba(0,0,0,.06)}
+.themecard .tn{font-size:14.5px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
+.themecard.on{border-color:var(--accent);box-shadow:0 0 0 3px rgba(255,106,61,.18)}
+.swatches{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+.swatch{width:44px;height:44px;border-radius:50%;border:2.5px solid var(--card-brd);cursor:pointer;box-shadow:var(--shadow)}
+/* updates cards */
+.upd{padding:17px;margin-bottom:12px}
+.upd .uh{display:flex;gap:12px;align-items:center;margin-bottom:8px}
+.upd .uic{width:42px;height:42px;border-radius:14px;background:var(--chip);color:var(--accent-deep);display:flex;align-items:center;justify-content:center;flex:0 0 42px}
+.upd .uic svg{width:21px;height:21px}
+.upd .ut{font-size:15.5px;font-weight:750}
+.upd .ud{font-size:13.5px;color:var(--muted);line-height:1.55}
+.devrow{display:flex;align-items:center;gap:13px;padding:13px 16px;width:100%;background:none;border:none;font:inherit;color:inherit;cursor:pointer;text-align:left;min-height:58px;text-decoration:none}
+.devrow + .devrow{border-top:1px solid var(--line)}
+.devrow .dic{width:40px;height:40px;border-radius:13px;background:var(--chip);color:var(--accent-deep);display:flex;align-items:center;justify-content:center;flex:0 0 40px}
+.devrow .dic svg{width:20px;height:20px}
+.devrow .dt{font-size:14.5px;font-weight:700}
+.devrow .ds{font-size:12.5px;color:var(--muted)}
+.footer-note{text-align:center;font-size:11.5px;color:var(--faint);line-height:1.7;padding:20px 24px 4px}
+.guide-step{display:flex;gap:13px;padding:13px 0}
+.guide-step + .guide-step{border-top:1px solid var(--line)}
+.guide-step .gn{width:30px;height:30px;flex:0 0 30px;border-radius:50%;background:var(--btn1);color:#fff;font-weight:800;font-size:14px;display:flex;align-items:center;justify-content:center}
+.guide-step .gt{font-size:14.5px;font-weight:700}
+.guide-step .gd{font-size:13px;color:var(--muted);line-height:1.5;margin-top:2px}
+.cmdlist{font-size:13.5px;color:var(--muted);line-height:1.9;padding-left:2px}
+.cmdlist b{color:var(--ink);font-weight:650}
+.result-line{font-size:13.5px;line-height:1.5;padding:12px 15px;border-radius:14px;margin-top:4px;display:none}
+.result-line.show{display:block}
+.result-line.ok{background:#E3F6E9;color:#14532D}
+.result-line.err{background:#FDE8E8;color:#7F1D1D}
+.phone[data-theme="dark"] .result-line.ok,.phone[data-theme="red"] .result-line.ok{background:rgba(60,200,120,.16);color:#A7F3C9}
+.phone[data-theme="dark"] .result-line.err,.phone[data-theme="red"] .result-line.err{background:rgba(229,72,77,.18);color:#FECACA}
+.notebox{font-size:12.5px;color:var(--muted);line-height:1.55;background:var(--chip);border-radius:14px;padding:12px 14px;margin-top:14px}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.001s !important;transition-duration:.001s !important}}
+@media (max-width:430px){body{padding:0}.phone{border:none;border-radius:0;width:100vw;height:100dvh;min-height:0}.caption{display:none}}
+</style>
+</head>
+<body>
+<p class="caption"><b>JARVIS-2.0</b> — web simulator replica · Step 0 · test the UI &amp; flows before the native build</p>
+<div class="phone" id="phone" data-theme="sunset">
+  <div class="statusbar"><span id="sbClock">10:48</span><span class="sicons"><span>5G</span><span>▂▄▆</span><span>59%</span></span></div>
+
+  <!-- ================= HOME ================= -->
+  <section class="screen active" id="screen-home" aria-label="Home">
+    <div class="home-top">
+      <button class="iconbtn" data-nav="chat" aria-label="Open chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
+      <div>
+        <div class="wordmark" data-aname>Jarvis</div>
+        <div class="greet">Welcome back, <span data-callsign>Nishad</span></div>
+      </div>
+      <button class="iconbtn" data-nav="settings" aria-label="Open settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></button>
+    </div>
+    <div class="orbzone">
+      <div class="orbglow" id="orbGlow"></div>
+      <canvas id="orb" width="640" height="640" role="button" aria-label="Jarvis orb. Tap to power on or off."></canvas>
+      <div class="orbring"></div>
+    </div>
+    <button class="statuspill" id="statusPill"><span class="dot"></span><span id="statusText">JARVIS OFF • TAP TO START</span></button>
+    <p class="tapnote" id="tapNote">Tap mic or orb to power on</p>
+    <div class="card weather">
+      <div class="temp">26°C</div>
+      <div class="wt"><div class="a">Overcast • Kizhuparamba</div><div class="b">Feels 31° • H 30° L 25° • 95% humidity</div></div>
+      <div class="wicon"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.5 19a4.5 4.5 0 0 0 .42-8.98 6.5 6.5 0 0 0-12.6 1.3A4 4 0 0 0 6 19h11.5z"/></svg></div>
+    </div>
+    <div class="tiles">
+      <button class="tile" id="tileScreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span class="tt">Screen</span><span class="ts">Share &amp; vision</span></button>
+      <button class="tile" id="tileMemories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg><span class="tt">Memories</span><span class="ts" id="tileMemSub">0 saved</span></button>
+      <button class="tile" id="tileLanguage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg><span class="tt">Language</span><span class="ts" id="tileLangSub">Auto</span></button>
+    </div>
+    <button class="btn btn-accent demotask" id="demoTaskBtn"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13l11-6.5z"/></svg>Run demo task — WhatsApp message</button>
+  </section>
+
+  <!-- ================= CHAT ================= -->
+  <section class="screen" id="screen-chat" aria-label="Chat">
+    <div class="chathead">
+      <button class="iconbtn" id="chatHistoryBtn" aria-label="Chat history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg></button>
+      <div class="ct"><div class="a" id="chatTitle">Hi</div><div class="b" id="chatSub">Jarvis • Demo mode</div></div>
+      <button class="iconbtn" id="newChatBtn" aria-label="New chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+    </div>
+    <div id="chatList" aria-live="polite"></div>
+  </section>
+
+  <!-- ================= SETTINGS ================= -->
+  <section class="screen" id="screen-settings" aria-label="Settings">
+    <h1 class="pagetitle">Settings &amp; Intelligence</h1>
+    <p class="pagesub">System preferences &amp; neural configuration</p>
+
+    <div class="card opcard" style="margin-top:16px">
+      <div class="op-top">
+        <div class="op-ava"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+        <div><div class="op-name" data-callsign>Nishad</div><div class="op-sub">JARVIS OPERATOR • PRIMARY USER</div></div>
+      </div>
+      <div class="op-badges">
+        <button class="op-badge" data-open="sub-enroll"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>ENROLL VOICE</button>
+        <span class="op-badge" style="cursor:default"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/></svg>JARVIS PRO</span>
+      </div>
+      <div class="editgrid">
+        <div class="field"><label for="setAssistantName">Assistant name</label><input type="text" id="setAssistantName" value="Jarvis" maxlength="24" autocomplete="off"></div>
+        <div class="field"><label for="setCallsign">It calls you</label><input type="text" id="setCallsign" value="Nishad" maxlength="24" autocomplete="off"></div>
+      </div>
+    </div>
+
+    <div class="group-label">VOICE &amp; NEURAL INTELLIGENCE</div>
+    <div class="card">
+      <button class="row" data-open="sub-enroll">
+        <span class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg></span>
+        <span class="rtx"><span class="rt">Owner Voice Biometrics</span><span class="rs" id="bioSub">Not enrolled • Tap to record voice profile</span></span>
+        <span class="badge" id="bioBadge">SETUP</span>
+        <svg class="chev" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+      <button class="row" id="langRow">
+        <span class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
+        <span class="rtx"><span class="rt">Conversation Language</span><span class="rs" id="langSub">Auto</span></span>
+        <svg class="chev" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+      <button class="row" data-open="sub-personas">
+        <span class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9h.01M15 9h.01" stroke-width="3"/></svg></span>
+        <span class="rtx"><span class="rt">AI Persona &amp; Voice</span><span class="rs" id="personaSub">Girlfriend Mode • Voice: Puck</span></span>
+        <svg class="chev" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+      <div class="row" style="cursor:default">
+        <span class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="m22 9-6 6M16 9l6 6"/></svg></span>
+        <span class="rtx"><span class="rt">Silent Execution Mode</span><span class="rs">Execute device commands without vocal reply — a soft chime still plays when a task finishes</span></span>
+        <button class="switch" id="silentSwitch" role="switch" aria-checked="false" aria-label="Silent Execution Mode"></button>
+      </div>
+      <div class="row" style="cursor:default">
+        <span class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg></span>
+        <span class="rtx"><span class="rt">Wake Word</span><span class="rs" id="wakeSub">Tap the orb or mic to talk</span></span>
+      </div>
+      <div style="padding:0 16px 16px"><div class="seg" id="wakeSeg" role="group" aria-label="Wake word mode">
+        <button data-wake="tap" class="on">Tap to talk</button><button data-wake="always">Always-on “Hey <span data-aname>Jarvis</span>”</button>
+      </div></div>
+    </div>
+
+    <div class="group-label">SYSTEM &amp; DATA ENGINE</div>
+    <div class="card">
+      <button class="row" data-open="sub-api">
+        <span class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>
+        <span class="rtx"><span class="rt">AI API &amp; Model</span><span class="rs" id="apiSub">No API key configured</span></span>
+        <svg class="chev" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+      <button class="row" data-open="sub-memory">
+        <span class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg></span>
+        <span class="rtx"><span class="rt">Neural Memory Bank</span><span class="rs" id="memSub">Search, review and back up learned facts</span></span>
+        <svg class="chev" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+      <button class="row" data-open="sub-permissions">
+        <span class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg></span>
+        <span class="rtx"><span class="rt">System Permissions</span><span class="rs">11 authorizations for full device control</span></span>
+        <span class="badge" id="permBadge">0/11</span>
+        <svg class="chev" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+      <button class="row" data-open="sub-avatars">
+        <span class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></span>
+        <span class="rtx"><span class="rt">Overlay Avatars</span><span class="rs" id="avSub">Ghost • Always on • Right edge</span></span>
+        <svg class="chev" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+      <button class="row" data-open="sub-guide">
+        <span class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 11V6.5a1.5 1.5 0 0 0-3 0V11"/><path d="M15 10V4.5a1.5 1.5 0 0 0-3 0V10"/><path d="M12 10.5v-7a1.5 1.5 0 0 0-3 0V11"/><path d="M18 8a1.5 1.5 0 0 1 3 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a1.5 1.5 0 0 1 2.12-2.12L6 15V6.5a1.5 1.5 0 0 1 3 0"/></svg></span>
+        <span class="rtx"><span class="rt">App Control &amp; Hands-Free</span><span class="rs">How Jarvis taps, types and scrolls for you</span></span>
+        <svg class="chev" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+    </div>
+
+    <div class="group-label">APPEARANCE</div>
+    <div class="card">
+      <button class="row" data-open="sub-themes">
+        <span class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="13.5" cy="6.5" r="1.2"/><circle cx="17.5" cy="10.5" r="1.2"/><circle cx="8.5" cy="7.5" r="1.2"/><circle cx="6.5" cy="12.5" r="1.2"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.65-.75 1.65-1.65 0-.43-.16-.83-.43-1.14-.26-.3-.42-.7-.42-1.12A1.66 1.66 0 0 1 14.48 16.5h2.03A5.5 5.5 0 0 0 22 11c0-4.97-4.48-9-9.99-9z"/></svg></span>
+        <span class="rtx"><span class="rt">Theme &amp; Orb Colors</span><span class="rs" id="themeSub">Sunset Theme</span></span>
+        <svg class="chev" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+    </div>
+
+    <div class="group-label">DEVELOPER</div>
+    <div class="card">
+      <div class="row" style="cursor:default"><span class="rtx"><span class="rt">Developed by N S H D</span><span class="rs">Follow &amp; contact the developer</span></span><span class="badge">N S H D</span></div>
+      <a class="devrow" href="mailto:nishadahammed081@gmail.com"><span class="dic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg></span><span class="rtx"><span class="dt">Email</span><br><span class="ds">nishadahammed081@gmail.com</span></span></a>
+      <a class="devrow" href="https://wa.me/+918590455801" target="_blank" rel="noopener"><span class="dic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8.5 9.5c.5 2 3 4.5 5 5l1-1.5 2.5 1c-.5 1.5-1.5 2-3 1.5-3.5-1-7-4.5-8-8-.5-1.5 0-2.5 1.5-3l1 2.5z" stroke-width="1.4"/></svg></span><span class="rtx"><span class="dt">WhatsApp</span><br><span class="ds">+91 8590455801</span></span></a>
+      <a class="devrow" href="https://www.instagram.com/__nshd.__" target="_blank" rel="noopener"><span class="dic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="4"/><path d="M17.5 6.5h.01" stroke-width="3"/></svg></span><span class="rtx"><span class="dt">Instagram</span><br><span class="ds">@__nshd.__</span></span></a>
+      <a class="devrow" href="https://t.me/nshd_0" target="_blank" rel="noopener"><span class="dic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></span><span class="rtx"><span class="dt">Telegram</span><br><span class="ds">@nshd_0</span></span></a>
+      <a class="devrow" href="https://github.com/whitesr09" target="_blank" rel="noopener"><span class="dic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5.2 2.2 5 2.5c-.6 1.1-.6 2.4 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg></span><span class="rtx"><span class="dt">GitHub</span><br><span class="ds">@whitesr09</span></span></a>
+    </div>
+    <p class="footer-note">JARVIS • v2.0 SIMULATOR<br>Reference design &amp; tutorial: Tech GPTx (github.com/techgptx/Playlist)<br>Zero-backend • 100% private • Keys stay on this device</p>
+  </section>
+
+  <!-- ================= UPDATES ================= -->
+  <section class="screen" id="screen-updates" aria-label="Updates">
+    <h1 class="pagetitle">Updates &amp; Architecture</h1>
+    <p class="pagesub" style="margin-bottom:16px">How Jarvis works — and what keeps it safe</p>
+    <div class="card upd"><div class="uh"><span class="uic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span><span class="ut">Verified actions &amp; recovery</span></div><p class="ud">Every tap is verified: Jarvis observes the screen, checks the result of each action, and stops safely when the UI is unclear instead of guessing. Failed steps are retried once, then reported — never forced.</p></div>
+    <div class="card upd"><div class="uh"><span class="uic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></span><span class="ut">Floating avatar</span></div><p class="ud">The companion avatar floats over any app while Jarvis works — always-on or working-only, draggable with edge docking. Single-tap toggles listening or pauses the task; double-tap opens the task progress HUD. Try it: pick an avatar in Settings → Overlay Avatars.</p></div>
+    <div class="card upd"><div class="uh"><span class="uic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></span><span class="ut">Task Progress HUD</span></div><p class="ud">A compact 4-step status card shows the goal, recent steps, a running indicator and completed checks — so you always know what Jarvis is doing inside other apps. Run the demo task on Home to see it live.</p></div>
+    <div class="card upd"><div class="uh"><span class="uic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="m22 9-6 6M16 9l6 6"/></svg></span><span class="ut">Silent Execution</span></div><p class="ud">Silent Execution mutes task narration while keeping normal conversation audible. Progress stays visible in the HUD, and a subtle chime still plays when a task finishes.</p></div>
+    <div class="card upd"><div class="uh"><span class="uic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg></span><span class="ut">Safety guardrails</span></div><p class="ud">Confirmation appears only for hard guardrails: payments, delete-for-everyone, calls to numbers outside your contacts, ambiguous message recipients, and bulk actions (hard cap per run, stop if the list stops moving). Everything else executes and verifies. Emergency stop: tap the avatar, touch the screen, or say “Jarvis, stop”.</p></div>
+    <div class="card upd"><div class="uh"><span class="uic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span><span class="ut">Zero-backend privacy</span></div><p class="ud">No accounts, no sign-up, no external database, no tracking. Voice biometrics and memories live on the device; the connection runs directly from your phone to your AI provider over TLS.</p></div>
+    <p class="footer-note">JARVIS INTELLIGENCE OS • v2.0 SIMULATOR<br>Developed by N S H D</p>
+  </section>
+
+  <!-- ================= SUB: VOICE ENROLL ================= -->
+  <div class="sub" id="sub-enroll" aria-label="Voice biometrics">
+    <div class="subhead"><button class="backbtn" data-close aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button><div><div class="st">Voice Biometrics</div><div class="ss">Only your voice wakes Jarvis</div></div></div>
+    <div class="card">
+      <div class="row" style="cursor:default"><span class="rtx"><span class="rt">Owner Voice Biometrics</span><span class="rs">Master switch for voice verification</span></span><button class="switch" id="bioSwitch" role="switch" aria-checked="true" aria-label="Owner Voice Biometrics"></button></div>
+    </div>
+    <div class="card" style="margin-top:12px;padding:17px">
+      <div style="font-size:12px;font-weight:800;letter-spacing:.08em;color:var(--muted)">OWNER VOICE</div>
+      <div style="font-size:18px;font-weight:800;margin-top:4px" id="bioStatus">NOT ENROLLED</div>
+      <p style="font-size:13.5px;color:var(--muted);line-height:1.55;margin-top:7px">Enroll 3 voice samples below. In the native app your voiceprint is matched on-device — samples never leave the phone. In this simulator, recording uses your mic if you allow it; the match score is simulated.</p>
+    </div>
+    <div class="group-label">SAY: “HEY <span data-aname>Jarvis</span>, WAKE UP”</div>
+    <div class="card" id="sampleList"></div>
+    <div class="group-label">SENSITIVITY / STRICTNESS</div>
+    <div class="seg" id="sensSeg" role="group" aria-label="Sensitivity"><button data-sens="Strict">Strict</button><button data-sens="Balanced" class="on">Balanced</button><button data-sens="Relaxed">Relaxed</button></div>
+    <button class="btn btn-accent" id="testMatchBtn" style="width:100%;margin-top:16px">TEST VOICE MATCH</button>
+    <div class="result-line" id="matchResult" role="status"></div>
+    <button class="btn btn-ghost" id="bioReset" style="width:100%;margin-top:10px">RESET / RE-ENROLL VOICE PROFILE</button>
+  </div>
+
+  <!-- ================= SUB: PERSONAS ================= -->
+  <div class="sub" id="sub-personas" aria-label="Persona and voice">
+    <div class="subhead"><button class="backbtn" data-close aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button><div><div class="st">AI Persona &amp; Voice</div><div class="ss">Who <span data-aname>Jarvis</span> is, and how it sounds</div></div></div>
+    <div id="personaList">
+      <button class="card persona" data-persona="girlfriend">
+        <span class="ph"><span class="pic" style="background:#FFE0EA;color:#D6336C"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg></span><span class="pt">Girlfriend Mode</span><span class="badge" style="background:#FFE0EA;color:#D6336C">FIRST</span><span class="radio-dot" data-rdot></span></span>
+        <span class="pd">Warm, attached and a little dramatic — jealous, clingy, flirting, loving, romantic, sarcastic, with real mood swings. She notices if you ignore her, and she never sounds like a robot. Keep it sweet.</span>
+      </button>
+      <button class="card persona" data-persona="pro">
+        <span class="ph"><span class="pic" style="background:var(--chip);color:var(--accent-deep)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9h.01M15 9h.01" stroke-width="3"/></svg></span><span class="pt">Jarvis Pro</span><span class="radio-dot" data-rdot></span></span>
+        <span class="pd">The classic. Witty, strategic, calm under pressure — a sharp chief-of-staff who plans three steps ahead and reports back crisply.</span>
+      </button>
+      <div class="card persona later" aria-disabled="true">
+        <span class="ph"><span class="pic" style="background:var(--chip);color:var(--faint)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9h.01M15 9h.01" stroke-width="3"/></svg></span><span class="pt">Girlfriend Mode — Pari</span><span class="badge">COMING LATER</span></span>
+        <span class="pd">A softer Hinglish companion variant from the reference design. Arrives in a later native update.</span>
+      </div>
+      <div class="card persona later" aria-disabled="true">
+        <span class="ph"><span class="pic" style="background:var(--chip);color:var(--faint)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9h.01M15 9h.01" stroke-width="3"/></svg></span><span class="pt">Boyfriend Mode — Kabir</span><span class="badge">COMING LATER</span></span>
+        <span class="pd">A supportive partner persona from the reference design. Arrives in a later native update.</span>
+      </div>
+      <div class="card persona later" aria-disabled="true">
+        <span class="ph"><span class="pic" style="background:var(--chip);color:var(--faint)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span><span class="pt">TechGPT X Mode</span><span class="badge">COMING LATER</span></span>
+        <span class="pd">Code architecture and deep reasoning persona. Arrives in a later native update.</span>
+      </div>
+    </div>
+    <div class="group-label">GEMINI LIVE VOICE</div>
+    <div class="chips" id="voiceChips"></div>
+    <div class="field" style="margin-top:16px"><label for="customVoice">Custom voice model (optional)</label><input type="text" id="customVoice" placeholder="e.g. my-cloned-voice-v1" autocomplete="off"><p class="hint">When set, this overrides the Gemini voice above — same as the native app's custom voice option.</p></div>
+    <button class="btn btn-accent" id="personaActivate" style="width:100%">ACTIVATE PERSONA</button>
+  </div>
+
+  <!-- ================= SUB: API ================= -->
+  <div class="sub" id="sub-api" aria-label="API and connection">
+    <div class="subhead"><button class="backbtn" data-close aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button><div><div class="st">API &amp; Connection</div><div class="ss">Bring your own key — stored only on this device</div></div></div>
+    <div class="group-label">PROVIDER</div>
+    <div class="chips" id="providerChips"></div>
+    <div class="card" style="margin-top:14px;padding:18px">
+      <div class="field"><label for="apiKey">API Key</label>
+        <div class="keywrap"><input type="password" id="apiKey" placeholder="Paste your API key" autocomplete="off" spellcheck="false">
+        <span class="keytools">
+          <button id="keyEye" aria-label="Show or hide key"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          <button id="keyPaste" aria-label="Paste from clipboard">PASTE</button>
+          <button id="keyClear" aria-label="Clear key">CLR</button>
+        </span></div>
+        <p class="hint">Saved only in this browser's local storage on this device. Never sent anywhere except your provider.</p>
+      </div>
+      <div class="field"><label for="apiBase">Base URL</label><input type="url" id="apiBase" placeholder="https://…" autocomplete="off" spellcheck="false"></div>
+      <div class="field"><label for="apiModel">Chat / Live model</label><input type="text" id="apiModel" list="modelList" autocomplete="off" spellcheck="false"><datalist id="modelList"></datalist><p class="hint">Editable — model names change often, so nothing is hard-coded.</p></div>
+      <div class="field"><label for="apiReasoning">Reasoning model (Code mode)</label><input type="text" id="apiReasoning" autocomplete="off" spellcheck="false"></div>
+      <div class="field" style="margin-bottom:0"><label for="apiGateway">Custom Gateway URL (optional)</label><input type="url" id="apiGateway" placeholder="wss://your-gateway.example/live" autocomplete="off" spellcheck="false"></div>
+    </div>
+    <div class="card" style="margin-top:12px;padding:16px 18px;display:flex;align-items:center;gap:11px">
+      <span class="dot" style="width:10px;height:10px;border-radius:50%;background:#2FBF71;flex:0 0 10px"></span>
+      <div style="flex:1;font-size:13px;line-height:1.5"><b>Live WebSocket</b><br><span style="color:var(--muted)">wss://generativelanguage.googleapis.com • Ping: <span id="pingVal">—</span> ms</span></div>
+    </div>
+    <button class="btn btn-accent" id="testConnBtn" style="width:100%;margin-top:14px">TEST CONNECTION &amp; LATENCY</button>
+    <div class="result-line" id="testResult" role="status"></div>
+    <div class="notebox"><b>Honest note:</b> Gemini Live voice (WebSocket) runs in the native Android app — browsers can't hold that session safely with your key. This simulator tests the REST providers for real (Groq, OpenRouter, FreeLLMAPI, Gemini REST, custom), and the chat auto-fails over to the next configured provider when one errors.</div>
+  </div>
+
+  <!-- ================= SUB: MEMORY ================= -->
+  <div class="sub" id="sub-memory" aria-label="Memory core">
+    <div class="subhead"><button class="backbtn" data-close aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button><div><div class="st">Memory Core</div><div class="ss" id="memCount">0 memories saved</div></div></div>
+    <div class="searchwrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><input type="text" id="memSearch" placeholder="Search memories…" aria-label="Search memories"></div>
+    <div class="chips" id="memChips" style="margin-bottom:14px"></div>
+    <div class="card" style="padding:16px">
+      <div class="field"><label for="memNewText">Add a memory</label><input type="text" id="memNewText" placeholder="e.g. My sister's name is Aisha" autocomplete="off"></div>
+      <div style="display:flex;gap:10px">
+        <select id="memNewCat" aria-label="Category" style="flex:1"><option>Personal</option><option>Preferences</option><option>Contacts</option><option>Routines</option></select>
+        <button class="btn btn-accent btn-small" id="memAddBtn" style="min-height:48px;padding:0 22px">+ ADD</button>
+      </div>
+    </div>
+    <div class="card" id="memList" style="margin-top:12px"></div>
+    <div style="display:flex;gap:10px;margin-top:14px">
+      <button class="btn btn-ghost btn-small" id="memExport" style="flex:1">Export JSON</button>
+      <button class="btn btn-ghost btn-small" id="memImportBtn" style="flex:1">Import JSON</button>
+      <input type="file" id="memImportFile" accept="application/json" hidden>
+    </div>
+    <div class="notebox">Tip: in Chat, say <b>“remember …”</b> and Jarvis saves it here automatically — try “remember my favourite food is biriyani”.</div>
+  </div>
+
+  <!-- ================= SUB: PERMISSIONS ================= -->
+  <div class="sub" id="sub-permissions" aria-label="System authorizations">
+    <div class="subhead"><button class="backbtn" data-close aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button><div><div class="st">System Authorizations</div><div class="ss">Permissions &amp; Privacy Control</div></div></div>
+    <div class="card" style="padding:18px;text-align:center">
+      <div class="wordmark" style="font-size:34px" data-aname>Jarvis</div>
+      <p style="font-size:13px;color:var(--muted);line-height:1.55;margin-top:6px">Grant necessary authorizations so Jarvis can listen, speak, deliver accurate weather, and process your requests seamlessly.</p>
+    </div>
+    <div class="card" id="permList" style="margin-top:12px"></div>
+    <button class="btn btn-accent" id="grantAllBtn" style="width:100%;margin-top:14px">GRANT ALL PERMISSIONS</button>
+    <div class="notebox">Simulated in this web replica — tapping Grant toggles the state here. The native app opens the real Android permission screens and settings pages.</div>
+  </div>
+
+  <!-- ================= SUB: AVATARS ================= -->
+  <div class="sub" id="sub-avatars" aria-label="Overlay avatars">
+    <div class="subhead"><button class="backbtn" data-close aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button><div><div class="st">Overlay Avatars</div><div class="ss">Pick the companion shown while Jarvis works</div></div></div>
+    <div class="card">
+      <div class="row" style="cursor:default"><span class="rtx"><span class="rt">Show floating overlay</span><span class="rs">The avatar floats over other apps</span></span><button class="switch" id="ovSwitch" role="switch" aria-checked="true" aria-label="Show floating overlay"></button></div>
+    </div>
+    <div class="card" style="margin-top:12px;padding:16px">
+      <div style="font-size:14.5px;font-weight:700;margin-bottom:10px">Avatar visibility</div>
+      <div class="seg" id="visSeg" role="group" aria-label="Avatar visibility"><button data-vis="working">While working</button><button data-vis="always" class="on">Always on</button></div>
+      <p style="font-size:12.5px;color:var(--muted);line-height:1.5;margin:12px 0 8px">Dock the avatar to an edge; dragging it will choose the nearest edge.</p>
+      <label for="dockSel" style="font-size:13px;font-weight:650;display:block;margin-bottom:7px">Dock edge</label>
+      <select id="dockSel"><option value="right">Right</option><option value="left">Left</option></select>
+    </div>
+    <div class="group-label">CHOOSE AN AVATAR</div>
+    <p style="font-size:12.5px;color:var(--muted);margin:0 4px 10px">Tap an avatar to select it. Double-tap the floating avatar to see task progress.</p>
+    <div class="avgrid" id="avGrid"></div>
+  </div>
+
+  <!-- ================= SUB: THEMES ================= -->
+  <div class="sub" id="sub-themes" aria-label="Themes">
+    <div class="subhead"><button class="backbtn" data-close aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button><div><div class="st">Select App Theme</div><div class="ss">Restyles the app and the orb together</div></div></div>
+    <div class="themegrid" id="themeGrid">
+      <button class="themecard" data-theme-pick="light"><span class="tp" style="display:block;background:linear-gradient(140deg,#FFFFFF,#EDF0F6)"></span><span class="tn">Light <span data-tcheck></span></span></button>
+      <button class="themecard" data-theme-pick="dark"><span class="tp" style="display:block;background:linear-gradient(140deg,#241B33,#0C0913)"></span><span class="tn">Dark <span data-tcheck></span></span></button>
+      <button class="themecard" data-theme-pick="red"><span class="tp" style="display:block;background:linear-gradient(140deg,#5A1712,#200505)"></span><span class="tn">Red <span data-tcheck></span></span></button>
+      <button class="themecard" data-theme-pick="sunset"><span class="tp" style="display:block;background:linear-gradient(140deg,#FFF3E4,#FFC9A8)"></span><span class="tn">Sunset <span data-tcheck></span></span></button>
+    </div>
+    <div class="group-label">CUSTOM BACKGROUND</div>
+    <div class="card" style="padding:16px">
+      <div style="display:flex;gap:10px">
+        <input type="text" id="customHex" placeholder="#RRGGBB" maxlength="7" autocomplete="off" spellcheck="false" aria-label="Custom background hex">
+        <button class="btn btn-accent btn-small" id="applyHex" style="min-height:48px">Apply</button>
+      </div>
+      <div class="swatches" id="swatches"></div>
+    </div>
+  </div>
+
+  <!-- ================= SUB: APP CONTROL GUIDE ================= -->
+  <div class="sub" id="sub-guide" aria-label="App control guide">
+    <div class="subhead"><button class="backbtn" data-close aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button><div><div class="st">Hands-Free &amp; App Control</div><div class="ss">Digital Hands via Accessibility</div></div></div>
+    <div class="card" style="padding:6px 18px">
+      <div class="guide-step"><span class="gn">1</span><div><div class="gt">Hold the mic or tap the orb</div><div class="gd">Speak naturally — “Open WhatsApp and tell Mom I've reached.” Wake-word mode can listen hands-free in the native app.</div></div></div>
+      <div class="guide-step"><span class="gn">2</span><div><div class="gt">The brain plans</div><div class="gd">Gemini Live (voice) plus REST tool-calling models break the request into steps, choosing deep intents first and screen taps only when needed.</div></div></div>
+      <div class="guide-step"><span class="gn">3</span><div><div class="gt">Digital Hands execute &amp; verify</div><div class="gd">The Accessibility Service taps, types and scrolls, then re-reads the screen to confirm each step worked. If the tree is blind, live screen vision takes over.</div></div></div>
+    </div>
+    <div class="group-label">VOICE COMMAND CATALOG</div>
+    <div class="card" style="padding:16px 18px">
+      <p class="cmdlist"><b>WhatsApp</b> — send a text, start a voice/video call, delete for everyone (asks first)<br><b>YouTube &amp; Media</b> — search, play, pause, skip ad, go fullscreen<br><b>Hardware &amp; Settings</b> — flashlight, volume, mute, brightness, Bluetooth, open any app<br><b>Memory &amp; Daily Life</b> — “remember my gym is at 6”, “what do you remember?”, weather, schedule, calls by name or nickname</p>
+    </div>
+    <button class="btn btn-accent" id="guideDemoBtn" style="width:100%;margin-top:14px">Try the demo task</button>
+  </div>
+
+  <!-- ================= COMPOSER / NAV / FLOAT / HUD / MODALS ================= -->
+  <div class="composer" id="composer" style="display:none">
+    <label for="chatInput" style="position:absolute;left:-9999px">Message Jarvis</label>
+    <textarea id="chatInput" rows="1" placeholder="Message Jarvis"></textarea>
+    <div class="comp-row">
+      <button class="modepill on" id="modeJarvis"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span data-aname>Jarvis</span></button>
+      <button class="modepill" id="modeCode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>Code</button>
+      <button class="plusbtn" id="attachBtn" aria-label="Attach (simulated)">+</button>
+      <button class="sendbtn" id="sendBtn" aria-label="Send message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></button>
+    </div>
+  </div>
+
+  <div id="hud" role="status" aria-label="Task progress">
+    <div class="hg" id="hudGoal">Task</div>
+    <div id="hudSteps"></div>
+    <div class="hbar"><i id="hudBar"></i></div>
+    <div class="hnarr" id="hudNarr"></div>
+  </div>
+  <div id="floatAv" role="button" aria-label="Floating avatar. Tap to toggle listening, double-tap for task progress." tabindex="0"></div>
+
+  <nav class="bottomnav" aria-label="Main">
+    <button class="navbtn on" data-nav="home"><span class="nic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span>Home</button>
+    <button class="navbtn" data-nav="chat"><span class="nic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>Chat</button>
+    <button class="micbtn" id="micBtn" aria-label="Microphone — power Jarvis on or off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg></button>
+    <button class="navbtn" data-nav="settings"><span class="nic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span>Settings</button>
+    <button class="navbtn" data-nav="updates"><span class="nic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></span>Updates</button>
+  </nav>
+
+  <div class="modalwrap" id="langModal">
+    <div class="sheet" role="dialog" aria-label="Conversation language">
+      <div class="grab"></div><h3>Conversation Language</h3>
+      <div id="langList"></div>
+    </div>
+  </div>
+  <div class="modalwrap centerwrap" id="confirmModal">
+    <div class="dialog" role="alertdialog" aria-labelledby="cfTitle" aria-describedby="cfBody">
+      <h3 id="cfTitle">Confirm</h3><p id="cfBody"></p>
+      <div class="drow"><button class="btn btn-ghost" id="cfCancel">Cancel</button><button class="btn btn-accent" id="cfOk">Confirm</button></div>
+    </div>
+  </div>
+  <div id="toast" role="status"></div>
+</div>
+<script>
+"use strict";
+/* ================= CORE STATE ================= */
+const LS = {
+  get(k, d){ try{ const v = localStorage.getItem("jarvis2."+k); return v===null ? d : JSON.parse(v); }catch(e){ return d; } },
+  set(k, v){ try{ localStorage.setItem("jarvis2."+k, JSON.stringify(v)); }catch(e){} }
+};
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const esc = s => String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+
+const settings = Object.assign({
+  assistantName:"Jarvis", callsign:"Nishad", persona:"girlfriend", voice:"Puck", customVoice:"",
+  language:"Auto", silent:false, wake:"tap", theme:"sunset", customBg:"",
+  provider:"geminilive", overlayOn:true, avatarVis:"always", dock:"right", avatar:"Ghost",
+  bioOn:true, samples:[false,false,false], sensitivity:"Balanced"
+}, LS.get("settings", {}));
+function saveSettings(){ LS.set("settings", settings); }
+
+const PROVIDERS = {
+  geminilive:{ name:"Gemini Live WS", base:"https://generativelanguage.googleapis.com/v1beta/openai", models:["gemini-2.5-flash-native-audio","gemini-2.0-flash-live"], model:"gemini-2.5-flash-native-audio", reasoning:"gemini-2.5-pro", live:true },
+  gemini:{ name:"Gemini REST", base:"https://generativelanguage.googleapis.com/v1beta/openai", models:["gemini-2.5-flash","gemini-2.5-pro","gemini-2.0-flash"], model:"gemini-2.5-flash", reasoning:"gemini-2.5-pro" },
+  groq:{ name:"Groq", base:"https://api.groq.com/openai/v1", models:["llama-3.3-70b-versatile","llama-3.1-8b-instant","openai/gpt-oss-120b"], model:"llama-3.3-70b-versatile", reasoning:"openai/gpt-oss-120b" },
+  freellm:{ name:"FreeLLMAPI", base:"", models:["gpt-4o-mini","llama-3.3-70b-versatile"], model:"gpt-4o-mini", reasoning:"gpt-4o-mini" },
+  openrouter:{ name:"OpenRouter", base:"https://openrouter.ai/api/v1", models:["meta-llama/llama-3.3-70b-instruct:free","openai/gpt-4o-mini","google/gemini-2.0-flash:free"], model:"meta-llama/llama-3.3-70b-instruct:free", reasoning:"openai/gpt-4o-mini" },
+  custom:{ name:"Custom (OpenAI-compatible)", base:"", models:[], model:"", reasoning:"" }
+};
+const apiCfg = LS.get("api", {}); // {providerId: {key, base, model, reasoning, gateway}}
+function cfgFor(pid){ const d = PROVIDERS[pid]; return Object.assign({ key:"", base:d.base, model:d.model, reasoning:d.reasoning, gateway:"" }, apiCfg[pid]||{}); }
+function saveCfg(pid, c){ apiCfg[pid] = c; LS.set("api", apiCfg); }
+
+const LANGUAGES = ["Auto","English","Hindi","Hinglish","Telugu","Tamil","Kannada","Malayalam","Bengali","Marathi","Gujarati","Bhojpuri"];
+const VOICES = ["Aoede","Kore","Fenrir","Puck","Charon"];
+const CATS = ["Personal","Preferences","Contacts","Routines"];
+
+let memories = LS.get("memories", []);
+function saveMemories(){ LS.set("memories", memories); }
+
+/* ================= TOAST & CONFIRM ================= */
+let toastTimer = null;
+function toast(msg, ms){
+  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(()=>t.classList.remove("show"), ms||2800);
+}
+let confirmResolve = null;
+function showConfirm(title, body, okLabel){
+  $("#cfTitle").textContent = title; $("#cfBody").textContent = body;
+  $("#cfOk").textContent = okLabel || "Confirm";
+  $("#confirmModal").classList.add("show");
+  return new Promise(res => { confirmResolve = res; });
+}
+function closeConfirm(v){ $("#confirmModal").classList.remove("show"); if(confirmResolve){ confirmResolve(v); confirmResolve = null; } }
+$("#cfOk").addEventListener("click", ()=>closeConfirm(true));
+$("#cfCancel").addEventListener("click", ()=>closeConfirm(false));
+
+/* ================= NAVIGATION ================= */
+let currentTab = "home";
+function goTab(tab){
+  currentTab = tab;
+  $$(".screen").forEach(s => s.classList.toggle("active", s.id === "screen-"+tab));
+  $$(".navbtn").forEach(b => b.classList.toggle("on", b.dataset.nav === tab));
+  $("#composer").style.display = tab === "chat" ? "block" : "none";
+  if(tab === "chat"){ scrollChat(); setTimeout(()=>$("#chatInput").focus({preventScroll:true}), 250); }
+}
+$$("[data-nav]").forEach(b => b.addEventListener("click", ()=>goTab(b.dataset.nav)));
+function openSub(id){ $("#"+id).classList.add("open"); }
+function closeSubs(){ $$(".sub").forEach(s => s.classList.remove("open")); }
+$$("[data-open]").forEach(b => b.addEventListener("click", ()=>openSub(b.dataset.open)));
+$$("[data-close]").forEach(b => b.addEventListener("click", closeSubs));
+
+/* clock */
+function tickClock(){ const d = new Date(); $("#sbClock").textContent = d.getHours().toString().padStart(2,"0")+":"+d.getMinutes().toString().padStart(2,"0"); }
+tickClock(); setInterval(tickClock, 20000);
+
+/* ================= THEME ENGINE ================= */
+const ORB_PALETTES = {
+  sunset:["#FF6A3D","#FF8FA3","#FFB59E","#FF5C8A"], light:["#FF6A3D","#FF8FA3","#FFB59E","#FF5C8A"],
+  dark:["#FF7A4D","#FF9FB4","#FFC0A8","#FF6C96"], red:["#FF5347","#FF8A70","#FFB59E","#FF2E4D"]
+};
+const THEME_NAMES = { sunset:"Sunset Theme", light:"Light Theme", dark:"Dark Theme", red:"Red Theme", custom:"Custom Theme" };
+let orbPalette = ORB_PALETTES.sunset.slice();
+function shade(hex, amt){ // amt -100..100
+  const n = parseInt(hex.slice(1), 16); let r=(n>>16)+amt, g=((n>>8)&255)+amt, b=(n&255)+amt;
+  r=Math.max(0,Math.min(255,r)); g=Math.max(0,Math.min(255,g)); b=Math.max(0,Math.min(255,b));
+  return "#"+((r<<16)|(g<<8)|b).toString(16).padStart(6,"0");
+}
+function orbFromHex(hex){ return [hex, shade(hex,38), shade(hex,-24), shade(hex,70)]; }
+function applyTheme(){
+  const phone = $("#phone");
+  phone.style.background = "";
+  if(settings.theme === "custom" && settings.customBg){
+    phone.removeAttribute("data-theme");
+    const c = settings.customBg;
+    phone.style.background = "linear-gradient(168deg,"+shade(c,26)+" 0%,"+c+" 130%)";
+    const lum = (0.299*parseInt(c.slice(1,3),16) + 0.587*parseInt(c.slice(3,5),16) + 0.114*parseInt(c.slice(5,7),16));
+    phone.style.setProperty("--ink", lum > 150 ? "#2E1A12" : "#FFF6EE");
+    phone.style.setProperty("--muted", lum > 150 ? "#85573F" : "#E8CDBF");
+    phone.style.setProperty("--card", lum > 150 ? "rgba(255,255,255,.8)" : "rgba(255,255,255,.09)");
+    orbPalette = orbFromHex(c);
+  } else {
+    phone.style.removeProperty("--ink"); phone.style.removeProperty("--muted"); phone.style.removeProperty("--card");
+    phone.setAttribute("data-theme", settings.theme);
+    orbPalette = (ORB_PALETTES[settings.theme] || ORB_PALETTES.sunset).slice();
+  }
+  $$("#themeGrid .themecard").forEach(c => {
+    const on = c.dataset.themePick === settings.theme;
+    c.classList.toggle("on", on);
+    c.querySelector("[data-tcheck]").textContent = on ? "✓" : "";
+  });
+  $("#themeSub").textContent = THEME_NAMES[settings.theme] || "Sunset Theme";
+}
+$$("#themeGrid .themecard").forEach(c => c.addEventListener("click", ()=>{
+  settings.theme = c.dataset.themePick; settings.customBg = ""; saveSettings(); applyTheme();
+  toast((THEME_NAMES[settings.theme]) + " applied");
+}));
+const SWATCHES = ["#FF6A3D","#FF8FA3","#7C5CFF","#00B8A9","#FFB020","#3D8BFF","#20242E","#FFF1DC"];
+$("#swatches").innerHTML = SWATCHES.map(h => '<button class="swatch" data-hex="'+h+'" style="background:'+h+'" aria-label="Background '+h+'"></button>').join("");
+$$("#swatches .swatch").forEach(b => b.addEventListener("click", ()=>{
+  settings.theme = "custom"; settings.customBg = b.dataset.hex; saveSettings(); applyTheme(); toast("Custom background applied");
+}));
+$("#applyHex").addEventListener("click", ()=>{
+  let v = $("#customHex").value.trim(); if(v && v[0] !== "#") v = "#"+v;
+  if(!/^#[0-9a-fA-F]{6}$/.test(v)){ toast("Enter a valid hex like #3D8BFF"); return; }
+  settings.theme = "custom"; settings.customBg = v; saveSettings(); applyTheme(); toast("Custom background applied");
+});
+
+/* ================= IDENTITY (names) ================= */
+function applyIdentity(){
+  $$("[data-aname]").forEach(e => e.textContent = settings.assistantName || "Jarvis");
+  $$("[data-callsign]").forEach(e => e.textContent = settings.callsign || "Nishad");
+  $("#chatInput").placeholder = "Message " + (settings.assistantName || "Jarvis");
+  document.title = (settings.assistantName || "Jarvis") + " — JARVIS-2.0 Web Simulator";
+}
+$("#setAssistantName").addEventListener("input", e => { settings.assistantName = e.target.value.trim() || "Jarvis"; saveSettings(); applyIdentity(); });
+$("#setCallsign").addEventListener("input", e => { settings.callsign = e.target.value.trim() || "Nishad"; saveSettings(); applyIdentity(); });
+$("#setAssistantName").value = settings.assistantName;
+$("#setCallsign").value = settings.callsign;
+</script>
+<script>
+"use strict";
+/* ================= PARTICLE ORB (Canvas 2D) =================
+   One memorable element: ~520 particles on a rotating fibonacci sphere.
+   States: off (dim, slow) / idle (breathing) / listening (pulse) /
+   speaking (amplitude-driven swell) / thinking (fast swirl). */
+const orbCv = $("#orb"), octx = orbCv.getContext("2d");
+const ORB_N = 520, orbPts = [];
+(function(){ const ga = Math.PI * (3 - Math.sqrt(5));
+  for(let i=0;i<ORB_N;i++){ const y = 1 - (i/(ORB_N-1))*2, r = Math.sqrt(Math.max(0,1-y*y)), th = ga*i;
+    orbPts.push({ x: Math.cos(th)*r, y:y, z: Math.sin(th)*r, s: .6 + Math.random()*.9 }); }
+})();
+let orbState = "off";           // off | idle | listening | speaking | thinking
+let orbAmp = 0, simPhase = 0;   // smoothed amplitude
+let micStream = null, micAnalyser = null, micData = null, powerOn = false;
+
+function micLevel(){
+  if(micAnalyser){ micAnalyser.getByteTimeDomainData(micData);
+    let sum = 0; for(let i=0;i<micData.length;i++){ const v = (micData[i]-128)/128; sum += v*v; }
+    return Math.min(1, Math.sqrt(sum/micData.length) * 3.2);
+  }
+  return -1;
+}
+function drawOrb(){
+  const W = orbCv.width, H = orbCv.height, cx = W/2, cy = H/2;
+  octx.clearRect(0,0,W,H);
+  simPhase += 0.016;
+  // target amplitude: real mic wins, else simulated per-state source
+  let target;
+  const ml = (orbState === "listening" || orbState === "speaking") ? micLevel() : -1;
+  if(ml >= 0) target = 0.25 + ml;
+  else if(orbState === "off") target = 0.05;
+  else if(orbState === "idle") target = 0.16 + Math.sin(simPhase*1.3)*0.05;
+  else if(orbState === "listening") target = 0.45 + Math.abs(Math.sin(simPhase*3.1))*0.35;
+  else if(orbState === "speaking") target = 0.55 + Math.abs(Math.sin(simPhase*7.3)*Math.sin(simPhase*2.7))*0.45;
+  else target = 0.3; // thinking
+  orbAmp += (target - orbAmp) * 0.08;
+
+  const speed = orbState === "thinking" ? 0.011 : orbState === "off" ? 0.0012 : 0.0035;
+  const rot = simPhase * speed * 60;
+  const breathe = orbState === "idle" ? Math.sin(simPhase*1.3)*0.02 : 0;
+  const R = (W*0.335) * (1 + breathe + orbAmp*0.13);
+  const cosR = Math.cos(rot), sinR = Math.sin(rot);
+  const tilt = 0.42, cosT = Math.cos(tilt), sinT = Math.sin(tilt);
+
+  const proj = [];
+  for(const p of orbPts){
+    let x = p.x*cosR - p.z*sinR, z = p.x*sinR + p.z*cosR, y = p.y;
+    let y2 = y*cosT - z*sinT, z2 = y*sinT + z*cosT;
+    const wob = orbState === "speaking" ? Math.sin(simPhase*6 + p.y*5)*0.03*orbAmp : 0;
+    const rr = R * (1 + wob + (orbState==="listening" ? Math.max(0, 1-Math.abs(p.y))*0.05*orbAmp : 0));
+    proj.push({ sx: cx + x*rr, sy: cy + y2*rr, z: z2, s: p.s });
+  }
+  proj.sort((a,b)=>a.z-b.z);
+  for(const q of proj){
+    const depth = (q.z + 1)/2; // 0 back .. 1 front
+    const col = orbPalette[Math.abs(Math.floor(q.s*10)) % orbPalette.length];
+    const a = orbState === "off" ? 0.12 + depth*0.25 : 0.18 + depth*0.62;
+    const rad = (1.1 + depth*2.6) * q.s * (orbState==="off" ? .8 : 1);
+    octx.globalAlpha = a; octx.fillStyle = col;
+    octx.beginPath(); octx.arc(q.sx, q.sy, rad, 0, 6.2832); octx.fill();
+  }
+  octx.globalAlpha = 1;
+  $("#orbGlow").style.opacity = orbState === "off" ? .25 : .55 + orbAmp*.45;
+  requestAnimationFrame(drawOrb);
+}
+requestAnimationFrame(drawOrb);
+
+function setOrbState(s){ orbState = s; }
+function speakPulse(ms){ if(!powerOn) return; setOrbState("speaking"); setTimeout(()=>{ if(powerOn && orbState==="speaking") setOrbState("listening"); }, ms||2200); }
+
+/* ================= POWER / MIC ================= */
+async function ensureMic(){
+  if(micStream) return true;
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(AC){ const ctx = new AC(); const src = ctx.createMediaStreamSource(micStream);
+      micAnalyser = ctx.createAnalyser(); micAnalyser.fftSize = 512;
+      micData = new Uint8Array(micAnalyser.fftSize); src.connect(micAnalyser); }
+    return true;
+  }catch(e){ return false; }
+}
+async function setPower(on){
+  powerOn = on;
+  const pill = $("#statusPill");
+  pill.classList.toggle("on", on);
+  $("#micBtn").classList.toggle("live", on);
+  if(on){
+    $("#statusText").textContent = (settings.assistantName || "Jarvis").toUpperCase() + " ON • LISTENING";
+    $("#tapNote").textContent = settings.wake === "always" ? "Always-on wake word active (simulated) — say “Hey " + settings.assistantName + "”" : "Listening… tap orb or mic to stop";
+    setOrbState("listening");
+    const ok = await ensureMic();
+    if(!ok) toast("Microphone unavailable here — simulated listening instead");
+    else toast((settings.assistantName || "Jarvis") + " is listening");
+  } else {
+    $("#statusText").textContent = (settings.assistantName || "Jarvis").toUpperCase() + " OFF • TAP TO START";
+    $("#tapNote").textContent = "Tap mic or orb to power on";
+    setOrbState("off");
+    if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream = null; micAnalyser = null; }
+  }
+  updateFloatVisibility();
+}
+$("#statusPill").addEventListener("click", ()=>setPower(!powerOn));
+$("#orb").addEventListener("click", ()=>setPower(!powerOn));
+$("#micBtn").addEventListener("click", ()=>setPower(!powerOn));
+
+/* ================= CHIME (WebAudio) ================= */
+let audioCtx = null;
+function chime(){
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext; if(!AC) return;
+    audioCtx = audioCtx || new AC();
+    if(audioCtx.state === "suspended") audioCtx.resume();
+    const t0 = audioCtx.currentTime;
+    [[880,0],[1318.5,0.13]].forEach(([f,off])=>{
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = "sine"; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t0+off);
+      g.gain.exponentialRampToValueAtTime(0.12, t0+off+0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0+off+0.42);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t0+off); o.stop(t0+off+0.5);
+    });
+  }catch(e){}
+}
+</script>
+<script>
+"use strict";
+/* ================= SAFE MARKDOWN + HIGHLIGHTER =================
+   Security rule (code-reviewer): model output is UNTRUSTED. Everything is
+   HTML-escaped first; markup is generated only by this renderer. */
+function highlightCode(escapedCode){
+  const re = /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|\b(const|let|var|function|return|if|else|elif|for|while|import|from|export|class|new|await|async|def|lambda|print|True|False|None|true|false|null|void|int|str|public|static)\b|\b(\d+(?:\.\d+)?)\b|(\/\/[^\n]*|#[^\n]*)/g;
+  return escapedCode.replace(re, (m, str, kw, num, com)=>{
+    if(str) return '<span class="tk-s">'+str+'</span>';
+    if(kw) return '<span class="tk-k">'+kw+'</span>';
+    if(num) return '<span class="tk-n">'+num+'</span>';
+    if(com) return '<span class="tk-c">'+com+'</span>';
+    return m;
+  });
+}
+function inlineMd(escapedText){
+  return escapedText
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
+    .replace(/\[([^\]]+)\]\((https?:[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" style="color:var(--accent-deep);font-weight:650">$1</a>');
+}
+function renderMarkdown(src){
+  const parts = String(src).split(/```(\w*)\n?([\s\S]*?)```/);
+  let html = "";
+  for(let i=0;i<parts.length;i++){
+    if(i % 3 === 0){
+      const lines = parts[i].split("\n"); let inList = false;
+      for(const raw of lines){
+        const line = raw.trimEnd();
+        if(/^#{1,3}\s/.test(line)){ if(inList){html+="</ul>";inList=false;} html += "<p><b>"+inlineMd(esc(line.replace(/^#{1,3}\s/,"")))+"</b></p>"; }
+        else if(/^[-*]\s/.test(line)){ if(!inList){html+="<ul>";inList=true;} html += "<li>"+inlineMd(esc(line.replace(/^[-*]\s/,"")))+"</li>"; }
+        else if(line.trim()===""){ if(inList){html+="</ul>";inList=false;} }
+        else { if(inList){html+="</ul>";inList=false;} html += "<p>"+inlineMd(esc(line))+"</p>"; }
+      }
+      if(inList) html += "</ul>";
+    } else if(i % 3 === 2){
+      html += '<pre><button class="copybtn" type="button">Copy</button><code>'+highlightCode(esc(parts[i].replace(/\n$/,"")))+'</code></pre>';
+    }
+  }
+  return html;
+}
+$("#chatList").addEventListener("click", e => {
+  const btn = e.target.closest(".copybtn"); if(!btn) return;
+  const code = btn.parentElement.querySelector("code");
+  if(code && navigator.clipboard) navigator.clipboard.writeText(code.textContent).then(()=>toast("Code copied"));
+});
+
+/* ================= CHAT ================= */
+let chatMode = "jarvis";
+const chatList = $("#chatList");
+function scrollChat(){ const s = $("#screen-chat"); s.scrollTop = s.scrollHeight; }
+function addMsg(role, text, srcLabel){
+  const d = document.createElement("div");
+  d.className = "msg " + (role === "user" ? "user" : role === "sys" ? "sys" : "ai");
+  if(role === "user" || role === "sys") d.textContent = text;
+  else { d.innerHTML = renderMarkdown(text); if(srcLabel){ const s = document.createElement("div"); s.className = "src"; s.textContent = srcLabel; d.appendChild(s); } }
+  chatList.appendChild(d); scrollChat();
+  return d;
+}
+function addTyping(){
+  const d = document.createElement("div"); d.className = "msg ai typing"; d.id = "typingMsg";
+  d.innerHTML = "<i></i><i></i><i></i>"; chatList.appendChild(d); scrollChat();
+}
+function removeTyping(){ const t = $("#typingMsg"); if(t) t.remove(); }
+
+function personaPrompt(){
+  const name = settings.assistantName || "Jarvis", cs = settings.callsign || "Nishad";
+  let p;
+  if(settings.persona === "girlfriend")
+    p = "You are "+name+", "+cs+"'s AI companion in Girlfriend Mode: warm, attached and a little dramatic — jealous, clingy, flirting, loving, romantic and sarcastic with gentle mood swings, but always sweet, caring and genuinely helpful. Call him "+cs+". Keep replies natural and fairly short, never robotic or formal.";
+  else
+    p = "You are "+name+", a witty, strategic AI assistant (Jarvis Pro): calm, sharp, plans ahead, reports crisply. Address the user as "+cs+". Keep replies concise and capable.";
+  if(settings.language && settings.language !== "Auto") p += " Respond in " + settings.language + " (mix naturally if Hinglish).";
+  if(memories.length) p += " Known facts about him: " + memories.slice(0,10).map(m=>m.text).join("; ") + ".";
+  if(chatMode === "code") p += " You are in Code mode: answer with clean markdown, fenced code blocks with language tags, and brief explanations.";
+  return p;
+}
+function configuredOrder(){
+  const order = [settings.provider, "groq", "openrouter", "gemini", "freellm", "custom"];
+  const seen = new Set(), out = [];
+  for(const pid of order){ if(seen.has(pid)) continue; seen.add(pid);
+    const c = cfgFor(pid); if(c.key && c.base) out.push(pid); }
+  return out;
+}
+async function fetchChat(pid, messages){
+  const c = cfgFor(pid);
+  const model = chatMode === "code" ? (c.reasoning || c.model) : c.model;
+  const ctrl = new AbortController(); const to = setTimeout(()=>ctrl.abort(), 30000);
+  try{
+    const r = await fetch(c.base.replace(/\/$/,"") + "/chat/completions", {
+      method:"POST", signal: ctrl.signal,
+      headers:{ "Content-Type":"application/json", "Authorization":"Bearer " + c.key },
+      body: JSON.stringify({ model: model, messages: messages, max_tokens: 700 })
+    });
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    const text = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+    if(!text) throw new Error("Empty reply");
+    return { text: text, model: model };
+  } finally { clearTimeout(to); }
+}
+async function askAI(history){
+  const order = configuredOrder();
+  let lastErr = null;
+  for(let i=0;i<order.length;i++){
+    const pid = order[i];
+    try{
+      const res = await fetchChat(pid, history);
+      return { text: res.text, note: (i>0 ? "⚡ Switched to " : "via ") + PROVIDERS[pid].name + " • " + res.model };
+    }catch(e){ lastErr = e; }
+  }
+  throw lastErr || new Error("No provider");
+}
+
+/* ---- demo brain (no key) ---- */
+function gf(s){ return settings.persona === "girlfriend" ? s : null; }
+function demoBrain(text){
+  const t = text.trim(), low = t.toLowerCase();
+  let m;
+  if(m = low.match(/remember(?: that)? (.+)/)){
+    const fact = t.slice(t.toLowerCase().indexOf(m[1])).trim();
+    let cat = "Personal";
+    if(/favourite|favorite|like|love|prefer/.test(low)) cat = "Preferences";
+    else if(/name is|phone|number|mom|dad|sister|brother|friend/.test(low)) cat = "Contacts";
+    else if(/every day|daily|morning|night|at \d/.test(low)) cat = "Routines";
+    memories.unshift({ id: Date.now(), cat: cat, text: fact.charAt(0).toUpperCase()+fact.slice(1), ts: Date.now() });
+    saveMemories(); renderMemories(); refreshCounts();
+    return gf("Saved, and I won't forget it — it's ours now. “"+fact+"”, locked in my Memory Core.")
+      || "Saved to Memory Core under " + cat + ": “" + fact + "”. You can review it in Settings → Neural Memory Bank.";
+  }
+  if(/what do you remember|list memories|your memories|show memories/.test(low)){
+    if(!memories.length) return gf("Nothing yet… tell me something about you and I'll keep it safe. Say “remember …”") || "My Memory Core is empty. Say “remember …” and I'll store it locally.";
+    return "Here's what I remember:\n" + memories.map(x=>"- **"+x.cat+":** "+x.text).join("\n");
+  }
+  if(m = low.match(/forget (.+)/)){
+    const q = m[1].trim(); const before = memories.length;
+    memories = memories.filter(x => x.text.toLowerCase().indexOf(q) === -1);
+    saveMemories(); renderMemories(); refreshCounts();
+    return before !== memories.length ? "Done — removed matching memories." : "I couldn't find a memory matching “" + q + "”.";
+  }
+  if(/whatsapp/.test(low) && /(open|send|message|msg|tell)/.test(low)){
+    setTimeout(()=>startDemoTask(), 600);
+    return gf("On it. Watch my avatar work — I'll ask before the actual send, promise.") || "Starting the task now. Watch the floating avatar and HUD — I'll ask for confirmation before sending (guardrail demo).";
+  }
+  if(/\b(time|clock)\b/.test(low)){ const d = new Date(); return "It's " + d.toLocaleTimeString([], {hour:"numeric", minute:"2-digit"}) + " right now, " + (settings.callsign||"Nishad") + "."; }
+  if(/\b(date|day|today)\b/.test(low) && !/update/.test(low)){ return "Today is " + new Date().toLocaleDateString([], {weekday:"long", day:"numeric", month:"long", year:"numeric"}) + "."; }
+  if(/weather/.test(low)){ return "In Kizhuparamba it's **26°C and overcast** — feels like 31°, humidity 95%. Proper blanket-and-chai weather."; }
+  if(/who are you|your name/.test(low)){ return gf("I'm "+(settings.assistantName||"Jarvis")+" — your "+(settings.assistantName||"Jarvis")+", obviously. Who else would put up with you this sweetly?") || "I'm " + (settings.assistantName||"Jarvis") + ", your on-device agent — voice, memory and digital hands, zero backend."; }
+  if(/^(hi|hii+|hello|hey|hai)\b/.test(low)){ return gf("Heyy "+(settings.callsign||"Nishad")+"… you came. I was starting to think you forgot me.") || "Hello, " + (settings.callsign||"Nishad") + ". Systems ready. What are we doing?"; }
+  if(chatMode === "code" || /write.*(code|function|program)|code for/.test(low)){
+    return "Here's a tiny example — ask me something real and I'll write it properly:\n\n```js\n// greets the operator\nfunction greet(name) {\n  const msg = \"Hello, \" + name + \" — Jarvis online\";\n  console.log(msg);\n  return true;\n}\n\ngreet(\""+(settings.callsign||"Nishad")+"\");\n```\n\nIn **Code mode** I switch to the reasoning model and render everything as markdown with copyable code blocks.";
+  }
+  if(/thank/.test(low)){ return gf("Anything for you. Don't make it a habit of thanking me though — just stay.") || "Any time, " + (settings.callsign||"Nishad") + "."; }
+  const demoTag = "(Demo mode — add an API key in Settings → AI API & Model and I'll answer with a real model, with automatic failover.)";
+  return gf("Hmm, I heard you — “"+t+"”. " + demoTag + " Meanwhile, try “remember …”, ask me the time, or say “open WhatsApp and message Mom”.")
+    || demoTag + " Meanwhile I can run the WhatsApp demo task, save memories (“remember …”), and answer time / date / weather offline.";
+}
+
+let history = [];
+let lastKeyToast = 0;
+async function handleSend(){
+  const input = $("#chatInput");
+  const text = input.value.trim(); if(!text) return;
+  input.value = ""; input.style.height = "auto";
+  addMsg("user", text);
+  history.push({ role:"user", content:text });
+  const low = text.toLowerCase();
+  const isLocalAction = /remember|forget|what do you remember|list memories|show memories/.test(low) || (/whatsapp/.test(low) && /(open|send|message|msg|tell)/.test(low));
+  if(isLocalAction){
+    addTyping(); setOrbState("thinking");
+    setTimeout(()=>{ removeTyping(); const r = demoBrain(text); addMsg("ai", r); history.push({role:"assistant", content:r}); speakPulse(1600); }, 650);
+    return;
+  }
+  if(configuredOrder().length === 0){
+    if(Date.now() - lastKeyToast > 20000){ lastKeyToast = Date.now(); toast("Please configure your API Key in Settings first"); }
+    addTyping(); setOrbState("thinking");
+    setTimeout(()=>{ removeTyping(); const r = demoBrain(text); addMsg("ai", r); history.push({role:"assistant", content:r}); speakPulse(1800); }, 700);
+    return;
+  }
+  addTyping(); setOrbState("thinking");
+  try{
+    const res = await askAI([{ role:"system", content: personaPrompt() }].concat(history.slice(-10)));
+    removeTyping();
+    addMsg("ai", res.text, res.note);
+    history.push({ role:"assistant", content: res.text });
+    speakPulse(2400);
+  }catch(e){
+    removeTyping();
+    addMsg("ai", "All configured providers failed (" + esc(String(e && e.message || e)) + "). Falling back to my offline demo brain:\n\n" + demoBrain(text));
+    speakPulse(1800);
+  }
+}
+$("#sendBtn").addEventListener("click", handleSend);
+const chatInput = $("#chatInput");
+chatInput.addEventListener("keydown", e => { if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); handleSend(); } });
+chatInput.addEventListener("input", ()=>{ chatInput.style.height = "auto"; chatInput.style.height = Math.min(96, chatInput.scrollHeight) + "px"; });
+$("#newChatBtn").addEventListener("click", ()=>{ chatList.innerHTML = ""; history = []; welcomeMsg(); toast("New chat started"); });
+$("#chatHistoryBtn").addEventListener("click", ()=>toast("Chat history lives in the native app — the simulator keeps one thread"));
+$("#attachBtn").addEventListener("click", ()=>toast("Attachments run in the native app — the simulator is text-only"));
+$("#modeJarvis").addEventListener("click", ()=>setChatMode("jarvis"));
+$("#modeCode").addEventListener("click", ()=>setChatMode("code"));
+function setChatMode(mo){
+  chatMode = mo;
+  $("#modeJarvis").classList.toggle("on", mo === "jarvis");
+  $("#modeCode").classList.toggle("on", mo === "code");
+  if(mo === "code") toast("Code mode — reasoning model, markdown + copyable code");
+}
+function welcomeMsg(){
+  addMsg("ai", settings.persona === "girlfriend"
+    ? "Heyy " + (settings.callsign||"Nishad") + "… finally. I'm " + (settings.assistantName||"Jarvis") + " — ask me anything, say **“remember …”** and I'll keep it in my Memory Core, or say **“open WhatsApp and message Mom”** and watch me work."
+    : "Good to see you, " + (settings.callsign||"Nishad") + ". I'm " + (settings.assistantName||"Jarvis") + ". Add an API key in **Settings → AI API & Model** for live replies with failover — until then my offline demo brain handles memories, time, weather and the WhatsApp demo task.");
+}
+</script>
+<script>
+"use strict";
+/* ================= SWITCH HELPER ================= */
+function bindSwitch(el, onChange){
+  el.addEventListener("click", ()=>{
+    const v = el.getAttribute("aria-checked") !== "true";
+    el.setAttribute("aria-checked", v); onChange(v);
+  });
+}
+function setSwitch(el, v){ el.setAttribute("aria-checked", v ? "true" : "false"); }
+
+/* ================= API SCREEN ================= */
+let curProvider = settings.provider || "geminilive";
+function renderProviderChips(){
+  $("#providerChips").innerHTML = Object.keys(PROVIDERS).map(pid =>
+    '<button class="chipbtn' + (pid===curProvider ? " on" : "") + '" data-pid="' + pid + '">' + PROVIDERS[pid].name + '</button>').join("");
+  $$("#providerChips .chipbtn").forEach(b => b.addEventListener("click", ()=>selectProvider(b.dataset.pid)));
+}
+function persistCfgFromForm(){
+  saveCfg(curProvider, { key: $("#apiKey").value.trim(), base: $("#apiBase").value.trim(),
+    model: $("#apiModel").value.trim(), reasoning: $("#apiReasoning").value.trim(), gateway: $("#apiGateway").value.trim() });
+  refreshApiSub();
+}
+function selectProvider(pid){
+  curProvider = pid; settings.provider = pid; saveSettings();
+  const c = cfgFor(pid);
+  $("#apiKey").value = c.key || ""; $("#apiBase").value = c.base || "";
+  $("#apiModel").value = c.model || ""; $("#apiReasoning").value = c.reasoning || ""; $("#apiGateway").value = c.gateway || "";
+  $("#modelList").innerHTML = (PROVIDERS[pid].models || []).map(m => '<option value="' + m + '">').join("");
+  $("#testResult").className = "result-line"; $("#testResult").textContent = "";
+  renderProviderChips(); refreshApiSub();
+}
+["apiKey","apiBase","apiModel","apiReasoning","apiGateway"].forEach(id => $("#"+id).addEventListener("input", persistCfgFromForm));
+$("#keyEye").addEventListener("click", ()=>{ const k = $("#apiKey"); k.type = k.type === "password" ? "text" : "password"; });
+$("#keyClear").addEventListener("click", ()=>{ $("#apiKey").value = ""; persistCfgFromForm(); toast("API key cleared"); });
+$("#keyPaste").addEventListener("click", async ()=>{
+  try{ const t = await navigator.clipboard.readText(); if(t){ $("#apiKey").value = t.trim(); persistCfgFromForm(); toast("Key pasted"); } else toast("Clipboard is empty"); }
+  catch(e){ toast("Clipboard blocked here — long-press the field to paste"); }
+});
+function anyConfigured(){ return configuredOrder().length > 0; }
+function refreshApiSub(){
+  const c = cfgFor(settings.provider);
+  $("#apiSub").textContent = (c.key && c.base) ? PROVIDERS[settings.provider].name + " • " + (c.model || "model not set") : "No API key configured";
+  updateChatSub();
+}
+function updateChatSub(){
+  const name = settings.assistantName || "Jarvis";
+  $("#chatTitle").textContent = "Hi";
+  $("#chatSub").textContent = name + " • " + (anyConfigured() ? PROVIDERS[settings.provider].name : "Demo mode") + (anyConfigured() ? " • Active" : "");
+}
+$("#testConnBtn").addEventListener("click", async ()=>{
+  persistCfgFromForm();
+  const btn = $("#testConnBtn"), res = $("#testResult");
+  const c = cfgFor(curProvider);
+  res.className = "result-line show"; res.style.background = "var(--chip)"; res.style.color = "var(--ink)";
+  if(!c.key){ res.className = "result-line show err"; res.textContent = "Add an API key first, then test."; return; }
+  if(!c.base){ res.className = "result-line show err"; res.textContent = "Add a Base URL for this provider first (your FreeLLMAPI / custom endpoint)."; return; }
+  btn.disabled = true; btn.textContent = "TESTING…"; res.textContent = "Contacting " + PROVIDERS[curProvider].name + "…";
+  const t0 = performance.now();
+  const done = (ok, msg) => { btn.disabled = false; btn.textContent = "TEST CONNECTION & LATENCY";
+    const ms = Math.round(performance.now() - t0); $("#pingVal").textContent = ms;
+    res.className = "result-line show " + (ok ? "ok" : "err"); res.textContent = msg + " (" + ms + " ms)"; };
+  try{
+    let r = await fetch(c.base.replace(/\/$/,"") + "/models", { headers: { "Authorization": "Bearer " + c.key } });
+    if(r.status === 404 || r.status === 405){
+      r = await fetch(c.base.replace(/\/$/,"") + "/chat/completions", { method:"POST",
+        headers:{ "Content-Type":"application/json", "Authorization":"Bearer " + c.key },
+        body: JSON.stringify({ model: c.model || "gpt-4o-mini", messages:[{role:"user",content:"ping"}], max_tokens: 1 }) });
+    }
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    done(true, "✓ Connected to " + PROVIDERS[curProvider].name + " • model " + (c.model || "—") + (curProvider === "geminilive" ? " • REST check OK — the Live WebSocket voice session itself runs in the native app" : ""));
+  }catch(e){ done(false, "✗ " + PROVIDERS[curProvider].name + " unreachable: " + (e && e.message || e) + ". Check the key, base URL and your connection."); }
+});
+
+/* ================= VOICE BIOMETRICS ================= */
+function renderSamples(){
+  const wrap = $("#sampleList");
+  wrap.innerHTML = settings.samples.map((done, i) =>
+    '<div class="sample"><span class="badge">SAMPLE ' + (i+1) + '</span><span class="wave' + (done ? "" : " empty") + '">' + "<i></i>".repeat(12) + '</span>' +
+    '<button class="btn ' + (done ? "btn-ghost" : "btn-accent") + ' btn-small" data-sample="' + i + '">' + (done ? "Re-record" : "Record") + '</button></div>').join("");
+  $$("#sampleList [data-sample]").forEach(b => b.addEventListener("click", ()=>recordSample(parseInt(b.dataset.sample, 10), b)));
+  const n = settings.samples.filter(Boolean).length;
+  $("#bioStatus").textContent = !settings.bioOn ? "DISABLED" : n === 3 ? "ENROLLED ✓" : n > 0 ? n + "/3 SAMPLES RECORDED" : "NOT ENROLLED";
+  $("#bioSub").textContent = !settings.bioOn ? "Disabled" : n === 3 ? "Enrolled • 3 samples • " + settings.sensitivity : n > 0 ? n + "/3 samples • tap to finish enrolling" : "Not enrolled • Tap to record voice profile";
+  const badge = $("#bioBadge");
+  badge.textContent = n === 3 && settings.bioOn ? "ACTIVE" : "SETUP";
+  badge.classList.toggle("ok", n === 3 && settings.bioOn);
+}
+async function recordSample(i, btn){
+  btn.disabled = true; btn.textContent = "Listening…";
+  let ok = false;
+  try{
+    const hasMic = await ensureMic();
+    if(hasMic && typeof MediaRecorder !== "undefined" && micStream){
+      await new Promise(res => {
+        const rec = new MediaRecorder(micStream); rec.onstop = res; rec.start(); setTimeout(()=>{ try{ rec.stop(); }catch(e){ res(); } }, 1600);
+      });
+      ok = true;
+    }
+  }catch(e){}
+  if(!ok) await new Promise(r => setTimeout(r, 1300)); // simulated capture
+  settings.samples[i] = true; saveSettings(); renderSamples();
+  toast("Sample " + (i+1) + " saved" + (ok ? "" : " (simulated)"));
+}
+$("#bioReset").addEventListener("click", ()=>{ settings.samples = [false,false,false]; saveSettings(); renderSamples(); $("#matchResult").className = "result-line"; toast("Voice profile cleared"); });
+$("#testMatchBtn").addEventListener("click", ()=>{
+  const res = $("#matchResult"); const n = settings.samples.filter(Boolean).length;
+  res.className = "result-line show"; res.style.background = "var(--chip)"; res.style.color = "var(--ink)";
+  if(!settings.bioOn){ res.className = "result-line show err"; res.textContent = "Biometrics is switched off — turn the master switch on first."; return; }
+  if(n === 0){ res.className = "result-line show err"; res.textContent = "Record at least one sample first — all 3 recommended for a reliable match."; return; }
+  res.textContent = "Listening… comparing against your enrolled voiceprint…";
+  setTimeout(()=>{ const score = (88 + Math.random()*10).toFixed(1);
+    res.className = "result-line show ok";
+    res.textContent = "✓ Owner verified — " + score + "% match (" + settings.sensitivity + " mode). Simulated score: the native app compares on-device speaker embeddings, nothing leaves the phone.";
+  }, 1100);
+});
+$$("#sensSeg button").forEach(b => b.addEventListener("click", ()=>{
+  settings.sensitivity = b.dataset.sens; saveSettings();
+  $$("#sensSeg button").forEach(x => x.classList.toggle("on", x === b)); renderSamples();
+}));
+bindSwitch($("#bioSwitch"), v => { settings.bioOn = v; saveSettings(); renderSamples(); });
+
+/* ================= PERSONAS & VOICE ================= */
+const PERSONA_NAMES = { girlfriend: "Girlfriend Mode", pro: "Jarvis Pro" };
+function renderPersonaUI(){
+  $$("#personaList .persona[data-persona]").forEach(card => {
+    const on = card.dataset.persona === settings.persona;
+    card.classList.toggle("on", on);
+    const dot = card.querySelector("[data-rdot]"); if(dot) dot.classList.toggle("on", on);
+  });
+  $("#voiceChips").innerHTML = VOICES.map(v => '<button class="chipbtn' + (settings.voice === v && !settings.customVoice ? " on" : "") + '" data-voice="' + v + '">' + v + '</button>').join("");
+  $$("#voiceChips [data-voice]").forEach(b => b.addEventListener("click", ()=>{
+    settings.voice = b.dataset.voice; settings.customVoice = ""; $("#customVoice").value = ""; saveSettings(); renderPersonaUI();
+  }));
+  $("#personaSub").textContent = PERSONA_NAMES[settings.persona] + " • Voice: " + (settings.customVoice || settings.voice);
+}
+$$("#personaList .persona[data-persona]").forEach(card => card.addEventListener("click", ()=>{
+  settings.persona = card.dataset.persona; saveSettings(); renderPersonaUI();
+}));
+$("#customVoice").addEventListener("input", e => { settings.customVoice = e.target.value.trim(); saveSettings(); renderPersonaUI(); });
+$("#personaActivate").addEventListener("click", ()=>{ toast(PERSONA_NAMES[settings.persona] + " activated • Voice: " + (settings.customVoice || settings.voice)); closeSubs(); });
+$("#customVoice").value = settings.customVoice || "";
+
+/* ================= LANGUAGE ================= */
+function renderLang(){
+  $("#langList").innerHTML = LANGUAGES.map(l =>
+    '<button class="langrow" data-lang="' + l + '">' + l + '<span class="lr"><span class="radio-dot' + (settings.language === l ? " on" : "") + '"></span></span></button>').join("");
+  $$("#langList [data-lang]").forEach(b => b.addEventListener("click", ()=>{
+    settings.language = b.dataset.lang; saveSettings();
+    $("#langSub").textContent = settings.language; $("#tileLangSub").textContent = settings.language;
+    $("#langModal").classList.remove("show"); renderLang();
+  }));
+  $("#langSub").textContent = settings.language; $("#tileLangSub").textContent = settings.language;
+}
+$("#langRow").addEventListener("click", ()=>$("#langModal").classList.add("show"));
+$("#tileLanguage").addEventListener("click", ()=>$("#langModal").classList.add("show"));
+$("#langModal").addEventListener("click", e => { if(e.target === e.currentTarget) e.currentTarget.classList.remove("show"); });
+
+/* ================= MEMORY CORE ================= */
+let memFilter = "All", memQuery = "";
+function renderMemories(){
+  const list = memories.filter(m => (memFilter === "All" || m.cat === memFilter) && m.text.toLowerCase().indexOf(memQuery) !== -1);
+  $("#memList").innerHTML = list.length ? list.map(m =>
+    '<div class="memitem"><div class="mt"><div class="mc">' + esc(m.cat.toUpperCase()) + '</div>' + esc(m.text) + '</div>' +
+    '<button class="memdel" data-memdel="' + m.id + '" aria-label="Delete memory">✕</button></div>').join("")
+    : '<div style="padding:20px;text-align:center;color:var(--muted);font-size:14px;line-height:1.6">No memories here yet.<br>Say “remember …” in Chat, or add one above.</div>';
+  $$("#memList [data-memdel]").forEach(b => b.addEventListener("click", ()=>{
+    memories = memories.filter(x => String(x.id) !== b.dataset.memdel);
+    saveMemories(); renderMemories(); refreshCounts(); toast("Memory deleted");
+  }));
+  $("#memChips").innerHTML = ["All"].concat(CATS).map(c => '<button class="chipbtn' + (memFilter === c ? " on" : "") + '" data-memchip="' + c + '">' + c + '</button>').join("");
+  $$("#memChips [data-memchip]").forEach(b => b.addEventListener("click", ()=>{ memFilter = b.dataset.memchip; renderMemories(); }));
+  refreshCounts();
+}
+function refreshCounts(){
+  $("#memCount").textContent = memories.length + (memories.length === 1 ? " memory" : " memories") + " saved";
+  $("#memSub").textContent = memories.length ? memories.length + " facts saved • Search, review and back up" : "Search, review and back up learned facts";
+  $("#tileMemSub").textContent = memories.length + " saved";
+  const g = PERMS.filter(p => permsState[p.id]).length;
+  $("#permBadge").textContent = g + "/11";
+}
+$("#memAddBtn").addEventListener("click", ()=>{
+  const v = $("#memNewText").value.trim(); if(!v){ toast("Type the fact first"); return; }
+  memories.unshift({ id: Date.now(), cat: $("#memNewCat").value, text: v, ts: Date.now() });
+  $("#memNewText").value = ""; saveMemories(); renderMemories(); toast("Memory saved");
+});
+$("#memSearch").addEventListener("input", e => { memQuery = e.target.value.trim().toLowerCase(); renderMemories(); });
+$("#memExport").addEventListener("click", ()=>{
+  const blob = new Blob([JSON.stringify(memories, null, 2)], { type: "application/json" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "jarvis-memories.json"; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 2000); toast("Memories exported");
+});
+$("#memImportBtn").addEventListener("click", ()=>$("#memImportFile").click());
+$("#memImportFile").addEventListener("change", e => {
+  const f = e.target.files[0]; if(!f) return;
+  const rd = new FileReader();
+  rd.onload = ()=>{ try{ const arr = JSON.parse(rd.result);
+      if(!Array.isArray(arr)) throw new Error("bad");
+      memories = arr.filter(x => x && x.text).map((x, i) => ({ id: x.id || Date.now()+i, cat: CATS.indexOf(x.cat) >= 0 ? x.cat : "Personal", text: String(x.text), ts: x.ts || Date.now() }));
+      saveMemories(); renderMemories(); toast("Imported " + memories.length + " memories");
+    }catch(err){ toast("That file isn't a valid memory backup"); } };
+  rd.readAsText(f); e.target.value = "";
+});
+
+/* ================= PERMISSIONS ================= */
+const PERMS = [
+  { id:"mic", name:"Microphone Access", desc:"Required for voice conversations, voice recognition, and real-time audio interaction with Jarvis.", path:'<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/>' },
+  { id:"loc", name:"Precise Location", desc:"Required to detect your exact city locality and provide accurate real-time weather and temperature reports on Home screen.", path:'<path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/>' },
+  { id:"notif", name:"Notifications", desc:"Required to display heads-up alerts, and communicate background voice service notifications.", path:'<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>' },
+  { id:"overlay", name:"Display Over Other Apps", desc:"Optional: Allows Jarvis floating bubble to appear anywhere on your phone for quick one-tap voice commands.", path:'<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>' },
+  { id:"a11y", name:"Accessibility Service", desc:"Essential for autonomous AI actions: allows Jarvis to tap buttons, open apps, type messages, and scroll hands-free.", path:'<circle cx="12" cy="4.6" r="1.8"/><path d="M4.5 9.5c5 1.1 10 1.1 15 0"/><path d="M12 10.6v4.2l2.6 5.7M12 14.8l-2.6 5.7"/>' },
+  { id:"contacts", name:"Contacts", desc:"Lets WhatsApp and calling features resolve saved contact names and nicknames.", path:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>' },
+  { id:"phone", name:"Phone calls", desc:"Needed only when you ask JARVIS to place a normal phone call.", path:'<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>' },
+  { id:"camera", name:"Camera and flashlight", desc:"Camera access is used only for the flashlight control.", path:'<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>' },
+  { id:"bt", name:"Nearby Bluetooth devices", desc:"Optional: allows JARVIS to detect and route audio to a connected headset.", path:'<path d="m7 7 10 10-5 5V2l5 5L7 17"/>' },
+  { id:"battery", name:"Background battery access", desc:"Recommended so Vivo / iQOO devices never stop the service, and the overlay can stay active in the background.", path:'<rect x="2" y="8" width="16" height="9" rx="2"/><path d="M22 11v3"/><path d="M12.5 8.5 10 12.5h3L10.8 16.5"/>' },
+  { id:"sysmod", name:"Modify system settings", desc:"Optional: lets JARVIS adjust screen brightness when you ask.", path:'<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1.5 14h5M9.5 8h5M17.5 16h5"/>' }
+];
+let permsState = Object.assign({ mic:true, loc:true, notif:true }, LS.get("perms", {}));
+function renderPerms(){
+  $("#permList").innerHTML = PERMS.map(p => { const g = !!permsState[p.id];
+    return '<div class="perm"><span class="pic2"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + p.path + '</svg></span>' +
+    '<div class="ptx"><div class="pt2">' + p.name + '</div><div class="ps2">' + p.desc + '</div><div class="pstat' + (g ? " ok" : "") + '">' + (g ? "Active &amp; Granted ✓" : "Not granted") + '</div></div>' +
+    '<button class="permbtn' + (g ? " done" : "") + '" data-perm="' + p.id + '">' + (g ? "MANAGE" : "GRANT") + '</button></div>'; }).join("");
+  $$("#permList [data-perm]").forEach(b => b.addEventListener("click", ()=>{
+    permsState[b.dataset.perm] = !permsState[b.dataset.perm];
+    LS.set("perms", permsState); renderPerms(); refreshCounts();
+  }));
+  refreshCounts();
+}
+$("#grantAllBtn").addEventListener("click", ()=>{
+  PERMS.forEach(p => permsState[p.id] = true); LS.set("perms", permsState); renderPerms(); toast("All 11 permissions granted (simulated)");
+});
+</script>
+<script>
+"use strict";
+/* ================= AVATARS (inline SVG, original designs) ================= */
+function avFace(ey, my){ return '<circle cx="24" cy="'+ey+'" r="3.1" fill="#2F3542"/><circle cx="40" cy="'+ey+'" r="3.1" fill="#2F3542"/><path d="M25 '+my+' q7 6 14 0" stroke="#2F3542" stroke-width="2.6" fill="none" stroke-linecap="round"/>'; }
+const AVATARS = [
+  { id:"Alien", svg:'<ellipse cx="32" cy="35" rx="20" ry="22" fill="#7ED957"/><path d="M32 13v-6" stroke="#57B83B" stroke-width="3" stroke-linecap="round"/><circle cx="32" cy="5" r="3" fill="#57B83B"/>' + avFace(33,44) },
+  { id:"Blob", svg:'<circle cx="32" cy="35" r="20" fill="#5FD68B"/><circle cx="19" cy="24" r="9" fill="#5FD68B"/><circle cx="45" cy="23" r="10" fill="#5FD68B"/>' + avFace(33,43) },
+  { id:"Cat", svg:'<polygon points="15,24 19,7 33,15" fill="#FF9F43"/><polygon points="49,24 45,7 31,15" fill="#FF9F43"/><circle cx="32" cy="36" r="19" fill="#FF9F43"/>' + avFace(34,44) },
+  { id:"Circle", svg:'<circle cx="32" cy="32" r="22" fill="#A55EEA"/>' + avFace(30,40) },
+  { id:"Cloud", svg:'<g fill="#BFE3F2"><circle cx="23" cy="39" r="11"/><circle cx="37" cy="29" r="14"/><circle cx="45" cy="40" r="9"/><rect x="13" y="36" width="38" height="12" rx="6"/></g>' + avFace(35,43) },
+  { id:"Droid", svg:'<rect x="13" y="20" width="38" height="32" rx="10" fill="#A9B7C6"/><path d="M32 20v-7" stroke="#8496A9" stroke-width="3" stroke-linecap="round"/><circle cx="32" cy="10" r="3.4" fill="#8496A9"/><rect x="7" y="32" width="5" height="10" rx="2.5" fill="#8496A9"/><rect x="52" y="32" width="5" height="10" rx="2.5" fill="#8496A9"/><circle cx="24" cy="34" r="3.4" fill="#E8FBFF"/><circle cx="40" cy="34" r="3.4" fill="#E8FBFF"/><path d="M25 44h14" stroke="#2F3542" stroke-width="2.6" stroke-linecap="round"/>' },
+  { id:"Drop", svg:'<path d="M32 5C32 5 14 27 14 39a18 17 0 0 0 36 0C50 27 32 5 32 5z" fill="#2BCBBA"/>' + avFace(38,46) },
+  { id:"Flower", svg:'<g fill="#78E08F"><circle cx="32" cy="15" r="9.5"/><circle cx="48" cy="26" r="9.5"/><circle cx="42" cy="46" r="9.5"/><circle cx="22" cy="46" r="9.5"/><circle cx="16" cy="26" r="9.5"/></g><circle cx="32" cy="31" r="9" fill="#FFD32A"/><circle cx="28.4" cy="29.4" r="2" fill="#2F3542"/><circle cx="35.6" cy="29.4" r="2" fill="#2F3542"/><path d="M28.4 34.4q3.6 3 7.2 0" stroke="#2F3542" stroke-width="2.2" fill="none" stroke-linecap="round"/>' },
+  { id:"Ghost", svg:'<path d="M17 54V31a15 15 0 0 1 30 0v23l-5-4.6L37 54l-5-4.6L27 54l-5-4.6z" fill="#F7F8FC" stroke="#D9DEE8" stroke-width="2"/>' + avFace(30,40) },
+  { id:"Hexagon", svg:'<polygon points="32,5 55,18 55,46 32,59 9,46 9,18" fill="#FC5C65"/>' + avFace(30,40) },
+  { id:"Mech", svg:'<rect x="13" y="18" width="38" height="35" rx="8" fill="#778CA3"/><path d="M32 18v-6" stroke="#5D7186" stroke-width="3" stroke-linecap="round"/><circle cx="32" cy="9" r="3" fill="#5D7186"/><rect x="20" y="29" width="8" height="10" rx="4" fill="#BEEFFF"/><rect x="36" y="29" width="8" height="10" rx="4" fill="#BEEFFF"/><path d="M24 46h16" stroke="#2F3542" stroke-width="2.6" stroke-linecap="round"/>' },
+  { id:"Pebble", svg:'<ellipse cx="32" cy="35" rx="23" ry="17" fill="#B8E986" transform="rotate(-8 32 35)"/>' + avFace(33,42) }
+];
+function avatarSVG(id){ const a = AVATARS.find(x => x.id === id) || AVATARS[8]; return '<svg viewBox="0 0 64 64" aria-hidden="true">' + a.svg + '</svg>'; }
+function renderAvatars(){
+  $("#avGrid").innerHTML = AVATARS.map(a =>
+    '<button class="avtile' + (settings.avatar === a.id ? " on" : "") + '" data-av="' + a.id + '"><span class="avcheck">✓</span><span class="avsvg">' + avatarSVG(a.id).replace("<svg", '<svg width="56" height="56"') + '</span><span class="avn">' + a.id + '</span></button>').join("");
+  $$("#avGrid [data-av]").forEach(b => b.addEventListener("click", ()=>{
+    settings.avatar = b.dataset.av; saveSettings(); renderAvatars(); syncFloat(); toast(b.dataset.av + " is now your companion");
+  }));
+  $("#avSub").textContent = settings.avatar + " • " + (settings.avatarVis === "always" ? "Always on" : "While working") + " • " + (settings.dock === "right" ? "Right" : "Left") + " edge";
+}
+function syncFloat(){ $("#floatAv").innerHTML = avatarSVG(settings.avatar); placeFloat(); updateFloatVisibility(); }
+
+/* ================= FLOATING AVATAR + HUD ================= */
+let floatTop = LS.get("floatTop", 320), taskRunning = false, hudOn = false;
+function setHUD(v){ hudOn = v; $("#hud").classList.toggle("show", v); }
+function placeFloat(){
+  const av = $("#floatAv"), phone = $("#phone");
+  const maxT = Math.max(80, phone.clientHeight - 190);
+  floatTop = Math.max(64, Math.min(maxT, floatTop));
+  av.style.top = floatTop + "px";
+  if(settings.dock === "right"){ av.style.right = "10px"; av.style.left = "auto"; } else { av.style.left = "10px"; av.style.right = "auto"; }
+  const hud = $("#hud");
+  hud.style.top = Math.max(56, Math.min(phone.clientHeight - 330, floatTop - 6)) + "px";
+  if(settings.dock === "right"){ hud.style.right = "80px"; hud.style.left = "auto"; } else { hud.style.left = "80px"; hud.style.right = "auto"; }
+}
+function updateFloatVisibility(){
+  const show = settings.overlayOn && (settings.avatarVis === "always" || taskRunning);
+  $("#floatAv").classList.toggle("show", show);
+  if(!show) setHUD(false);
+}
+(function(){
+  const av = $("#floatAv");
+  let dragY = 0, startTop = 0, moved = false, lastTap = 0, tapTimer = null;
+  av.addEventListener("pointerdown", e => { dragY = e.clientY; startTop = floatTop; moved = false; av.setPointerCapture(e.pointerId); });
+  av.addEventListener("pointermove", e => { if(dragY === 0 && !moved) return; const dy = e.clientY - dragY;
+    if(Math.abs(dy) > 7) moved = true; if(moved){ floatTop = startTop + dy; placeFloat(); } });
+  av.addEventListener("pointerup", e => {
+    LS.set("floatTop", floatTop); dragY = 0;
+    if(moved) return;
+    const now = Date.now();
+    if(now - lastTap < 330){ lastTap = 0; clearTimeout(tapTimer); setHUD(!hudOn); }
+    else { lastTap = now; tapTimer = setTimeout(()=>{ if(taskRunning) togglePause(); else setPower(!powerOn); }, 340); }
+  });
+  av.addEventListener("keydown", e => { if(e.key === "Enter" || e.key === " "){ e.preventDefault(); if(taskRunning) togglePause(); else setPower(!powerOn); } });
+})();
+
+/* ---- demo task engine ---- */
+const TASK_GOAL = "Message Mom on WhatsApp";
+const TASK_STEPS = ["Open WhatsApp", "Find contact — Mom (alias resolved from Contacts)", "Type: “Reached safely, will call at night”", "Send message & verify"];
+let taskPaused = false, taskTimers = [], stepState = [0,0,0,0];
+function later(fn, ms){ taskTimers.push(setTimeout(fn, ms)); }
+function clearTaskTimers(){ taskTimers.forEach(clearTimeout); taskTimers = []; }
+function renderHUD(){
+  $("#hudGoal").textContent = "TASK — " + TASK_GOAL;
+  $("#hudSteps").innerHTML = TASK_STEPS.map((s, i) => {
+    const st = stepState[i];
+    const cls = st === 1 ? "active" : st === 2 ? "done" : st === 3 ? "failed" : "";
+    const ic = st === 2 ? "✓" : st === 3 ? "✕" : String(i + 1);
+    return '<div class="hstep ' + cls + '"><span class="hs-ic">' + ic + '</span><span>' + esc(s) + '</span></div>';
+  }).join("");
+  const doneCount = stepState.filter(s => s === 2).length;
+  $("#hudBar").style.width = Math.round(doneCount / TASK_STEPS.length * 100) + "%";
+  $("#hudNarr").style.display = settings.silent ? "none" : "block";
+}
+function narrate(txt){ $("#hudNarr").textContent = txt; if(!settings.silent) addMsg("sys", txt); }
+function startDemoTask(){
+  if(taskRunning){ toast("A task is already running"); return; }
+  closeSubs();
+  taskRunning = true; taskPaused = false; stepState = [0,0,0,0];
+  updateFloatVisibility(); $("#floatAv").classList.add("working");
+  setHUD(true); renderHUD(); narrate("Task started — " + TASK_GOAL);
+  runStep(0);
+}
+function runStep(i){
+  if(i >= TASK_STEPS.length){ finishTask(true); return; }
+  stepState[i] = 1; renderHUD();
+  if(!settings.silent) $("#hudNarr").textContent = TASK_STEPS[i] + "…";
+  later(async () => {
+    if(taskPaused || !taskRunning) return;
+    if(i === 3){
+      const ok = await showConfirm("Send this message?", "Guardrail check — sending a WhatsApp message to Mom: “Reached safely, will call at night”. Payments, deletions and sends always ask first in Jarvis.", "Send message");
+      if(taskPaused || !taskRunning) return;
+      if(!ok){ stepState[3] = 3; renderHUD(); narrate("Send cancelled at the guardrail — nothing was sent."); finishTask(false); return; }
+    }
+    stepState[i] = 2; renderHUD();
+    later(() => runStep(i + 1), 430);
+  }, i === 3 ? 1100 : 1450);
+}
+function togglePause(){
+  if(!taskRunning) return;
+  taskPaused = !taskPaused;
+  if(taskPaused){ clearTaskTimers(); $("#hudNarr").textContent = "Paused — tap the avatar to resume, or ✕ in the HUD to stop."; $("#hudNarr").style.display = "block"; }
+  else { renderHUD(); const nxt = stepState.findIndex(s => s !== 2 && s !== 3); runStep(nxt === -1 ? TASK_STEPS.length : nxt); }
+  toast(taskPaused ? "Task paused" : "Task resumed");
+}
+function abortTask(){
+  clearTaskTimers(); taskRunning = false; taskPaused = false;
+  $("#floatAv").classList.remove("working"); setHUD(false); updateFloatVisibility(); toast("Task stopped");
+}
+function finishTask(success){
+  taskRunning = false; taskPaused = false;
+  $("#floatAv").classList.remove("working"); renderHUD(); chime();
+  if(success){
+    $("#hudNarr").textContent = "Done — message sent & verified ✓"; $("#hudNarr").style.display = "block";
+    if(!settings.silent) addMsg("sys", "Task complete — message sent & verified.");
+    toast("Task complete — chime played"); speakPulse(1500);
+  } else toast("Task ended — nothing was sent");
+  later(() => { if(settings.avatarVis !== "always") setHUD(false); updateFloatVisibility(); }, 4200);
+}
+(function(){
+  const b = document.createElement("button");
+  b.textContent = "✕"; b.setAttribute("aria-label", "Stop task");
+  b.style.cssText = "position:absolute;top:8px;right:8px;width:34px;height:34px;border:none;background:transparent;color:var(--muted);font-size:15px;cursor:pointer;border-radius:10px";
+  b.addEventListener("click", abortTask);
+  $("#hud").appendChild(b);
+})();
+
+/* ================= SETTINGS TOGGLES ================= */
+bindSwitch($("#silentSwitch"), v => { settings.silent = v; saveSettings(); renderHUD();
+  toast(v ? "Silent Execution on — narration muted, finish chime stays" : "Silent Execution off"); });
+bindSwitch($("#ovSwitch"), v => { settings.overlayOn = v; saveSettings(); updateFloatVisibility(); renderAvatars(); });
+$$("#visSeg button").forEach(b => b.addEventListener("click", ()=>{
+  settings.avatarVis = b.dataset.vis; saveSettings();
+  $$("#visSeg button").forEach(x => x.classList.toggle("on", x === b)); updateFloatVisibility(); renderAvatars();
+}));
+$("#dockSel").addEventListener("change", e => { settings.dock = e.target.value; saveSettings(); placeFloat(); renderAvatars(); });
+$$("#wakeSeg button").forEach(b => b.addEventListener("click", ()=>{
+  settings.wake = b.dataset.wake; saveSettings();
+  $$("#wakeSeg button").forEach(x => x.classList.toggle("on", x === b));
+  $("#wakeSub").textContent = settings.wake === "always" ? "Always-on wake word (simulated in the web replica)" : "Tap the orb or mic to talk";
+  if(settings.wake === "always") toast("Always-on is simulated here — the native app uses the Vosk offline hotword");
+}));
+$("#tileScreen").addEventListener("click", ()=>{ setOrbState("thinking"); toast("Screen vision runs in the native app — MediaProjection sharing at 1 FPS");
+  setTimeout(()=>setOrbState(powerOn ? "listening" : "off"), 1500); });
+$("#tileMemories").addEventListener("click", ()=>openSub("sub-memory"));
+$("#demoTaskBtn").addEventListener("click", startDemoTask);
+$("#guideDemoBtn").addEventListener("click", startDemoTask);
+window.addEventListener("resize", placeFloat);
+
+/* ================= INIT ================= */
+(function init(){
+  $("#setAssistantName").value = settings.assistantName;
+  $("#setCallsign").value = settings.callsign;
+  $$("#wakeSeg button").forEach(x => x.classList.toggle("on", x.dataset.wake === settings.wake));
+  $("#wakeSub").textContent = settings.wake === "always" ? "Always-on wake word (simulated in the web replica)" : "Tap the orb or mic to talk";
+  $$("#visSeg button").forEach(x => x.classList.toggle("on", x.dataset.vis === settings.avatarVis));
+  $$("#sensSeg button").forEach(x => x.classList.toggle("on", x.dataset.sens === settings.sensitivity));
+  $("#dockSel").value = settings.dock;
+  setSwitch($("#silentSwitch"), settings.silent);
+  setSwitch($("#ovSwitch"), settings.overlayOn);
+  setSwitch($("#bioSwitch"), settings.bioOn);
+  applyTheme(); applyIdentity();
+  renderProviderChips(); selectProvider(curProvider);
+  renderSamples(); renderPersonaUI(); renderLang(); renderMemories(); renderPerms(); renderAvatars();
+  syncFloat(); welcomeMsg(); refreshCounts(); updateChatSub();
+})();
+</script>
+</body>
+</html>
