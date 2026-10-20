@@ -1,0 +1,34 @@
+name: Build Jarvis Intelligence OS APK (N S H D)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK & Gradle
+        uses: android-actions/setup-android@v3
+
+      - name: Grant Execute Permission for Gradlew
+        run: chmod +x ./gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload Compiled Jarvis APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-nshd-v3.1-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
