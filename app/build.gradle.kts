@@ -12,8 +12,36 @@ android {
         applicationId = "com.nshd.jarvis2"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0-L1"
+        versionCode = 2
+        versionName = "0.2.0-L2"
+    }
+
+    // ── Permanent signing (Level 2) ────────────────────────────────────
+    // One keystore signs every build (debug + release) so new versions
+    // install OVER old ones — no uninstall needed. The keystore itself is
+    // never committed: CI decodes it from the JARVIS_KEYSTORE_BASE64
+    // secret and passes its location via JARVIS_KEYSTORE_PATH. Local
+    // builds without the env vars keep the AGP default (debug) signing.
+    signingConfigs {
+        val ksPath = System.getenv("JARVIS_KEYSTORE_PATH")
+        if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
+            create("permanent") {
+                storeFile = file(ksPath)
+                storePassword = System.getenv("JARVIS_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("JARVIS_KEY_ALIAS")
+                keyPassword = System.getenv("JARVIS_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        val permanent = signingConfigs.findByName("permanent")
+        release {
+            if (permanent != null) signingConfig = permanent
+        }
+        debug {
+            if (permanent != null) signingConfig = permanent
+        }
     }
 
     compileOptions {
@@ -40,6 +68,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.9.3")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.3")
     implementation("com.squareup.okhttp3:okhttp:5.1.0")
+    // Level 2: encrypted API-key storage + explicit coroutines
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
 }

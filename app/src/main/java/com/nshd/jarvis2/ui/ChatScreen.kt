@@ -16,7 +16,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -25,56 +27,232 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.nshd.jarvis2.JarvisSettings
+import com.nshd.jarvis2.brain.ChatMsg
+import com.nshd.jarvis2.brain.ChatOutcome
+import com.nshd.jarvis2.brain.FailoverRouter
+import com.nshd.jarvis2.brain.PersonaPrompts
+import com.nshd.jarvis2.brain.ProviderStore
+import com.nshd.jarvis2.memory.MemoryCategories
+import com.nshd.jarvis2.memory.MemoryDb
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-private data class ChatMessage(val fromUser: Boolean, val text: String)
+private data class UiMessage(
+    val fromUser: Boolean,
+    val text: String,
+    val caption: String? = null
+)
+
 private enum class ChatMode { JARVIS, CODE }
 
-/** Level 1 shell — the real provider brain (REST + failover, Code mode) lands in Level 2. */
+private val REMEMBER_PATTERNS = listOf(
+    Regex("(?i)^remember that\\s+(.+)$"),
+    Regex("(?i)^remember:\\s*(.+)$"),
+    Regex("(?i)^remember\\s+(.+)$"),
+    Regex("(?i)^save memory:\\s*(.+)$"),
+    Regex("(?i)^save this to memory:\\s*(.+)$"),
+    Regex("(?i)^save to memory:\\s*(.+)$")
+)
+
+private fun extractRemember(text: String): String? {
+    val trimmed = text.trim()
+    for (pattern in REMEMBER_PATTERNS) {
+        pattern.matchEntire(trimmed)?.let { return it.groupValues[1].trim() }
+    }
+    return null
+}
+
+private fun inferCategory(fact: String): String {
+    val lower = fact.lowercase()
+    val preferenceStarters = listOf("i like", "i love", "i prefer", "i enjoy", "i hate")
+    return if (preferenceStarters.any { lower.startsWith(it) }) {
+        MemoryCategories.PREFERENCES
+    } else {
+        MemoryCategories.GENERAL
+    }
+}
+
+private fun isMemoryListRequest(text: String): Boolean {
+    val lower = text.trim().lowercase()
+    return lower.contains("what do you remember") ||
+        lower.contains("list memories") ||
+        lower.contains("what do you know about me") ||
+        lower == "show memories" ||
+        lower == "my memories"
+}
+
+/**
+ * Level 2: the real brain. History persists in MemoryDb; replies stream
+ * through FailoverRouter (active provider first, then the next configured
+ * ones). "remember …" is handled locally — no model call needed.
+ */
 @Composable
 fun ChatScreen(settings: JarvisSettings) {
+    val context = LocalContext.current
+    val db = remember { MemoryDb(context) }
+    val providerStore = remember { ProviderStore(context) }
+    val scope = rememberCoroutineScope()
+
     var mode by remember { mutableStateOf(ChatMode.JARVIS) }
     var input by remember { mutableStateOf("") }
-    val messages = remember {
-        mutableStateListOf(
-            ChatMessage(
-                fromUser = false,
-                text = "Hello ${settings.callsign}. This is the Level 1 chat shell — " +
-                    "my provider brain, memory and Code mode arrive in Level 2. " +
-                    "You can still type here to try the composer."
-            )
-        )
-    }
+    var sending by remember { mutableStateOf(false) }
+    var showClearConfirm by remember { mutableStateOf(false) }
+    val messages = remember { mutableStateListOf<UiMessage>() }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    fun greeting(): UiMessage = UiMessage(
+        fromUser = false,
+        text = "Hello ${settings.callsign}. I'm ${settings.assistantName} — my brain is " +
+            "live now. Add an API key in Settings → API & Connection, or just tell me " +
+            "\"remember …\" and I'll store it in my Memory Core."
+    )
+
+    LaunchedEffect(Unit) {
+        val history = withContext(Dispatchers.IO) { db.lastMessages(30) }
+        messages.clear()
+        if (history.isEmpty()) {
+            messages.add(greeting())
+        } else {
+            history.forEach { stored ->
+                messages.add(
+                    UiMessage(fromUser = stored.role == "user", text = stored.content)
+                )
+            }
+        }
+    }
+
+    LaunchedEffect(messages.size, sending) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.lastIndex + if (sending) 1 else 0)
+        }
+    }
+
+    fun appendAssistant(text: String, caption: String? = null, persist: Boolean = true) {
+        messages.add(UiMessage(fromUser = false, text = text, caption = caption))
+        if (persist) {
+            scope.launch(Dispatchers.IO) { db.addMessage("assistant", text) }
+        }
+    }
+
+    fun send() {
+        val text = input.trim()
+        if (text.isEmpty() || sending) return
+        input = ""
+        messages.add(UiMessage(fromUser = true, text = text))
+        scope.launch(Dispatchers.IO) { db.addMessage("user", text) }
+
+        // ── Local memory commands (no model call) ────────────────────
+        val rememberFact = extractRemember(text)
+        if (rememberFact != null) {
+            if (rememberFact.isBlank()) {
+                appendAssistant("Tell me what to remember after \"remember\" — e.g. \"remember my exam is on Friday\".")
+                return
+            }
+            val category = inferCategory(rememberFact)
+            scope.launch {
+                withContext(Dispatchers.IO) { db.addFact(category, rememberFact) }
+                appendAssistant("Saved to memory ✅ — I'll remember: $rememberFact")
+            }
+            return
+        }
+        if (isMemoryListRequest(text)) {
+            scope.launch {
+                val facts = withContext(Dispatchers.IO) { db.allFacts(null, null) }
+                val reply = if (facts.isEmpty()) {
+                    "You haven't saved any memories yet. Tell me \"remember …\" and " +
+                        "I'll keep it in my Memory Core."
+                } else {
+                    buildString {
+                        append("Here's what I remember about you, ${settings.callsign}:\n")
+                        facts.forEach { f -> append("\n• [${f.category}] ${f.text}") }
+                    }
+                }
+                appendAssistant(reply)
+            }
+            return
+        }
+
+        // ── Model call via failover router ────────────────────────────
+        sending = true
+        val codeMode = mode == ChatMode.CODE
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                val facts = db.allFacts(null, null)
+                val systemPrompt = PersonaPrompts.build(settings, facts, codeMode)
+                val history = db.lastMessages(20).map {
+                    ChatMsg(role = it.role, content = it.content)
+                }
+                val all = mutableListOf(ChatMsg("system", systemPrompt))
+                all += history
+                if (history.lastOrNull()?.content != text) {
+                    all += ChatMsg("user", text)
+                }
+                FailoverRouter(providerStore.orderedConfigs())
+                    .chat(all, preferReasoningModel = codeMode)
+            }
+            sending = false
+            when (outcome) {
+                is ChatOutcome.Success -> appendAssistant(
+                    text = outcome.reply,
+                    caption = "via ${outcome.providerLabel} • ${outcome.model}"
+                )
+                is ChatOutcome.NoKey -> appendAssistant(
+                    text = "Please configure your API Key in Settings → API & Connection " +
+                        "first. Your keys stay encrypted on this device — and if one " +
+                        "provider fails, I'll automatically try the next configured one."
+                )
+                is ChatOutcome.AllFailed -> appendAssistant(
+                    text = "I couldn't reach any provider just now:\n${outcome.summary}\n\n" +
+                        "Check your connection or keys in Settings → API & Connection."
+                )
+            }
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Header
-        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
-            Text(
-                text = settings.assistantName,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = "${settings.assistantName} • Brain arrives in Level 2",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 20.dp, end = 8.dp, top = 14.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = settings.assistantName,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = if (sending) "${settings.assistantName} is thinking…"
+                    else "${settings.assistantName} • ${settings.persona} • Active",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(onClick = { showClearConfirm = true }) {
+                Icon(
+                    imageVector = Icons.Filled.Delete,
+                    contentDescription = "Clear chat",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
 
         LazyColumn(
@@ -86,6 +264,28 @@ fun ChatScreen(settings: JarvisSettings) {
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(messages) { msg -> MessageBubble(msg) }
+            if (sending) {
+                item {
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        Card(
+                            shape = RoundedCornerShape(18.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        ) {
+                            Text(
+                                text = "• • •",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -125,22 +325,7 @@ fun ChatScreen(settings: JarvisSettings) {
                 maxLines = 4
             )
             Spacer(modifier = Modifier.width(8.dp))
-            IconButton(
-                onClick = {
-                    val text = input.trim()
-                    if (text.isNotEmpty()) {
-                        messages.add(ChatMessage(fromUser = true, text = text))
-                        val reply = if (mode == ChatMode.CODE) {
-                            "Code mode is a shell in Level 1 — markdown rendering, syntax " +
-                                "highlighting and the reasoning model land in Level 2."
-                        } else {
-                            "Brain lands in Level 2 — this is the Level 1 shell."
-                        }
-                        messages.add(ChatMessage(fromUser = false, text = reply))
-                        input = ""
-                    }
-                }
-            ) {
+            IconButton(onClick = { send() }, enabled = !sending) {
                 Icon(
                     imageVector = Icons.Filled.Send,
                     contentDescription = "Send",
@@ -149,33 +334,72 @@ fun ChatScreen(settings: JarvisSettings) {
             }
         }
     }
+
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("Clear chat?") },
+            text = {
+                Text("This deletes the conversation history on this device. Your saved memories are kept.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showClearConfirm = false
+                    scope.launch {
+                        withContext(Dispatchers.IO) { db.clearChat() }
+                        messages.clear()
+                        messages.add(greeting())
+                    }
+                }) { Text("Clear") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
 }
 
 @Composable
-private fun MessageBubble(msg: ChatMessage) {
+private fun MessageBubble(msg: UiMessage) {
     Box(
         modifier = Modifier.fillMaxWidth(),
         contentAlignment = if (msg.fromUser) Alignment.CenterEnd else Alignment.CenterStart
     ) {
-        Card(
-            shape = RoundedCornerShape(
-                topStart = 18.dp, topEnd = 18.dp,
-                bottomStart = if (msg.fromUser) 18.dp else 4.dp,
-                bottomEnd = if (msg.fromUser) 4.dp else 18.dp
-            ),
-            colors = CardDefaults.cardColors(
-                containerColor = if (msg.fromUser) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.surfaceVariant
-            ),
-            modifier = Modifier.widthIn(max = 300.dp)
-        ) {
-            Text(
-                text = msg.text,
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (msg.fromUser) MaterialTheme.colorScheme.onPrimary
-                else MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-            )
+        Column(modifier = Modifier.widthIn(max = 320.dp)) {
+            Card(
+                shape = RoundedCornerShape(
+                    topStart = 18.dp, topEnd = 18.dp,
+                    bottomStart = if (msg.fromUser) 18.dp else 4.dp,
+                    bottomEnd = if (msg.fromUser) 4.dp else 18.dp
+                ),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (msg.fromUser) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    if (msg.fromUser) {
+                        Text(
+                            text = msg.text,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    } else {
+                        MarkdownText(
+                            content = msg.text,
+                            textColor = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+            if (msg.caption != null) {
+                Text(
+                    text = msg.caption,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 6.dp, top = 3.dp)
+                )
+            }
         }
     }
 }

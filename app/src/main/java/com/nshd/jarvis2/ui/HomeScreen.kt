@@ -20,19 +20,16 @@ import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Smartphone
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
@@ -51,10 +48,10 @@ import kotlin.math.sqrt
 fun HomeScreen(
     settings: JarvisSettings,
     listening: Boolean,
-    onOpenPermissions: () -> Unit
+    onOpenPermissions: () -> Unit,
+    onOpenMemory: () -> Unit,
+    onOpenSettings: () -> Unit
 ) {
-    var comingSoon by remember { mutableStateOf<String?>(null) }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -99,32 +96,14 @@ fun HomeScreen(
                 icon = Icons.Filled.Memory,
                 label = "Memories",
                 modifier = Modifier.weight(1f)
-            ) { comingSoon = "Memories" }
+            ) { onOpenMemory() }
             QuickTile(
                 icon = Icons.Filled.Language,
                 label = "Language",
                 modifier = Modifier.weight(1f)
-            ) { comingSoon = "Language" }
+            ) { onOpenSettings() }
         }
         Spacer(modifier = Modifier.height(28.dp))
-    }
-
-    if (comingSoon != null) {
-        AlertDialog(
-            onDismissRequest = { comingSoon = null },
-            title = { Text(comingSoon ?: "") },
-            text = {
-                Text(
-                    when (comingSoon) {
-                        "Memories" -> "The Neural Memory Bank arrives in Level 2 with the brain."
-                        else -> "Language selection lives in Settings now; full prompt wiring arrives in Level 3."
-                    }
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { comingSoon = null }) { Text("OK") }
-            }
-        )
     }
 }
 

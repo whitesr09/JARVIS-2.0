@@ -35,9 +35,10 @@ fun UpdatesScreen() {
 
         InfoCard(
             title = "Level roadmap",
-            body = "L1 Foundation — current build: scaffold, theme engine, orb, " +
+            body = "L1 Foundation — done: scaffold, theme engine, orb, " +
                 "permissions dashboard.\n" +
-                "L2 Brain — provider layer + failover, API keys, real chat + Code mode, Memory Core.\n" +
+                "L2 Brain — current build: provider layer + failover, encrypted API keys, " +
+                "real chat + Code mode, Memory Core, permanent signing.\n" +
                 "L3 Voice — Gemini Live loop, tap-to-talk, personas + 12 languages, silent execution + chime.\n" +
                 "L4 Digital Hands — accessibility automation, deep intents, hardware controls, contact-aware calling & messaging.\n" +
                 "L5 Vision + Overlay — MediaProjection targeting, floating avatar + 4-step Task HUD.\n" +

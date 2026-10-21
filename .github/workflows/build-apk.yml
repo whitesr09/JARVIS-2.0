@@ -8,6 +8,11 @@ on:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
+    env:
+      # Permanent signing credentials (values live only in GitHub Secrets)
+      JARVIS_KEYSTORE_PASSWORD: ${{ secrets.JARVIS_KEYSTORE_PASSWORD }}
+      JARVIS_KEY_ALIAS: ${{ secrets.JARVIS_KEY_ALIAS }}
+      JARVIS_KEY_PASSWORD: ${{ secrets.JARVIS_KEY_PASSWORD }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,10 +39,36 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
-      - name: Build debug APK
+      - name: Decode permanent signing keystore
+        env:
+          KS_B64: ${{ secrets.JARVIS_KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/jarvis2-release.jks"
+            echo "JARVIS_KEYSTORE_PATH=$RUNNER_TEMP/jarvis2-release.jks" >> $GITHUB_ENV
+            echo "HAS_KEYSTORE=true" >> $GITHUB_ENV
+          else
+            echo "no keystore secret — debug signing fallback"
+          fi
+
+      - name: Build release APK (permanent signing)
+        if: env.HAS_KEYSTORE == 'true'
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Build debug APK (fallback signing)
+        if: env.HAS_KEYSTORE != 'true'
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Upload Jarvis APK
+      - name: Upload Jarvis APK (release)
+        if: env.HAS_KEYSTORE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-2.0-apk
+          path: app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload Jarvis APK (debug)
+        if: env.HAS_KEYSTORE != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: jarvis-2.0-apk

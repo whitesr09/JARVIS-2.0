@@ -66,7 +66,9 @@ private data class InfoDialog(val title: String, val body: String)
 fun SettingsScreen(
     settings: JarvisSettings,
     onSettingsChange: (JarvisSettings) -> Unit,
-    onOpenPermissions: () -> Unit
+    onOpenPermissions: () -> Unit,
+    onOpenApi: () -> Unit,
+    onOpenMemory: () -> Unit
 ) {
     val context = LocalContext.current
     var info by remember { mutableStateOf<InfoDialog?>(null) }
@@ -192,19 +194,10 @@ fun SettingsScreen(
         SectionTitle("System & Data Engine")
         GroupCard {
             SettingsRow(Icons.Filled.Api, "API & Connection", "Providers, keys & models") {
-                info = InfoDialog(
-                    "API & Connection",
-                    "Provider setup — Gemini Live + Groq / FreeLLMAPI / OpenRouter with " +
-                        "automatic failover, your own API keys and a Test Connection button — " +
-                        "arrives in Level 2 with the brain."
-                )
+                onOpenApi()
             }
             SettingsRow(Icons.Filled.Memory, "Neural Memory Bank", "Facts, preferences, contacts") {
-                info = InfoDialog(
-                    "Neural Memory Bank",
-                    "The Memory Core (auto + manual facts, synced with your contacts) " +
-                        "arrives in Level 2."
-                )
+                onOpenMemory()
             }
             SettingsRow(Icons.Filled.Security, "System Permissions", "11 authorizations") {
                 onOpenPermissions()
@@ -270,7 +263,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(18.dp))
         Text(
-            text = "JARVIS • v0.1.0-L1",
+            text = "JARVIS • v0.2.0-L2",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)
@@ -306,8 +299,9 @@ fun SettingsScreen(
                     ) { onSettingsChange(settings.copy(persona = "Jarvis Pro")) }
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Persona prompts and the 5 Gemini voices (+ custom voice) are " +
-                            "wired into the brain in Level 3. Your selection is saved now.",
+                        text = "Persona prompts are live in Chat from Level 2. The 5 " +
+                            "Gemini voices (+ custom voice) arrive with the voice loop " +
+                            "in Level 3.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

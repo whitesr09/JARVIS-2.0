@@ -37,6 +37,9 @@ import com.nshd.jarvis2.JarvisSettings
 
 private enum class Tab { HOME, CHAT, SETTINGS, UPDATES }
 
+/** Full-screen destinations layered over the tabs (Level 2 adds API + Memory). */
+private enum class SubScreen { NONE, PERMISSIONS, API, MEMORY }
+
 @Composable
 fun JarvisApp(
     settings: JarvisSettings,
@@ -45,7 +48,7 @@ fun JarvisApp(
     JarvisTheme(theme = settings.theme, customBgHex = settings.customBgHex) {
         var tab by remember { mutableStateOf(Tab.HOME) }
         var listening by remember { mutableStateOf(false) }
-        var showPermissions by remember { mutableStateOf(false) }
+        var subScreen by remember { mutableStateOf(SubScreen.NONE) }
 
         Scaffold(
             bottomBar = {
@@ -54,7 +57,7 @@ fun JarvisApp(
                     listening = listening,
                     onTab = {
                         tab = it
-                        showPermissions = false
+                        subScreen = SubScreen.NONE
                     },
                     onMic = { listening = !listening }
                 )
@@ -65,20 +68,31 @@ fun JarvisApp(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                if (showPermissions) {
-                    PermissionsScreen(onBack = { showPermissions = false })
-                } else {
-                    when (tab) {
+                when (subScreen) {
+                    SubScreen.PERMISSIONS -> PermissionsScreen(
+                        onBack = { subScreen = SubScreen.NONE }
+                    )
+                    SubScreen.API -> ApiConnectionScreen(
+                        onBack = { subScreen = SubScreen.NONE }
+                    )
+                    SubScreen.MEMORY -> MemoryScreen(
+                        onBack = { subScreen = SubScreen.NONE }
+                    )
+                    SubScreen.NONE -> when (tab) {
                         Tab.HOME -> HomeScreen(
                             settings = settings,
                             listening = listening,
-                            onOpenPermissions = { showPermissions = true }
+                            onOpenPermissions = { subScreen = SubScreen.PERMISSIONS },
+                            onOpenMemory = { subScreen = SubScreen.MEMORY },
+                            onOpenSettings = { tab = Tab.SETTINGS }
                         )
                         Tab.CHAT -> ChatScreen(settings = settings)
                         Tab.SETTINGS -> SettingsScreen(
                             settings = settings,
                             onSettingsChange = onSettingsChange,
-                            onOpenPermissions = { showPermissions = true }
+                            onOpenPermissions = { subScreen = SubScreen.PERMISSIONS },
+                            onOpenApi = { subScreen = SubScreen.API },
+                            onOpenMemory = { subScreen = SubScreen.MEMORY }
                         )
                         Tab.UPDATES -> UpdatesScreen()
                     }
