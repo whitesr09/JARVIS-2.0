@@ -372,6 +372,49 @@ class OpenAiCompatibleProvider(
         return array
     }
 
+    /**
+     * Connection Test v2 probe (F3): one tiny chat completion against
+     * [model] — `ping`, max_tokens 1 — measured end-to-end. Success only
+     * proves this exact model answers on this key/endpoint; the short
+     * [TestResult.detail] on failure is the HTTP brief or network error,
+     * already trimmed for display (never the raw body dump).
+     */
+    suspend fun probeChatModel(model: String): TestResult = withContext(Dispatchers.IO) {
+        if (baseUrl.isBlank()) return@withContext TestResult(false, 0, "No base URL set")
+        if (apiKey.isBlank()) return@withContext TestResult(false, 0, "No API key set")
+        if (model.isBlank()) return@withContext TestResult(false, 0, "No model set")
+        val start = System.nanoTime()
+        fun elapsed() = (System.nanoTime() - start) / 1_000_000
+        try {
+            val payload = JSONObject()
+                .put("model", model)
+                .put(
+                    "messages",
+                    JSONArray().put(JSONObject().put("role", "user").put("content", "ping"))
+                )
+                .put("max_tokens", 1)
+            val req = authed(Request.Builder().url(endpoint("/chat/completions")))
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    TestResult(true, elapsed(), "OK")
+                } else {
+                    val brief = resp.body?.string().orEmpty()
+                        .replace('\n', ' ').trim().take(120)
+                    TestResult(
+                        false, elapsed(),
+                        "HTTP ${resp.code}" + if (brief.isNotBlank()) ": $brief" else ""
+                    )
+                }
+            }
+        } catch (e: IOException) {
+            TestResult(false, elapsed(), "Network error: ${e.message ?: "unreachable"}")
+        } catch (e: Exception) {
+            TestResult(false, elapsed(), e.message?.take(120) ?: "Probe failed")
+        }
+    }
+
     override suspend fun testConnection(): TestResult = withContext(Dispatchers.IO) {
         if (baseUrl.isBlank()) return@withContext TestResult(false, 0, "No base URL set")
         if (apiKey.isBlank()) return@withContext TestResult(false, 0, "No API key set")

@@ -152,6 +152,18 @@ object ToolRegistry {
 
     fun spec(name: String): ToolSpec? = specs.firstOrNull { it.name == name }
 
+    /**
+     * Terminal tools (F3): on success the agent loop ends the turn
+     * immediately with the tool result as the final summary — no extra
+     * model round trips (which previously replayed media/open requests
+     * in a loop). These are the registry's actual media/open tools;
+     * there are no play_media/play_song tools in this build.
+     */
+    val TERMINAL_TOOLS: Set<String> = setOf("youtube_play", "open_app")
+
+    /** Media-play tools (F3): a success blocks voice auto-listen resume. */
+    val MEDIA_PLAY_TOOLS: Set<String> = setOf("youtube_play")
+
     /** OpenAI-compatible `tools` array. */
     fun openAiTools(): JSONArray {
         val array = JSONArray()

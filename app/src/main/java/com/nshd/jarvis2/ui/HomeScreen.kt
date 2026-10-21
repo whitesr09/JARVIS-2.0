@@ -36,6 +36,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.nshd.jarvis2.JarvisSettings
+import com.nshd.jarvis2.ui.orb.JarvisOrb
+import com.nshd.jarvis2.ui.orb.OrbState
 import com.nshd.jarvis2.voice.VoiceSessionManager
 import com.nshd.jarvis2.voice.VoiceStatus
 
@@ -83,12 +85,21 @@ fun HomeScreen(
         // The Home orb mirrors the live voice session state (D3 tints):
         // thinking swirl while the brain works, error colour on failure.
         val voiceState by VoiceSessionManager.uiState.collectAsState()
-        ParticleOrb(
-            listening = listening,
-            speaking = voiceState.status == VoiceStatus.SPEAKING,
-            thinking = voiceState.status == VoiceStatus.THINKING ||
-                voiceState.status == VoiceStatus.CONNECTING,
-            error = voiceState.status == VoiceStatus.ERROR,
+        // F3: the OpenGL JarvisOrb (exact port of the user's orb.html) —
+        // state mapped from the live voice session; Canvas ParticleOrb
+        // remains only as its internal GL-failure fallback.
+        JarvisOrb(
+            state = when {
+                voiceState.status == VoiceStatus.ERROR -> OrbState.ERROR
+                voiceState.status == VoiceStatus.SPEAKING -> OrbState.SPEAKING
+                voiceState.status == VoiceStatus.THINKING ||
+                    voiceState.status == VoiceStatus.CONNECTING -> OrbState.THINKING
+                listening || voiceState.status == VoiceStatus.LISTENING ||
+                    voiceState.status == VoiceStatus.UNIVERSAL_ACTIVE -> OrbState.LISTENING
+                else -> OrbState.IDLE
+            },
+            theme = settings.theme,
+            customHex = settings.customBgHex,
             modifier = Modifier
                 .size(230.dp)
                 .clickable(onClick = onOpenVoice)

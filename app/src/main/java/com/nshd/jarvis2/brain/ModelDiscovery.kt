@@ -9,6 +9,21 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
+ * Outcome of Connection Test v2 (F3). [endpointOk] is Stage 1
+ * (GET /models with auth); when it is false, [endpointError] is the
+ * friendly-ready reason and [probes] is empty — Stage 2 never ran.
+ * [probes] preserves probe order: configured chat model first, then
+ * discovered models in list order, native-audio models included as
+ * [ProbeStatus.SKIPPED_AUDIO] without consuming a chat-probe slot.
+ */
+data class ConnectionTestOutcome(
+    val endpointOk: Boolean,
+    val endpointError: String? = null,
+    val models: List<ModelDiscovery.ModelInfo> = emptyList(),
+    val probes: List<ModelProbeResult> = emptyList()
+)
+
+/**
  * Live model discovery (F2): GET {baseUrl}/models on the user's own API
  * so the Universal Voice Engine (and the chat model picker) can work
  * with whatever models the provider actually offers — no hard-coded
@@ -89,6 +104,64 @@ object ModelDiscovery {
                 )
             }
         }
+
+    /** Hard cap on chat completions per Connection Test v2 run (F3). */
+    const val MAX_CHAT_PROBES = 7
+
+    /**
+     * Connection Test v2 (F3):
+     *  Stage 1 — endpoint check via [fetchModels] (GET /models, auth).
+     *    Any failure stops the run: probing chat against an endpoint
+     *    that cannot even list models would only produce noise.
+     *  Stage 2 — sequential tiny chat probes (`ping`, max_tokens 1):
+     *    the configured chat model first, then discovered models in
+     *    list order, at most [MAX_CHAT_PROBES] chat models total.
+     *    NATIVE_AUDIO models are never chat-probed; they are recorded
+     *    as [ProbeStatus.SKIPPED_AUDIO] in place.
+     */
+    suspend fun runConnectionTestV2(config: ProviderConfig): ConnectionTestOutcome {
+        val stage1 = fetchModels(config)
+        val discovered = stage1.getOrElse { error ->
+            return ConnectionTestOutcome(
+                endpointOk = false,
+                endpointError = error.message ?: "Endpoint check failed"
+            )
+        }
+        // Probe order: configured chat model first (even when the
+        // provider did not list it), then discovered ids in list order.
+        val orderedIds = LinkedHashSet<String>()
+        config.chatModel.trim().takeIf { it.isNotBlank() }?.let { orderedIds += it }
+        discovered.forEach { orderedIds += it.id }
+        val provider = config.toProvider()
+        val probes = mutableListOf<ModelProbeResult>()
+        var chatProbed = 0
+        for (id in orderedIds) {
+            if (chatProbed >= MAX_CHAT_PROBES) break
+            val now = System.currentTimeMillis()
+            if (classify(id) == Kind.NATIVE_AUDIO) {
+                probes += ModelProbeResult(
+                    modelId = id,
+                    status = ProbeStatus.SKIPPED_AUDIO,
+                    timestamp = now
+                )
+                continue
+            }
+            val result = provider.probeChatModel(id)
+            probes += ModelProbeResult(
+                modelId = id,
+                status = if (result.ok) ProbeStatus.WORKING else ProbeStatus.FAILED,
+                latencyMs = result.latencyMs,
+                error = if (result.ok) "" else result.detail,
+                timestamp = System.currentTimeMillis()
+            )
+            chatProbed++
+        }
+        return ConnectionTestOutcome(
+            endpointOk = true,
+            models = discovered,
+            probes = probes
+        )
+    }
 
     /** OpenAI-shaped {"data":[{"id": …}]}; tolerates a bare array root. */
     private fun parseIds(bodyText: String): List<String> {

@@ -45,6 +45,29 @@ fun UpdatesScreen() {
 
         RoadmapCard()
         InfoCard(
+            title = "v1.2.0 — Task queue, background wake + F3 fixes",
+            body = "The orb is now rendered by the new orb engine (ported " +
+                "from the web simulator): smoother state-driven motion and " +
+                "palette shifts on every surface it appears. Multi-step " +
+                "requests now run as a visible task queue — the floating " +
+                "HUD lists up to six queued/running/done tasks with the " +
+                "current task's latest steps and an overall progress bar, " +
+                "so you can see the whole plan, not just one goal. The " +
+                "agent is more disciplined: it verifies each step before " +
+                "moving on and asks for confirmation exactly where the " +
+                "hard guardrails require it — nowhere else. Wake is now " +
+                "fully in the background: \"Hey Jarvis\" starts listening " +
+                "without opening the app, and tapping the floating avatar " +
+                "toggles a background voice session the same way (the " +
+                "app only opens from the HUD's own button, or from the " +
+                "failure notification if listening couldn't start). " +
+                "Connection Test is now v2: it checks the endpoint first, " +
+                "then probes each chat model with a tiny ping — showing " +
+                "per-model latency, skipping live-audio models, offering " +
+                "a one-tap switch when your chosen model fails but " +
+                "another works — and caches the results per provider."
+        )
+        InfoCard(
             title = "v1.1.0 — Universal Voice Engine + F2 fixes",
             body = "Voice no longer depends on one Gemini native-audio model. " +
                 "The new Universal engine runs mic → text → your chat model → " +
@@ -222,7 +245,15 @@ private val ROADMAP = listOf(
         "F2 Universal Voice",
         "Universal Voice Engine (any model, any provider), live model " +
             "discovery, Gemini Live language fix, and the on-device QA " +
-            "fix round. This build.",
+            "fix round.",
+        RoadmapStatus.DONE
+    ),
+    RoadmapEntry(
+        "F3 Task queue + background wake",
+        "Orb engine port, visible task queue in the floating HUD, " +
+            "agent discipline + confirmations, background wake and " +
+            "overlay-tap voice (no app launch), Connection Test v2. " +
+            "This build.",
         RoadmapStatus.CURRENT
     )
 )
@@ -293,8 +324,9 @@ private fun RoadmapCard() {
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
-                text = "v1.1.0 — Universal Voice Engine: voice now works with " +
-                    "any model on any provider (design refresh completed at v1.0.0).",
+                text = "v1.2.0 — Task queue, background wake and Connection " +
+                    "Test v2 (Universal Voice Engine shipped at v1.1.0, " +
+                    "design refresh completed at v1.0.0).",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

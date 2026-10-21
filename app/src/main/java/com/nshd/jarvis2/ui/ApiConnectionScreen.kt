@@ -55,13 +55,14 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.ModelDiscovery
-import com.nshd.jarvis2.brain.ProviderConfig
+import com.nshd.jarvis2.brain.ModelProbeResult
+import com.nshd.jarvis2.brain.ProbeStatus
 import com.nshd.jarvis2.brain.ProviderPresets
 import com.nshd.jarvis2.brain.ProviderStore
-import com.nshd.jarvis2.brain.TestResult
-import kotlinx.coroutines.Dispatchers
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * Level 2: real API & Connection screen. Per-provider base URL / key /
@@ -71,6 +72,12 @@ import kotlinx.coroutines.withContext
  * F2 adds live model discovery: "Fetch available models" lists what the
  * provider actually offers (native-audio models badged LIVE AUDIO) so
  * chat/Live models can be picked instead of typed from memory.
+ *
+ * F3 Connection Test v2: Stage 1 checks the endpoint (GET /models with
+ * auth) and stops on failure; Stage 2 sequentially probes chat models
+ * (configured model first, then discovered, max 7) with a 1-token
+ * "ping" completion, skipping native-audio models. Results are cached
+ * per provider in [ProviderStore] and shown instantly on reopen.
  */
 @Composable
 fun ApiConnectionScreen(
@@ -88,9 +95,60 @@ fun ApiConnectionScreen(
     var editId by remember { mutableStateOf(store.activeProviderId()) }
     var config by remember(editId) { mutableStateOf(store.loadConfig(editId)) }
     var showKey by remember { mutableStateOf(false) }
-    var testing by remember { mutableStateOf(false) }
-    var testResult by remember { mutableStateOf<TestResult?>(null) }
     var refreshTick by remember { mutableStateOf(0) } // re-read "key set" dots after save
+
+    // ── Connection Test v2 (F3) ────────────────────────────────────────
+    var probing by remember { mutableStateOf(false) }
+    var probeStageError by remember { mutableStateOf<String?>(null) }
+    // Cached results load instantly per provider (keyed on editId).
+    var probeResults by remember(editId) {
+        mutableStateOf(store.cachedProbeResults(editId))
+    }
+    var showProbeDialog by remember { mutableStateOf(false) }
+
+    fun runConnectionTestV2() {
+        if (probing) return
+        store.saveConfig(config)
+        config = store.loadConfig(editId)
+        refreshTick++
+        probing = true
+        probeStageError = null
+        val targetId = editId
+        scope.launch {
+            val outcome = ModelDiscovery.runConnectionTestV2(store.loadConfig(targetId))
+            probing = false
+            if (!outcome.endpointOk) {
+                // Stage 1 failed — friendly headline, no Stage 2 noise.
+                probeStageError = FriendlyErrors.map(outcome.endpointError).headline
+            } else {
+                probeResults = outcome.probes
+                store.saveProbeResults(targetId, outcome.probes)
+                store.saveModelIds(targetId, outcome.models.map { it.id })
+                refreshTick++
+                showProbeDialog = true
+            }
+        }
+    }
+
+    // If the configured chat model failed but another probed model
+    // works, offer the one-tap switch to the first working alternative.
+    val configuredProbe = probeResults.firstOrNull { it.modelId == config.chatModel }
+    val workingAlternative = if (configuredProbe?.status == ProbeStatus.FAILED) {
+        probeResults.firstOrNull {
+            it.status == ProbeStatus.WORKING && it.modelId != config.chatModel
+        }
+    } else {
+        null
+    }
+
+    fun useAlternative(modelId: String) {
+        config = config.copy(chatModel = modelId)
+        store.saveConfig(config)
+        config = store.loadConfig(editId)
+        refreshTick++
+        showProbeDialog = false
+        scope.launch { snackbar.showSnackbar("Chat model set to $modelId") }
+    }
 
     // ── Model discovery (F2) ───────────────────────────────────────────
     var fetchingModels by remember { mutableStateOf(false) }
@@ -207,7 +265,7 @@ fun ApiConnectionScreen(
                 ProviderPresets.ALL.forEach { preset ->
                     FilterChip(
                         selected = editId == preset.id,
-                        onClick = { editId = preset.id; testResult = null },
+                        onClick = { editId = preset.id; probeStageError = null },
                         label = { Text(preset.label) },
                         leadingIcon = if (editId == preset.id) {
                             {
@@ -349,33 +407,28 @@ fun ApiConnectionScreen(
                         ) { Text("Save") }
                         Spacer(modifier = Modifier.width(10.dp))
                         OutlinedButton(
-                            onClick = {
-                                store.saveConfig(config)
-                                refreshTick++
-                                testing = true
-                                testResult = null
-                                val toTest: ProviderConfig = store.loadConfig(editId)
-                                scope.launch {
-                                    val result = withContext(Dispatchers.IO) {
-                                        toTest.toProvider().testConnection()
-                                    }
-                                    testing = false
-                                    testResult = result
-                                }
-                            },
-                            enabled = !testing,
+                            onClick = { runConnectionTestV2() },
+                            enabled = !probing,
                             modifier = Modifier.weight(1f)
-                        ) { Text(if (testing) "Testing…" else "Test Connection") }
+                        ) { Text(if (probing) "Testing…" else "Test Connection") }
                     }
-                    if (testResult != null) {
+                    if (probing) {
                         Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
-                        val r = testResult!!
-                        // Inline status banner: semantic container + icon +
-                        // latency — never colour (or emoji) alone.
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Checking endpoint, then probing models one by one…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (probeStageError != null) {
+                        Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
                         Surface(
                             shape = RoundedCornerShape(JarvisDimens.radiusField),
-                            color = if (r.ok) JarvisSemanticColors.successContainer
-                            else MaterialTheme.colorScheme.errorContainer,
+                            color = MaterialTheme.colorScheme.errorContainer,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(
@@ -383,22 +436,64 @@ fun ApiConnectionScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
-                                    imageVector = if (r.ok) Icons.Filled.Check else Icons.Filled.Close,
+                                    imageVector = Icons.Filled.Close,
                                     contentDescription = null,
-                                    tint = if (r.ok) JarvisSemanticColors.success
-                                    else MaterialTheme.colorScheme.onErrorContainer
+                                    tint = MaterialTheme.colorScheme.onErrorContainer
                                 )
                                 Spacer(modifier = Modifier.width(JarvisDimens.spaceSm))
                                 Text(
-                                    text = if (r.ok) {
-                                        "Connected • ${r.latencyMs} ms — ${r.detail}"
-                                    } else {
-                                        r.detail
-                                    },
+                                    text = probeStageError!!,
                                     style = MaterialTheme.typography.bodyMedium,
-                                    color = if (r.ok) MaterialTheme.colorScheme.onSurface
-                                    else MaterialTheme.colorScheme.onErrorContainer
+                                    color = MaterialTheme.colorScheme.onErrorContainer
                                 )
+                            }
+                        }
+                    }
+                    if (probeResults.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
+                        // Cached / fresh probe results card (F3): shown
+                        // instantly from ProviderStore on reopen.
+                        Surface(
+                            shape = RoundedCornerShape(JarvisDimens.radiusField),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(JarvisDimens.spaceMd)) {
+                                val lastTs = probeResults.maxOfOrNull { it.timestamp } ?: 0L
+                                Text(
+                                    text = if (lastTs > 0L) {
+                                        "Model test results • " +
+                                            SimpleDateFormat(
+                                                "d MMM, h:mm a", Locale.ENGLISH
+                                            ).format(Date(lastTs))
+                                    } else {
+                                        "Model test results"
+                                    },
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                probeResults.forEach { result ->
+                                    ProbeResultRow(result)
+                                }
+                                if (workingAlternative != null) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Button(
+                                        onClick = { useAlternative(workingAlternative.modelId) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) { Text("Use ${workingAlternative.modelId}") }
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row {
+                                    TextButton(
+                                        onClick = { showProbeDialog = true }
+                                    ) { Text("Details") }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    TextButton(
+                                        onClick = { runConnectionTestV2() },
+                                        enabled = !probing
+                                    ) { Text(if (probing) "Testing…" else "Re-test") }
+                                }
                             }
                         }
                     }
@@ -481,5 +576,97 @@ fun ApiConnectionScreen(
                 ) { Text(if (fetchingModels) "Fetching…" else "Re-fetch") }
             }
         )
+    }
+
+    // ── Connection Test v2 results dialog (F3) ─────────────────────────
+    if (showProbeDialog && probeResults.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { showProbeDialog = false },
+            title = {
+                Text("Connection test — ${ProviderPresets.byId(editId).label}")
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = "Endpoint OK. Each chat model was probed with a " +
+                            "1-token ping; live-audio models are not chat-tested.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    probeResults.forEach { result -> ProbeResultRow(result) }
+                    if (workingAlternative != null) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Your chat model failed, but " +
+                                "${workingAlternative.modelId} works.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Button(
+                            onClick = { useAlternative(workingAlternative.modelId) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Use ${workingAlternative.modelId}") }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showProbeDialog = false }) { Text("Close") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { runConnectionTestV2() },
+                    enabled = !probing
+                ) { Text(if (probing) "Testing…" else "Re-test") }
+            }
+        )
+    }
+}
+
+/** One probe-result line: ✓ Working (N ms) / ✕ Failed (reason) / ◐ skipped. */
+@Composable
+private fun ProbeResultRow(result: ModelProbeResult) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = when (result.status) {
+                ProbeStatus.WORKING -> "✓"
+                ProbeStatus.FAILED -> "✕"
+                ProbeStatus.SKIPPED_AUDIO -> "◐"
+            },
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.Bold,
+            color = when (result.status) {
+                ProbeStatus.WORKING -> JarvisSemanticColors.success
+                ProbeStatus.FAILED -> MaterialTheme.colorScheme.error
+                ProbeStatus.SKIPPED_AUDIO -> MaterialTheme.colorScheme.primary
+            },
+            modifier = Modifier.width(22.dp)
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = result.modelId,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                text = when (result.status) {
+                    ProbeStatus.WORKING -> "Working (${result.latencyMs} ms)"
+                    ProbeStatus.FAILED ->
+                        "Failed (${result.error.ifBlank { "unknown error" }})"
+                    ProbeStatus.SKIPPED_AUDIO ->
+                        "Live-audio model — not chat-tested"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }

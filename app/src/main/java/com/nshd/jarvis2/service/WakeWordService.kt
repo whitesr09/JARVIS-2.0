@@ -267,6 +267,14 @@ class WakeWordService : Service(), RecognitionListener {
 
     // ── Wake ───────────────────────────────────────────────────────────
 
+    /**
+     * F3 background wake: hearing the wake phrase NEVER opens the app.
+     * The earcon plays, the mic is handed to a background voice session
+     * via [VoiceSessionManager.startFromWake], and the user keeps doing
+     * whatever they were doing. Only a failure (mic permission, engine
+     * error) surfaces anything — a notification whose tap may open the
+     * app so the user can fix permissions.
+     */
     private fun onWake() {
         // Release the mic immediately so the voice session can take it.
         runCatching { speechService?.stop() }
@@ -274,44 +282,72 @@ class WakeWordService : Service(), RecognitionListener {
         pauseReasons += REASON_WAKE_TRANSIENT
         acquireWakeLockBriefly()
         chime.playEarcon()
-        val intent = Intent(this, MainActivity::class.java).apply {
-            addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_SINGLE_TOP
-            )
-            putExtra(MainActivity.EXTRA_OPEN_VOICE, true)
-            putExtra(MainActivity.EXTRA_FROM_WAKE, true)
-        }
-        try {
-            startActivity(intent)
-        } catch (e: Exception) {
-            // OEM background-launch block: drop the transient pause so the
-            // listener recovers instead of waiting for a session that
-            // will never start.
-            pauseReasons -= REASON_WAKE_TRANSIENT
-            applyEngineState()
-            return
-        }
         WakeState.set(
             WakeStatus(
                 enabled = true,
                 listening = false,
                 batteryPaused = REASON_BATTERY in pauseReasons,
-                detail = "\"Hey Jarvis\" heard — opening voice"
+                detail = "\"Hey Jarvis\" heard — listening in background"
             )
         )
+        val started = try {
+            VoiceSessionManager.startFromWake(applicationContext)
+            true
+        } catch (e: Exception) {
+            false
+        }
+        if (!started) {
+            pauseReasons -= REASON_WAKE_TRANSIENT
+            applyEngineState()
+            postWakeFailureNotification()
+            return
+        }
+        // Early failure check: a session that lands on ERROR shortly
+        // after wake (mic permission, no recognizer…) notifies the user
+        // instead of failing silently in the background.
+        mainHandler.postDelayed({
+            if (VoiceSessionManager.uiState.value.status == VoiceStatus.ERROR) {
+                postWakeFailureNotification()
+            }
+        }, WAKE_FAILURE_CHECK_MS)
         // Watchdog: if no voice session actually starts (user backs out,
-        // permission denied…), lift the transient pause and listen again.
+        // permission denied…), lift the transient pause, listen again,
+        // and tell the user via notification if the session errored.
         mainHandler.postDelayed({
             if (REASON_WAKE_TRANSIENT in pauseReasons &&
-                REASON_SESSION !in pauseReasons &&
-                VoiceSessionManager.uiState.value.status == VoiceStatus.IDLE
+                REASON_SESSION !in pauseReasons
             ) {
-                pauseReasons -= REASON_WAKE_TRANSIENT
-                applyEngineState()
+                val status = VoiceSessionManager.uiState.value.status
+                if (status == VoiceStatus.IDLE || status == VoiceStatus.ERROR) {
+                    pauseReasons -= REASON_WAKE_TRANSIENT
+                    applyEngineState()
+                    if (status == VoiceStatus.ERROR) postWakeFailureNotification()
+                }
             }
         }, WAKE_WATCHDOG_MS)
+    }
+
+    /** F3: the ONLY user-visible fallback when a background wake fails. */
+    private fun postWakeFailureNotification() {
+        val openApp = PendingIntent.getActivity(
+            this,
+            2,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("Jarvis")
+            .setContentText(
+                "Jarvis couldn't start listening — open the app to check permissions"
+            )
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setContentIntent(openApp)
+            .setAutoCancel(true)
+            .build()
+        runCatching {
+            getSystemService(NotificationManager::class.java)
+                ?.notify(WAKE_FAILURE_NOTIFICATION_ID, notification)
+        }
     }
 
     private fun acquireWakeLockBriefly() {
@@ -454,6 +490,7 @@ class WakeWordService : Service(), RecognitionListener {
 
         private const val CHANNEL_ID = "jarvis_wake_word"
         private const val NOTIFICATION_ID = 1003
+        private const val WAKE_FAILURE_NOTIFICATION_ID = 1004
         private const val SAMPLE_RATE = 16000f
         /** Grammar-constrained phrases: the recognizer can only "hear" these. */
         private const val GRAMMAR =
@@ -467,6 +504,7 @@ class WakeWordService : Service(), RecognitionListener {
         private const val WAKELOCK_MS = 5_000L
         private const val WAKE_DEBOUNCE_MS = 3_000L
         private const val WAKE_WATCHDOG_MS = 12_000L
+        private const val WAKE_FAILURE_CHECK_MS = 2_500L
 
         fun isRunning(): Boolean = running
 

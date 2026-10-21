@@ -6,6 +6,22 @@ import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
+/** Outcome of one model probe in Connection Test v2 (F3). */
+enum class ProbeStatus { WORKING, FAILED, SKIPPED_AUDIO }
+
+/**
+ * One cached probe result (F3): per provider, per model.
+ * [latencyMs] is meaningful only for [ProbeStatus.WORKING]; [error]
+ * holds the short failure reason for [ProbeStatus.FAILED].
+ */
+data class ModelProbeResult(
+    val modelId: String,
+    val status: ProbeStatus,
+    val latencyMs: Long = 0L,
+    val error: String = "",
+    val timestamp: Long = 0L
+)
+
 /** Editable per-provider configuration (persisted, key encrypted at rest). */
 data class ProviderConfig(
     val id: String,
@@ -93,6 +109,53 @@ class ProviderStore(context: Context) {
         val array = org.json.JSONArray()
         ids.forEach { array.put(it) }
         prefs.edit().putString(key(id, "models"), array.toString()).apply()
+    }
+
+    /**
+     * Cached Connection-Test-v2 probe results for this provider (F3),
+     * in probe order. Empty when never tested. Lets the API screen show
+     * the last known health of every model instantly on reopen.
+     */
+    fun cachedProbeResults(id: String): List<ModelProbeResult> {
+        val raw = prefs.getString(key(id, "probes"), null) ?: return emptyList()
+        return try {
+            val array = org.json.JSONArray(raw)
+            val out = mutableListOf<ModelProbeResult>()
+            for (i in 0 until array.length()) {
+                val obj = array.optJSONObject(i) ?: continue
+                val modelId = obj.optString("model").takeIf { it.isNotBlank() } ?: continue
+                val status = try {
+                    ProbeStatus.valueOf(obj.optString("status"))
+                } catch (e: IllegalArgumentException) {
+                    ProbeStatus.FAILED
+                }
+                out += ModelProbeResult(
+                    modelId = modelId,
+                    status = status,
+                    latencyMs = obj.optLong("latency", 0L),
+                    error = obj.optString("error", ""),
+                    timestamp = obj.optLong("ts", 0L)
+                )
+            }
+            out
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun saveProbeResults(id: String, results: List<ModelProbeResult>) {
+        val array = org.json.JSONArray()
+        results.forEach { r ->
+            array.put(
+                org.json.JSONObject()
+                    .put("model", r.modelId)
+                    .put("status", r.status.name)
+                    .put("latency", r.latencyMs)
+                    .put("error", r.error)
+                    .put("ts", r.timestamp)
+            )
+        }
+        prefs.edit().putString(key(id, "probes"), array.toString()).apply()
     }
 
     fun activeProviderId(): String =

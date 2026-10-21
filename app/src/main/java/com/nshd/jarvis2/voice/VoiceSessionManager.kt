@@ -3,6 +3,7 @@ package com.nshd.jarvis2.voice
 import android.content.Context
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.AgentPipeline
+import com.nshd.jarvis2.brain.ExecutionLedger
 import com.nshd.jarvis2.brain.PersonaPrompts
 import com.nshd.jarvis2.brain.ProviderPresets
 import com.nshd.jarvis2.brain.ProviderStore
@@ -13,6 +14,7 @@ import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
 import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.service.ScreenShareState
+import com.nshd.jarvis2.ui.AppTheme
 import com.nshd.jarvis2.service.WakeWordControl
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
@@ -126,6 +128,25 @@ object VoiceSessionManager {
     @Volatile
     private var liveSwitchedToUniversal = false
 
+    // F3 Live tool-call dedupe: Gemini toolCall ids already processed in
+    // this session, mapped to the exact response that was sent. A
+    // duplicate id is answered with the cached response, never
+    // re-executed.
+    private val liveProcessedToolCalls = mutableMapOf<String, JSONObject>()
+
+    // F3 per-Live-turn execution ledger (reset at every finalizeLiveTurn).
+    @Volatile
+    private var liveLedger = ExecutionLedger()
+
+    /**
+     * F3 voice auto-listen guard: set when a media-play tool succeeds.
+     * While set, UniversalVoice must NOT auto-restart the recognizer —
+     * listening resumes only when the user taps the mic (setMicMuted)
+     * or wakes the assistant again.
+     */
+    @Volatile
+    private var mediaListenBlocked = false
+
     // Universal-turn bookkeeping: listening resumes only when BOTH the
     // pipeline has returned AND the TTS queue has drained.
     @Volatile
@@ -161,6 +182,9 @@ object VoiceSessionManager {
         active = true
         reconnectAttempts = 0
         liveSwitchedToUniversal = false
+        synchronized(liveProcessedToolCalls) { liveProcessedToolCalls.clear() }
+        liveLedger = ExecutionLedger()
+        mediaListenBlocked = false
         pipelineRunning = false
         pipelineDone = true
         ttsSpeaking = false
@@ -189,6 +213,83 @@ object VoiceSessionManager {
         VoiceEngine.AUTO
     }
 
+    /**
+     * Background session start for the wake-word service (F3): builds
+     * ProviderStore / MemoryDb / settings from the APPLICATION context
+     * only — no Activity is involved or retained. WakeWordService calls
+     * exactly this after "Hey Jarvis" fires. A session that is already
+     * active is left untouched. Stopping stays [stop] as before.
+     */
+    fun startFromWake(context: Context) {
+        if (active) return
+        val appCtx = context.applicationContext
+        start(
+            context = appCtx,
+            settings = loadSettingsForWake(appCtx),
+            providerStore = ProviderStore(appCtx),
+            memoryDb = MemoryDb(appCtx)
+        )
+    }
+
+    /**
+     * Reads JarvisSettings from the same SharedPreferences file
+     * MainActivity owns ("jarvis_settings", same keys/defaults, same
+     * retired-SUNSET → PURPLE migration) so a wake-started session
+     * behaves exactly like one started from the Voice screen.
+     */
+    private fun loadSettingsForWake(appContext: Context): JarvisSettings {
+        val prefs = appContext.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+        val rawTheme = prefs.getString("theme", AppTheme.PURPLE.name) ?: AppTheme.PURPLE.name
+        val theme = if (rawTheme == "SUNSET") {
+            AppTheme.PURPLE
+        } else {
+            try {
+                AppTheme.valueOf(rawTheme)
+            } catch (e: IllegalArgumentException) {
+                AppTheme.PURPLE
+            }
+        }
+        return JarvisSettings(
+            assistantName = prefs.getString("assistant_name", "Jarvis") ?: "Jarvis",
+            callsign = prefs.getString("callsign", "Nishad") ?: "Nishad",
+            theme = theme,
+            customBgHex = prefs.getString("custom_bg", null),
+            language = prefs.getString("language", "Auto") ?: "Auto",
+            persona = prefs.getString("persona", "Jarvis Pro") ?: "Jarvis Pro",
+            wakeAlwaysOn = prefs.getBoolean("wake_always_on", false),
+            silentExecution = prefs.getBoolean("silent_execution", false),
+            voiceName = prefs.getString("voice_name", "Kore") ?: "Kore",
+            customVoiceName = prefs.getString("custom_voice_name", "") ?: "",
+            liveModel = prefs.getString(
+                "live_model", "gemini-2.5-flash-native-audio-preview-12-2025"
+            ) ?: "gemini-2.5-flash-native-audio-preview-12-2025",
+            voiceEngine = prefs.getString("voice_engine", "AUTO") ?: "AUTO",
+            avatarId = prefs.getString("avatar_id", "droid") ?: "droid",
+            biometricsEnrolled = prefs.getBoolean("biometrics_enrolled", false),
+            biometricsSampleCount = prefs.getInt("biometrics_sample_count", 0),
+            biometricsEnrolledDate = prefs.getString("biometrics_enrolled_date", "") ?: ""
+        )
+    }
+
+    /**
+     * A media-play tool just succeeded in this voice session (F3):
+     * block Universal auto-listen resume until the user taps the mic
+     * or wakes the assistant again, and say so once via a SYSTEM caption.
+     */
+    private fun noteMediaPlayed() {
+        if (mediaListenBlocked) return
+        mediaListenBlocked = true
+        if (_uiState.value.mode == VoiceMode.UNIVERSAL) {
+            addCaption(
+                VoiceCaption(
+                    fromUser = false,
+                    text = "Music playing — tap the mic when you want me again.",
+                    kind = CaptionKind.SYSTEM
+                )
+            )
+        }
+    }
+
     /** Rebuild the session with the same inputs (error-screen retry). */
     fun retry() {
         val ctx = appContext ?: return
@@ -204,6 +305,9 @@ object VoiceSessionManager {
     }
 
     fun setMicMuted(muted: Boolean) {
+        // A mic tap is the user's explicit "talk to me again" signal —
+        // it lifts the media-play auto-listen block (F3).
+        mediaListenBlocked = false
         _uiState.value = _uiState.value.copy(micMuted = muted)
         if (muted) _amplitude.value = 0f
         val uv = universal
@@ -222,6 +326,8 @@ object VoiceSessionManager {
 
     private fun stopInternal(resetUi: Boolean) {
         active = false
+        synchronized(liveProcessedToolCalls) { liveProcessedToolCalls.clear() }
+        mediaListenBlocked = false
         pulseJob?.cancel()
         pulseJob = null
         teardownLive()
@@ -481,15 +587,49 @@ object VoiceSessionManager {
             if (!active) return
             val ctx = appContext ?: return
             val db = memoryDb ?: return
+            // F3 dedupe: this Gemini toolCall id was already processed
+            // in this session — answer with the cached response and
+            // NEVER re-execute the phone action.
+            synchronized(liveProcessedToolCalls) { liveProcessedToolCalls[id] }?.let { cached ->
+                client?.sendToolResponse(id, name, cached)
+                return
+            }
             scope.launch(Dispatchers.IO) {
+                // Re-check inside the coroutine: a racing duplicate may
+                // have completed while this one was queued.
+                synchronized(liveProcessedToolCalls) { liveProcessedToolCalls[id] }
+                    ?.let { cached ->
+                        if (active) client?.sendToolResponse(id, name, cached)
+                        return@launch
+                    }
                 val result: ToolResult = try {
-                    ToolExecutor(ctx, db).execute(name, args)
+                    // Per-turn ledger: identical repeat calls inside this
+                    // Live turn return the cached result (F3).
+                    ToolExecutor(ctx, db, liveLedger).execute(name, args)
                 } catch (e: Exception) {
                     ToolResult(
                         false,
                         "Tool $name failed safely: ${e.message ?: "unexpected error"}"
                     )
                 }
+                if (result.success && name in ToolRegistry.MEDIA_PLAY_TOOLS) {
+                    noteMediaPlayed()
+                }
+                // F3 terminal rule (Live): the tool response carries a
+                // system note so the model stops calling tools for this
+                // request once media/open succeeded.
+                val responseMessage = if (
+                    result.success && name in ToolRegistry.TERMINAL_TOOLS
+                ) {
+                    result.message +
+                        "\nTask complete. Do not call any more tools for this request."
+                } else {
+                    result.message
+                }
+                val response = JSONObject()
+                    .put("success", result.success)
+                    .put("message", responseMessage)
+                synchronized(liveProcessedToolCalls) { liveProcessedToolCalls[id] = response }
                 if (active) {
                     // Status chip only — the raw result goes back to the
                     // model, never into the caption text (F2).
@@ -505,9 +645,6 @@ object VoiceSessionManager {
                             kind = CaptionKind.TOOL
                         )
                     )
-                    val response = JSONObject()
-                        .put("success", result.success)
-                        .put("message", result.message)
                     client?.sendToolResponse(id, name, response)
                 }
             }
@@ -515,6 +652,8 @@ object VoiceSessionManager {
     }
 
     private fun finalizeLiveTurn() {
+        // A new Live turn begins — fresh execution ledger (F3).
+        liveLedger = ExecutionLedger()
         markTurnCaptionsFinal()
         val userText = synchronized(userTurn) { userTurn.toString().trim() }
         val assistantText = synchronized(assistantTurn) { assistantTurn.toString().trim() }
@@ -604,7 +743,7 @@ object VoiceSessionManager {
             scope.launch {
                 delay(300)
                 if (active && _uiState.value.mode == VoiceMode.UNIVERSAL &&
-                    !_uiState.value.micMuted && !pipelineRunning
+                    !_uiState.value.micMuted && !pipelineRunning && !mediaListenBlocked
                 ) {
                     setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
                     universal?.startListening()
@@ -655,6 +794,13 @@ object VoiceSessionManager {
                     providerStore = store,
                     codeMode = false,
                     onEvent = { event ->
+                        // F3: media started → the recognizer must not
+                        // auto-restart over the music (see noteMediaPlayed).
+                        if (event.kind == ToolEventKind.SUCCESS &&
+                            event.toolName in ToolRegistry.MEDIA_PLAY_TOOLS
+                        ) {
+                            noteMediaPlayed()
+                        }
                         addCaption(
                             VoiceCaption(
                                 fromUser = false,
@@ -755,6 +901,9 @@ object VoiceSessionManager {
     private fun maybeResumeUniversalListening() {
         if (!active) return
         if (_uiState.value.mode != VoiceMode.UNIVERSAL) return
+        // F3: media is playing — never auto-restart the recognizer;
+        // only a mic tap (setMicMuted) or a new wake clears the block.
+        if (mediaListenBlocked) return
         if (_uiState.value.micMuted) return
         if (pipelineRunning || !pipelineDone) return
         if (ttsSpeaking) return // drain callback resumes when speech ends

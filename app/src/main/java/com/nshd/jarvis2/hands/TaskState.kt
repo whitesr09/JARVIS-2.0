@@ -1,5 +1,6 @@
 package com.nshd.jarvis2.hands
 
+import com.nshd.jarvis2.brain.TaskQueue
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -95,6 +96,9 @@ object TaskState {
 
     /** Overlay single-tap: cancel the running pipeline coroutine. */
     fun abort() {
+        // F3: aborting also aborts the whole multitask queue (running
+        // sub-task → FAILED, queued ones → SKIPPED, nothing runnable).
+        TaskQueue.abortAll()
         val running = job
         if (running != null && running.isActive) {
             running.cancel()

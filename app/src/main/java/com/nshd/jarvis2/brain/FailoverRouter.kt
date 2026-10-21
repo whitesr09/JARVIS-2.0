@@ -148,6 +148,16 @@ class FailoverRouter(
                             content = result.message,
                             toolCallId = call.id
                         )
+                        // F3 terminal media/open rule: a successful
+                        // youtube_play / open_app ENDS the turn right
+                        // here — the tool result's first line is the
+                        // final summary. No more model round trips
+                        // (extra trips were replaying the request).
+                        if (result.success && call.name in ToolRegistry.TERMINAL_TOOLS) {
+                            return result.message.lineSequence()
+                                .firstOrNull()?.trim().orEmpty()
+                                .ifBlank { "Done." }
+                        }
                         // Vision tools (see_screen) attach a screenshot:
                         // deliver it as a following user message with image
                         // content parts so the model can actually see it.

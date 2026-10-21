@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -28,6 +29,7 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import com.nshd.jarvis2.MainActivity
+import com.nshd.jarvis2.brain.TaskQueue
 import com.nshd.jarvis2.hands.TaskState
 import com.nshd.jarvis2.ui.AppTheme
 import com.nshd.jarvis2.ui.AvatarCatalog
@@ -48,10 +50,18 @@ import kotlin.math.abs
  * card behind it — plus the 4-step Task HUD (Goal, Recent Steps, Running
  * Indicator, Progress) fed by [TaskState].
  *
- * Interactions (locked preferences):
- *  - single-tap: abort the running task, or (idle) open the Voice screen
- *  - double-tap: expand/collapse the Task HUD
+ * Interactions (locked preferences, F3):
+ *  - single-tap: abort the running task; otherwise toggle a BACKGROUND
+ *    voice session (never opens the app)
+ *  - double-tap: expand/collapse the Task HUD — the HUD's own
+ *    "Open Jarvis app" button is the only overlay element that
+ *    launches MainActivity
  *  - drag + release: snap to the nearest screen edge
+ *
+ * F3 HUD: the panel is a task-queue view — header, up to 6 task rows
+ * from [TaskQueue], the current task's last 3 steps ([TaskState]),
+ * and a footer progress bar + "X of Y done". With an empty queue but a
+ * single task running it falls back to that one task as a single row.
  *
  * Built with plain Android Views on purpose: Compose is not hosted in
  * this window. Flow collection happens on the service's main-thread
@@ -64,6 +74,13 @@ class FloatingOverlayService : Service() {
     private var bubbleView: ImageView? = null
     private var hudPanel: LinearLayout? = null
     private var hudGoalView: TextView? = null
+    private var hudHeaderView: TextView? = null
+    private var hudTaskGlyphViews: List<TextView> = emptyList()
+    private var hudTaskTitleViews: List<TextView> = emptyList()
+    private var hudTaskRowViews: List<LinearLayout> = emptyList()
+    private var hudMoreView: TextView? = null
+    private var hudOpenAppView: TextView? = null
+    private var hudOpenAppBackground: GradientDrawable? = null
     private var hudStepViews: List<TextView> = emptyList()
     private var hudProgressBar: ProgressBar? = null
     private var hudStatusView: TextView? = null
@@ -201,36 +218,96 @@ class FloatingOverlayService : Service() {
             setStroke(dp(1), palette.border)
         }
         hudBackground = panelBg
-        val steps = mutableListOf<TextView>()
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = panelBg // The HUD is a panel — its card is allowed.
             setPadding(dp(12), dp(10), dp(12), dp(10))
-            layoutParams = FrameLayout.LayoutParams(dp(248), FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            layoutParams = FrameLayout.LayoutParams(dp(264), FrameLayout.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(62)
             }
         }
-        val goalView = TextView(this).apply {
+        // Header: "<AssistantName> • Tasks"
+        val header = TextView(this).apply {
             textSize = 13f
             setTextColor(palette.textPrimary)
-            maxLines = 2
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
-        panel.addView(goalView)
-        hudGoalView = goalView
-        repeat(4) {
-            val stepView = TextView(this).apply {
+        panel.addView(header)
+        hudHeaderView = header
+        hudGoalView = header // legacy alias: header replaced the goal line
+
+        // Task rows: up to MAX_HUD_TASKS, glyph + 1-line ellipsized title.
+        val glyphs = mutableListOf<TextView>()
+        val titles = mutableListOf<TextView>()
+        val rows = mutableListOf<LinearLayout>()
+        repeat(MAX_HUD_TASKS) {
+            val glyph = TextView(this).apply {
                 textSize = 12f
-                setTextColor(palette.textSecondary)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                layoutParams = LinearLayout.LayoutParams(dp(18), LinearLayout.LayoutParams.WRAP_CONTENT)
+            }
+            val title = TextView(this).apply {
+                textSize = 12f
+                setTextColor(palette.textPrimary)
                 maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                layoutParams = LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+                )
+            }
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { topMargin = dp(3) }
+                ).apply { topMargin = dp(4) }
+                addView(glyph)
+                addView(title)
+            }
+            glyphs += glyph
+            titles += title
+            rows += row
+            panel.addView(row)
+        }
+        hudTaskGlyphViews = glyphs
+        hudTaskTitleViews = titles
+        hudTaskRowViews = rows
+
+        // Overflow line: "…and N more"
+        val more = TextView(this).apply {
+            textSize = 11f
+            setTextColor(palette.textSecondary)
+            maxLines = 1
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(3); leftMargin = dp(18) }
+        }
+        panel.addView(more)
+        hudMoreView = more
+
+        // Current task's last 3 steps (small text).
+        val steps = mutableListOf<TextView>()
+        repeat(MAX_HUD_STEPS) {
+            val stepView = TextView(this).apply {
+                textSize = 11f
+                setTextColor(palette.textSecondary)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(3); leftMargin = dp(18) }
             }
             steps += stepView
             panel.addView(stepView)
         }
         hudStepViews = steps
+
+        // Footer: overall progress bar + "X of Y done" status line.
         val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
             isIndeterminate = true
@@ -254,8 +331,46 @@ class FloatingOverlayService : Service() {
         }
         panel.addView(status)
         hudStatusView = status
+
+        // The ONLY overlay element allowed to launch MainActivity (F3).
+        val openBg = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(10).toFloat()
+            setColor(palette.accent)
+        }
+        hudOpenAppBackground = openBg
+        val openApp = TextView(this).apply {
+            text = "Open Jarvis app"
+            textSize = 12f
+            setTextColor(0xFFFFFFFF.toInt())
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            background = openBg
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(9) }
+            setOnClickListener { openJarvisApp() }
+        }
+        panel.addView(openApp)
+        hudOpenAppView = openApp
         refreshHud()
         return panel
+    }
+
+    /** HUD-button-only app launch (F3) — never used from the tap path. */
+    private fun openJarvisApp() {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            // Activity launch blocked (rare OEM policy) — stay floating.
+        }
     }
 
     private fun removeOverlay() {
@@ -269,11 +384,18 @@ class FloatingOverlayService : Service() {
         bubbleView = null
         hudPanel = null
         hudBackground = null
+        hudOpenAppBackground = null
+        hudTaskGlyphViews = emptyList()
+        hudTaskTitleViews = emptyList()
+        hudTaskRowViews = emptyList()
     }
 
     // ── State observation ──────────────────────────────────────────────
 
     private fun observeState() {
+        scope.launch {
+            TaskQueue.tasks.collect { refreshHud() }
+        }
         scope.launch {
             TaskState.goal.collect { refreshHud() }
         }
@@ -300,30 +422,101 @@ class FloatingOverlayService : Service() {
         }
     }
 
+    /** One display row in the HUD task list (queue item or fallback). */
+    private data class HudRow(val glyph: String, val glyphColor: Int, val title: String, val running: Boolean)
+
+    private fun glyphFor(statusName: String): Pair<String, Int> = when (statusName) {
+        "DONE" -> "✓" to GLYPH_DONE
+        "RUNNING" -> "▶" to palette.accent
+        "FAILED" -> "✕" to GLYPH_FAILED
+        "SKIPPED" -> "•" to palette.textSecondary
+        else -> "•" to palette.textSecondary // QUEUED and anything new
+    }
+
     private fun refreshHud() {
-        val goal = TaskState.goal.value
-        hudGoalView?.text = if (goal.isBlank()) "No task running" else "🎯 $goal"
-        val steps = TaskState.steps.value
+        hudHeaderView?.text = "${assistantName()} • Tasks"
+        val queue = TaskQueue.tasks.value
+        val rows: List<HudRow>
+        val total: Int
+        val done: Int
+        val overallProgress: Float // -1f = indeterminate
+        if (queue.isNotEmpty()) {
+            rows = queue.take(MAX_HUD_TASKS).map { item ->
+                val (glyph, color) = glyphFor(item.status.name)
+                HudRow(glyph, color, item.title, item.status.name == "RUNNING")
+            }
+            total = queue.size
+            done = queue.count { it.status.name == "DONE" }
+            overallProgress = if (total > 0) done.toFloat() / total else -1f
+            val extra = queue.size - MAX_HUD_TASKS
+            hudMoreView?.let { more ->
+                more.text = if (extra > 0) "…and $extra more" else ""
+                more.visibility = if (extra > 0) View.VISIBLE else View.GONE
+            }
+        } else if (TaskState.goal.value.isNotBlank() || TaskState.active.value) {
+            // Fallback (old behaviour): the single TaskState task as one row.
+            val goal = TaskState.goal.value.ifBlank { "Task" }
+            val running = TaskState.active.value
+            val failed = !running && TaskState.lastOutcome.value?.startsWith("❌") == true
+            val (glyph, color) = when {
+                running -> glyphFor("RUNNING")
+                failed -> glyphFor("FAILED")
+                !running && TaskState.lastOutcome.value != null -> glyphFor("DONE")
+                else -> glyphFor("QUEUED")
+            }
+            rows = listOf(HudRow(glyph, color, goal, running))
+            total = 1
+            done = if (!running && !failed && TaskState.lastOutcome.value != null) 1 else 0
+            overallProgress = TaskState.progress.value
+            hudMoreView?.visibility = View.GONE
+        } else {
+            rows = emptyList()
+            total = 0
+            done = 0
+            overallProgress = -1f
+            hudMoreView?.visibility = View.GONE
+        }
+        hudTaskRowViews.forEachIndexed { index, rowView ->
+            val row = rows.getOrNull(index)
+            rowView.visibility = if (row == null) View.GONE else View.VISIBLE
+            if (row != null) {
+                hudTaskGlyphViews.getOrNull(index)?.let { glyph ->
+                    glyph.text = row.glyph
+                    glyph.setTextColor(row.glyphColor)
+                }
+                hudTaskTitleViews.getOrNull(index)?.let { title ->
+                    title.text = row.title
+                    title.setTextColor(palette.textPrimary)
+                }
+            }
+        }
+        // Current task's last 3 steps (TaskState), small text.
+        val steps = TaskState.steps.value.takeLast(MAX_HUD_STEPS)
         hudStepViews.forEachIndexed { index, view ->
             val step = steps.getOrNull(index)
             view.text = step.orEmpty()
             view.visibility = if (step == null) View.GONE else View.VISIBLE
         }
-        val progress = TaskState.progress.value
         hudProgressBar?.let { bar ->
-            if (progress < 0f) {
-                bar.isIndeterminate = TaskState.active.value
-                if (!TaskState.active.value) bar.progress = 0
+            if (overallProgress < 0f) {
+                bar.isIndeterminate = TaskState.active.value ||
+                    queue.any { it.status.name == "RUNNING" }
+                if (!bar.isIndeterminate) bar.progress = 0
             } else {
                 bar.isIndeterminate = false
-                bar.progress = (progress * 100).toInt()
+                bar.progress = (overallProgress * 100).toInt().coerceIn(0, 100)
             }
         }
         hudStatusView?.text = when {
-            TaskState.active.value -> "● Running — tap avatar to abort"
+            total > 0 -> "$done of $total done"
             TaskState.lastOutcome.value != null -> TaskState.lastOutcome.value
-            else -> "Idle — tap avatar for voice, double-tap hides this panel"
+            else -> "0 of 0 done — idle"
         }
+    }
+
+    private fun assistantName(): String {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_ASSISTANT_NAME, "Jarvis")?.takeIf { it.isNotBlank() } ?: "Jarvis"
     }
 
     private fun updatePulse() {
@@ -437,18 +630,28 @@ class FloatingOverlayService : Service() {
         mainHandler.postDelayed(action, DOUBLE_TAP_MS)
     }
 
+    /**
+     * F3: single-tap NEVER launches the app. With a task running it
+     * aborts (unchanged); otherwise it toggles a background voice
+     * session — start one via [VoiceSessionManager.startFromWake] when
+     * idle, stop the live one otherwise.
+     */
     private fun onSingleTap() {
         if (TaskState.active.value) {
             TaskState.abort()
+            return
+        }
+        val status = VoiceSessionManager.uiState.value.status
+        val voiceActive = status != VoiceStatus.IDLE && status != VoiceStatus.ERROR
+        if (voiceActive) {
+            VoiceSessionManager.stop()
         } else {
-            val intent = Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                putExtra(MainActivity.EXTRA_OPEN_VOICE, true)
-            }
             try {
-                startActivity(intent)
+                VoiceSessionManager.startFromWake(this)
             } catch (e: Exception) {
-                // Activity launch blocked (rare OEM policy) — stay floating.
+                // Mic permission / engine failure: stay floating; the
+                // session state surfaces the error in-app, the wake
+                // path owns the failure notification.
             }
         }
     }
@@ -520,13 +723,21 @@ class FloatingOverlayService : Service() {
             bg.setStroke(dp(1), newPalette.border)
         }
         hudGoalView?.setTextColor(newPalette.textPrimary)
+        hudHeaderView?.setTextColor(newPalette.textPrimary)
+        hudTaskTitleViews.forEach { it.setTextColor(newPalette.textPrimary) }
+        hudMoreView?.setTextColor(newPalette.textSecondary)
         hudStepViews.forEach { it.setTextColor(newPalette.textSecondary) }
         hudStatusView?.setTextColor(newPalette.accent)
+        hudOpenAppBackground?.setColor(newPalette.accent)
         hudProgressBar?.let { bar ->
             bar.progressTintList = ColorStateList.valueOf(newPalette.accent)
             bar.indeterminateTintList = ColorStateList.valueOf(newPalette.accent)
             bar.progressBackgroundTintList = ColorStateList.valueOf(newPalette.progressTrack)
         }
+        // Glyph colours that follow the palette (▶/•) re-derive on the
+        // next refresh; force one now so a theme change recolours rows
+        // immediately (✓/✕ keep their fixed success/failure colours).
+        refreshHud()
     }
 
     private fun createNotificationChannel() {
@@ -593,8 +804,13 @@ class FloatingOverlayService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val PREFS_NAME = "jarvis_settings"
         private const val KEY_AVATAR_ID = "avatar_id"
+        private const val KEY_ASSISTANT_NAME = "assistant_name"
         private const val KEY_THEME = "theme"
         private const val KEY_CUSTOM_BG = "custom_bg"
+        private const val MAX_HUD_TASKS = 6
+        private const val MAX_HUD_STEPS = 3
+        private const val GLYPH_DONE = 0xFF43A047.toInt()
+        private const val GLYPH_FAILED = 0xFFE53935.toInt()
         private const val TOUCH_SLOP_PX = 14f
         private const val TAP_MAX_MS = 350L
         private const val DOUBLE_TAP_MS = 320L

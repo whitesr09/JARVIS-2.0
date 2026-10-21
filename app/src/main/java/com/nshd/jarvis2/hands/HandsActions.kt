@@ -9,6 +9,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
+import com.nshd.jarvis2.brain.tools.ConfirmGate
 import com.nshd.jarvis2.service.JarvisAccessibilityService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -32,21 +33,41 @@ data class ActionResult(val success: Boolean, val message: String)
 object HandsActions {
     private val mutex = Mutex()
 
-    suspend fun clickElement(index: Int): ActionResult = serialized {
-        val service = serviceOrNull() ?: return@serialized disabled()
+    // SensitiveTapGuard (F3) constants.
+    private const val OWN_PACKAGE = "com.nshd.jarvis2"
+    private val SOCIAL_PHRASES = listOf(
+        "delete request", "remove follower", "accept request", "confirm request",
+        "follow back", "unfollow", "reject", "block"
+    )
+    private val SEND_PHRASES = listOf(
+        "share now", "send now", "send", "post", "publish", "comment", "tweet"
+    )
+    private val DESTRUCTIVE_PHRASES = listOf(
+        "clear all", "delete", "remove", "erase", "discard"
+    )
+    private val NAV_LABELS = setOf(
+        "back", "home", "recents", "recent apps", "notifications",
+        "search", "explore", "reels", "profile", "library", "subscriptions"
+    )
+
+    suspend fun clickElement(index: Int): ActionResult = serializedLong {
+        val service = serviceOrNull() ?: return@serializedLong disabled()
         val element = JarvisAccessibilityService.lastSnapshot.getOrNull(index)
-            ?: return@serialized ActionResult(
+            ?: return@serializedLong ActionResult(
                 false,
                 "Element #$index is not in the last screen snapshot. Call inspect_screen first."
             )
+        // SensitiveTapGuard (F3): runs inside the serialized executor.
+        sensitiveTapDenial(service, element, element.label)?.let { return@serializedLong it }
         clickResolved(service, element, "element #$index (${element.label.ifBlank { "unlabelled" }})")
     }
 
-    suspend fun clickText(text: String): ActionResult = serialized {
-        val service = serviceOrNull() ?: return@serialized disabled()
+    suspend fun clickText(text: String): ActionResult = serializedLong {
+        val service = serviceOrNull() ?: return@serializedLong disabled()
         val reader = service.screenReader()
         val element = reader.findByText(text)
-            ?: return@serialized ActionResult(false, "No visible element matched \"$text\".")
+            ?: return@serializedLong ActionResult(false, "No visible element matched \"$text\".")
+        sensitiveTapDenial(service, element, text)?.let { return@serializedLong it }
         clickResolved(service, element, "\"${element.label.ifBlank { text }}\"")
     }
 
@@ -144,16 +165,44 @@ object HandsActions {
     }
 
     /** Explicit coordinate tool; not used as a hidden fallback for labelled targets. */
-    suspend fun tapPercent(xPercent: Double, yPercent: Double): ActionResult = serialized {
-        val service = serviceOrNull() ?: return@serialized disabled()
+    suspend fun tapPercent(xPercent: Double, yPercent: Double): ActionResult = serializedLong {
+        val service = serviceOrNull() ?: return@serializedLong disabled()
         if (xPercent !in 0.0..100.0 || yPercent !in 0.0..100.0) {
-            return@serialized ActionResult(false, "Tap percentages must be between 0 and 100.")
+            return@serializedLong ActionResult(false, "Tap percentages must be between 0 and 100.")
         }
         val metrics = service.resources.displayMetrics
         val x = metrics.widthPixels * (xPercent / 100.0).toFloat()
         val y = metrics.heightPixels * (yPercent / 100.0).toFloat()
+        // SensitiveTapGuard (F3): classify by the element under the
+        // point (or the nearest labelled one) — this also covers the
+        // vision_tap path, which lands here via ToolExecutor. No label
+        // information at all → allow.
+        val near = elementNearPoint(x.toInt(), y.toInt(), metrics.density)
+        if (near != null) {
+            sensitiveTapDenial(service, near, near.label)?.let { return@serializedLong it }
+        }
         val dispatched = dispatchSwipe(service, x, y, x, y, durationMs = 60)
         ActionResult(dispatched, if (dispatched) "Tapped at $xPercent%, $yPercent%." else "Tap was not dispatched.")
+    }
+
+    /** Element whose bounds contain the point, else the nearest within ~120dp. */
+    private fun elementNearPoint(x: Int, y: Int, density: Float): UiElement? {
+        val snapshot = JarvisAccessibilityService.lastSnapshot
+        if (snapshot.isEmpty()) return null
+        snapshot.lastOrNull { it.bounds.contains(x, y) }?.let { return it }
+        val maxDistancePx = 120f * density
+        return snapshot
+            .filter { it.label.isNotBlank() || it.text.isNotBlank() || it.desc.isNotBlank() }
+            .minByOrNull { element ->
+                val dx = element.bounds.exactCenterX() - x
+                val dy = element.bounds.exactCenterY() - y
+                dx * dx + dy * dy
+            }
+            ?.takeIf { element ->
+                val dx = element.bounds.exactCenterX() - x
+                val dy = element.bounds.exactCenterY() - y
+                dx * dx + dy * dy <= maxDistancePx * maxDistancePx
+            }
     }
 
     suspend fun waitForSettle(timeoutMs: Long = 2_000): Boolean {
@@ -178,6 +227,96 @@ object HandsActions {
 
     private suspend fun <T> serialized(block: suspend () -> T): T =
         mutex.withLock { withTimeout(15_000) { block() } }
+
+    /**
+     * Same single-mutex serialization, but with a 45-second bound: tap
+     * actions may suspend in the SensitiveTapGuard's ConfirmGate, whose
+     * own timeout is 30 s — the 15 s bound would cut the prompt short.
+     */
+    private suspend fun <T> serializedLong(block: suspend () -> T): T =
+        mutex.withLock { withTimeout(45_000) { block() } }
+
+    // ── SensitiveTapGuard (F3) ─────────────────────────────────────────
+    //
+    // Before any tap executes, the target's label / contentDescription /
+    // text is classified. SEND, SOCIAL and DESTRUCTIVE targets suspend
+    // in ConfirmGate (the same mechanism ToolExecutor uses); Allow runs
+    // the tap, Deny/timeout returns ActionResult(false, "User declined
+    // this action"). Never gated: our own package (including the
+    // ConfirmGate dialog's own buttons), soft-keyboard keys, pure
+    // navigation (back/home/tabs and friends), switches and sliders.
+
+    /** Returns a denial result when the tap must not run, else null. */
+    private suspend fun sensitiveTapDenial(
+        service: JarvisAccessibilityService,
+        element: UiElement?,
+        fallbackLabel: String
+    ): ActionResult? {
+        val packageName = JarvisAccessibilityService.lastPackageName
+            ?: service.screenReader().currentPackage()
+        if (packageName == OWN_PACKAGE) return null
+        if (isGuardExempt(element, packageName)) return null
+        val labelText = listOf(
+            element?.label.orEmpty(),
+            element?.text.orEmpty(),
+            element?.desc.orEmpty(),
+            fallbackLabel
+        ).joinToString(" ").trim()
+        if (labelText.isBlank()) return null
+        if (sensitivePhrase(labelText.lowercase()) == null) return null
+        val displayLabel = element?.label?.ifBlank { fallbackLabel }
+            ?: fallbackLabel.ifBlank { labelText }
+        val approved = ConfirmGate.confirm(
+            "Tap '${displayLabel.trim().take(60)}' in ${appDisplayName(service, packageName)}?"
+        )
+        return if (approved) null else ActionResult(false, "User declined this action")
+    }
+
+    private fun isGuardExempt(element: UiElement?, packageName: String?): Boolean {
+        if (packageName != null && (
+                packageName.contains("inputmethod") ||
+                    packageName.contains("honeyboard") ||
+                    packageName == "com.google.android.inputmethod.latin"
+                )
+        ) return true // soft-keyboard keys
+        if (element == null) return false
+        val className = element.className
+        if (className.contains("Switch") || className.contains("ToggleButton") ||
+            className.contains("SeekBar") || className.contains("Slider") ||
+            className.contains("CheckBox") || className.contains("RadioButton") ||
+            className.contains("TabLayout") || className.contains("TabWidget")
+        ) return true // switches / sliders / tab strips
+        if (element.checked != null) return true // checkable toggle state control
+        if (element.viewId.contains("tab", ignoreCase = true)) return true
+        val normalizedLabel = element.label.trim().lowercase()
+        if (normalizedLabel in NAV_LABELS) return true // pure navigation
+        return false
+    }
+
+    /** First sensitive phrase (word-boundary match), most specific class first. */
+    private fun sensitivePhrase(lowerLabel: String): String? {
+        for (phrase in SOCIAL_PHRASES + SEND_PHRASES + DESTRUCTIVE_PHRASES) {
+            if (Regex("\\b" + Regex.escape(phrase) + "\\b").containsMatchIn(lowerLabel)) {
+                return phrase
+            }
+        }
+        return null
+    }
+
+    private fun appDisplayName(
+        service: JarvisAccessibilityService,
+        packageName: String?
+    ): String {
+        if (packageName.isNullOrBlank()) return "this app"
+        return try {
+            val pm = service.packageManager
+            pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString()
+        } catch (e: Exception) {
+            packageName.substringAfterLast('.')
+                .replaceFirstChar { it.uppercase() }
+                .ifBlank { "this app" }
+        }
+    }
 
     private fun serviceOrNull(): JarvisAccessibilityService? = JarvisAccessibilityService.instance
 

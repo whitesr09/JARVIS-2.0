@@ -1,6 +1,7 @@
 package com.nshd.jarvis2.brain.tools
 
 import android.content.Context
+import com.nshd.jarvis2.brain.ExecutionLedger
 import com.nshd.jarvis2.hands.ActionResult
 import com.nshd.jarvis2.hands.ContactResolution
 import com.nshd.jarvis2.hands.ContactsResolver
@@ -27,7 +28,9 @@ data class ToolResult(
  */
 class ToolExecutor(
     context: Context,
-    private val memoryDb: MemoryDb
+    private val memoryDb: MemoryDb,
+    /** Per-turn dedupe ledger (F3); null disables dedupe for ad-hoc calls. */
+    private val ledger: ExecutionLedger? = null
 ) {
     private val appContext = context.applicationContext
     private val intents = DeepIntents(appContext)
@@ -42,11 +45,20 @@ class ToolExecutor(
         args: JSONObject,
         includeScreenSummary: Boolean
     ): ToolResult {
+        // F3 execution ledger: an identical call that already succeeded
+        // this turn returns its cached result instead of re-executing;
+        // failures get at most ExecutionLedger.MAX_ATTEMPTS attempts.
+        // Pure observation tools are exempt: inspect_screen / see_screen
+        // must always read the CURRENT screen (the verify-after-act
+        // loop depends on fresh state, and a read replays no action).
+        val activeLedger = ledger?.takeUnless { name in OBSERVATION_TOOLS }
+        activeLedger?.gate(name, args)?.let { cached -> return cached }
         val raw = try {
             dispatch(name, args)
         } catch (e: Exception) {
             ToolResult(false, "Tool $name failed safely: ${e.message ?: "unexpected error"}")
         }
+        activeLedger?.record(name, args, raw)
         if (!includeScreenSummary || name == "inspect_screen" ||
             name == "see_screen" || name == "vision_tap"
         ) return raw
@@ -252,6 +264,18 @@ class ToolExecutor(
         val message = args.requiredString("message") ?: return missing("message")
         return when (val resolution = contactsResolver.resolve(contact)) {
             is ContactResolution.Found -> {
+                // F3: EVERY message send is confirmed, always — the
+                // prompt names the recipient AND shows the full text.
+                val approved = ConfirmGate.confirm(
+                    "Send WhatsApp message to ${resolution.contact.displayName} " +
+                        "(${resolution.contact.phone})?\n\nMessage: \"$message\""
+                )
+                if (!approved) {
+                    return ToolResult(
+                        false,
+                        "WhatsApp message was not confirmed, so nothing was sent."
+                    )
+                }
                 val result = intents.whatsappMessage(resolution.contact.phone, message)
                 if (result.success) {
                     ToolResult(true, "WhatsApp message to ${resolution.contact.displayName}: ${result.message}")
@@ -337,6 +361,8 @@ class ToolExecutor(
     companion object {
         private const val MAX_UNCONFIRMED_BULK = 5
         private const val MAX_SUMMARY_ELEMENTS = 15
+        /** Read-only screen observation — exempt from the F3 ledger. */
+        private val OBSERVATION_TOOLS = setOf("inspect_screen", "see_screen")
         private val UI_MUTATION_TOOLS = setOf(
             "open_app", "click_element", "click_text", "type_text", "scroll",
             "press_key", "tap_percent", "whatsapp_message", "youtube_play"

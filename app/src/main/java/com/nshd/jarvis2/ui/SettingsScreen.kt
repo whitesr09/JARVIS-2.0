@@ -654,7 +654,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(18.dp))
         Text(
-            text = "JARVIS • v1.1.0",
+            text = "JARVIS • v1.2.0",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)

@@ -54,6 +54,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.ProviderStore
+import com.nshd.jarvis2.ui.orb.JarvisOrb
+import com.nshd.jarvis2.ui.orb.toOrbState
 import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.voice.CaptionKind
 import com.nshd.jarvis2.voice.VoiceCaption
@@ -179,14 +181,13 @@ private fun VoiceSessionBody(
     Spacer(modifier = Modifier.height(10.dp))
 
     // ── Orb (tap toggles the mic) ──────────────────────────────────────
-    ParticleOrb(
-        listening = uiState.status == VoiceStatus.LISTENING ||
-            uiState.status == VoiceStatus.UNIVERSAL_ACTIVE,
-        speaking = uiState.status == VoiceStatus.SPEAKING,
-        thinking = uiState.status == VoiceStatus.THINKING ||
-            uiState.status == VoiceStatus.CONNECTING,
-        error = uiState.status == VoiceStatus.ERROR,
+    // F3: OpenGL JarvisOrb (orb.html port) fed with the live amplitude.
+    JarvisOrb(
+        state = uiState.status.toOrbState(),
         amplitude = amplitude,
+        liveAudio = true,
+        theme = settings.theme,
+        customHex = settings.customBgHex,
         modifier = Modifier
             .size(250.dp)
             .align(Alignment.CenterHorizontally)

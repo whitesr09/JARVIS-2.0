@@ -4,7 +4,7 @@
 
 Jarvis talks (real-time voice), sees your screen (accessibility tree + screen-vision fallback), and acts for you — tapping, typing, scrolling and controlling hardware — while a floating avatar and task HUD show exactly what it's doing. No accounts, no external backend: your API keys, memory and voice stay on your device.
 
-> **Current release: v1.0.0 — all six levels built, design complete.** Real-time voice (Gemini Live + on-device fallback), a provider-failover brain with Memory Core, accessibility automation with hard safety guardrails, screen vision, a floating avatar with task HUD, and an offline "Hey Jarvis" wake word. The UI runs the Warm Minimal · Purple design system (Purple / Light / Dark / Red themes + custom hex).
+> **Current release: v1.2.0 — task queue, background wake, Connection Test v2.** Real-time voice (Gemini Live + on-device fallback), a provider-failover brain with Memory Core, accessibility automation with hard safety guardrails, screen vision, a floating avatar with a task-queue HUD, and an offline "Hey Jarvis" wake word that now starts listening in the background without opening the app. The UI runs the Warm Minimal · Purple design system (Purple / Light / Dark / Red themes + custom hex).
 
 ## Build the APK (GitHub Actions)
 
