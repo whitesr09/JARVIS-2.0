@@ -46,12 +46,18 @@ fun UpdatesScreen() {
                 "L4 Digital Hands — done: accessibility screen reader and verified " +
                 "actions, phone tools with native hard-guardrail confirmations, deep " +
                 "intents, hardware controls, ContactsResolver, and WhatsApp/YouTube flows.\n" +
-                "L5 Vision + Overlay — current build: all 12 floating avatars (transparent, " +
+                "L5 Vision + Overlay — done: all 12 floating avatars (transparent, " +
                 "no backdrop) with drag/edge-snap, tap-to-abort and the 4-step Task HUD; " +
                 "MediaProjection screen share at ~1 FPS streaming into Gemini Live; " +
                 "accessibility screenshots; see_screen + vision_tap tools for " +
                 "pixel-level targeting.\n" +
-                "L6 Always-on — Vosk wake word, voice biometrics, battery-aware modes."
+                "L6 Always-on — current build: offline Vosk wake word (\"Hey Jarvis\") " +
+                "in a microphone foreground service — screen-off and locked, grammar-" +
+                "constrained, battery-aware auto-pause (≤20% pauses, charging or " +
+                ">30% resumes), mic arbitration with voice sessions, lock-screen " +
+                "wake; voice-biometrics enrollment (3 samples stored on-device — " +
+                "verification matching arrives in a later update).\n" +
+                "All six levels built — Jarvis complete build."
         )
         InfoCard(
             title = "Verified actions & recovery",

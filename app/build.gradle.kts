@@ -12,8 +12,8 @@ android {
         applicationId = "com.nshd.jarvis2"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.5.0-L5"
+        versionCode = 6
+        versionName = "0.6.0-L6"
     }
 
     // ── Permanent signing (Level 2) ────────────────────────────────────
@@ -71,6 +71,10 @@ dependencies {
     // Level 2: encrypted API-key storage + explicit coroutines
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Level 6: offline wake word — Vosk Android AAR (JNI recognizer + model
+    // downloaded on demand, never bundled). Version 0.3.75 is the newest
+    // 0.3.x published to Maven Central (com.alphacephei:vosk-android).
+    implementation("com.alphacephei:vosk-android:0.3.75")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
 }

@@ -23,6 +23,11 @@ class ChimePlayer {
         playTones(listOf(Tone(330f, 0.15f)))
     }
 
+    /** Wake-word earcon (Level 6): one soft 990 Hz blip — "I heard you". */
+    fun playEarcon() {
+        playTones(listOf(Tone(990f, 0.12f)))
+    }
+
     private data class Tone(val frequency: Float, val seconds: Float)
 
     private fun playTones(tones: List<Tone>) {

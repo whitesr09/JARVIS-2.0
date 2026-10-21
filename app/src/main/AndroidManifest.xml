@@ -18,6 +18,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Level 6: wake word service holds a partial wake lock briefly on wake -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Apps Jarvis can query and launch -->
     <queries>
@@ -72,6 +74,12 @@
             android:name=".service.ScreenShareService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!-- Always-on wake word (Level 6): Vosk offline "Hey Jarvis" listener -->
+        <service
+            android:name=".service.WakeWordService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
     </application>
 </manifest>

@@ -1,8 +1,14 @@
 package com.nshd.jarvis2.ui
 
+import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.PowerManager
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,6 +31,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.Language
@@ -41,7 +48,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -50,7 +59,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,10 +73,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.painterResource
+import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.hands.DeepIntents
 import com.nshd.jarvis2.service.FloatingOverlayService
 import com.nshd.jarvis2.service.JarvisAccessibilityService
+import com.nshd.jarvis2.service.WakeState
+import com.nshd.jarvis2.service.WakeWordControl
+import com.nshd.jarvis2.voice.BiometricsRecorder
+import com.nshd.jarvis2.voice.VoskModelManager
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -100,6 +119,56 @@ fun SettingsScreen(
     val settingsScope = rememberCoroutineScope()
     val screenShare = rememberScreenShareControl()
     val overlayRunningState = remember { mutableStateOf(FloatingOverlayService.isRunning()) }
+
+    // ── Voice biometrics enrollment (Level 6) ──────────────────────────
+    var showBiometrics by remember { mutableStateOf(false) }
+    var bioRecordingIndex by remember { mutableStateOf<Int?>(null) }
+    var bioCount by remember { mutableIntStateOf(BiometricsRecorder.countSamples(context)) }
+    var bioError by remember { mutableStateOf<String?>(null) }
+    var bioMicGranted by remember { mutableStateOf(hasMicPermission(context)) }
+    val bioMicLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        bioMicGranted = granted
+        if (granted) showBiometrics = true
+    }
+
+    fun recordBioSample(index: Int) {
+        settingsScope.launch {
+            bioRecordingIndex = index
+            bioError = null
+            val ok = BiometricsRecorder.recordSample(context, index)
+            bioRecordingIndex = null
+            bioCount = BiometricsRecorder.countSamples(context)
+            if (!ok) {
+                bioError = "Recording failed — check the microphone and try again."
+            } else if (bioCount >= BiometricsRecorder.TOTAL_SAMPLES) {
+                val date = SimpleDateFormat("d MMM yyyy", Locale.ENGLISH).format(Date())
+                onSettingsChange(
+                    settings.copy(
+                        biometricsEnrolled = true,
+                        biometricsSampleCount = bioCount,
+                        biometricsEnrolledDate = date
+                    )
+                )
+            } else {
+                onSettingsChange(settings.copy(biometricsSampleCount = bioCount))
+            }
+        }
+    }
+
+    fun clearBioSamples() {
+        BiometricsRecorder.deleteSamples(context)
+        bioCount = 0
+        bioError = null
+        onSettingsChange(
+            settings.copy(
+                biometricsEnrolled = false,
+                biometricsSampleCount = 0,
+                biometricsEnrolledDate = ""
+            )
+        )
+    }
 
     fun openUrl(url: String) {
         runCatching {
@@ -169,30 +238,11 @@ fun SettingsScreen(
             SettingsRow(Icons.Filled.Language, "Conversation Language", settings.language) {
                 showLanguage = true
             }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Filled.Hearing, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(modifier = Modifier.width(14.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Wake Word", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        text = if (settings.wakeAlwaysOn) "Always-on (engine arrives in Level 6)"
-                        else "Tap the mic / orb to talk",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                TextButton(onClick = {
-                    onSettingsChange(settings.copy(wakeAlwaysOn = false))
-                }) { Text("Tap") }
-                TextButton(onClick = {
-                    onSettingsChange(settings.copy(wakeAlwaysOn = true))
-                }) { Text("Always-on") }
-            }
+            WakeWordControls(
+                settings = settings,
+                onSettingsChange = onSettingsChange,
+                onOpenPermissions = onOpenPermissions
+            )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -244,6 +294,37 @@ fun SettingsScreen(
                 },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        SectionTitle("Voice Biometrics")
+        GroupCard {
+            SettingsRow(
+                Icons.Filled.Fingerprint, "Voice Biometrics",
+                when {
+                    settings.biometricsEnrolled ->
+                        "Enrolled — ${settings.biometricsSampleCount} samples" +
+                            if (settings.biometricsEnrolledDate.isNotBlank()) {
+                                " • ${settings.biometricsEnrolledDate}"
+                            } else {
+                                ""
+                            }
+                    bioCount > 0 -> "$bioCount of ${BiometricsRecorder.TOTAL_SAMPLES} samples recorded"
+                    else -> "Not enrolled — record 3 samples of your wake phrase"
+                }
+            ) {
+                if (bioMicGranted) {
+                    showBiometrics = true
+                } else {
+                    bioMicLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Samples are stored only on this device. Voice verification " +
+                    "matching arrives in a later update — enrollment only for now.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
 
@@ -462,7 +543,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(18.dp))
         Text(
-            text = "JARVIS • v0.5.0-L5",
+            text = "JARVIS • v0.6.0-L6",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)
@@ -601,6 +682,295 @@ fun SettingsScreen(
             onSettingsChange = onSettingsChange,
             onDismiss = { showTheme = false }
         )
+    }
+
+    if (showBiometrics) {
+        val recording = bioRecordingIndex != null
+        AlertDialog(
+            onDismissRequest = { if (!recording) showBiometrics = false },
+            title = { Text("Voice Biometrics") },
+            text = {
+                Column {
+                    Text(
+                        text = if (settings.biometricsEnrolled) {
+                            "Enrolled — ${settings.biometricsSampleCount} samples" +
+                                if (settings.biometricsEnrolledDate.isNotBlank()) {
+                                    " • ${settings.biometricsEnrolledDate}"
+                                } else {
+                                    ""
+                                }
+                        } else {
+                            "$bioCount of ${BiometricsRecorder.TOTAL_SAMPLES} samples recorded"
+                        },
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Samples are stored only on this device. Voice verification " +
+                            "matching arrives in a later update — enrollment only for now.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    if (recording) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(22.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = "Recording sample ${bioRecordingIndex} of " +
+                                    "${BiometricsRecorder.TOTAL_SAMPLES} — say: " +
+                                    "\"${BiometricsRecorder.WAKE_PHRASE}\"",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    } else if (!settings.biometricsEnrolled) {
+                        Text(
+                            text = "When you tap record, say the wake phrase clearly: " +
+                                "\"${BiometricsRecorder.WAKE_PHRASE}\" " +
+                                "(${BiometricsRecorder.SAMPLE_SECONDS} seconds per sample).",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Button(
+                            onClick = {
+                                recordBioSample((bioCount + 1).coerceAtMost(BiometricsRecorder.TOTAL_SAMPLES))
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "Record sample ${(bioCount + 1).coerceAtMost(BiometricsRecorder.TOTAL_SAMPLES)} " +
+                                    "of ${BiometricsRecorder.TOTAL_SAMPLES}"
+                            )
+                        }
+                    }
+                    bioError?.let { error ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    if (bioCount > 0 && !recording) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row {
+                            TextButton(onClick = { clearBioSamples() }) { Text("Re-enroll") }
+                            TextButton(onClick = { clearBioSamples() }) { Text("Delete samples") }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showBiometrics = false },
+                    enabled = !recording
+                ) { Text("Done") }
+            }
+        )
+    }
+}
+
+private fun hasMicPermission(context: Context): Boolean =
+    ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+        PackageManager.PERMISSION_GRANTED
+
+private fun isBatteryWhitelisted(context: Context): Boolean {
+    val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
+    return pm.isIgnoringBatteryOptimizations(context.packageName)
+}
+
+/**
+ * Wake Word card content (Level 6): Tap vs Always-on mode toggle, and —
+ * in Always-on mode — the live requirements checklist (offline model
+ * download with progress, microphone permission, battery whitelist),
+ * Start/Stop listening and the service's live status.
+ */
+@Composable
+private fun WakeWordControls(
+    settings: JarvisSettings,
+    onSettingsChange: (JarvisSettings) -> Unit,
+    onOpenPermissions: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val wakeStatus by WakeState.status.collectAsState()
+    val downloadState by VoskModelManager.downloadState.collectAsState()
+    var micGranted by remember { mutableStateOf(hasMicPermission(context)) }
+    val micLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> micGranted = granted }
+
+    val modelReady = VoskModelManager.status(context) ==
+        VoskModelManager.ModelStatus.READY ||
+        downloadState is VoskModelManager.DownloadState.Done
+    val batteryWhitelisted = isBatteryWhitelisted(context)
+
+    fun startListening() {
+        when {
+            !modelReady -> Unit // checklist below shows what's missing
+            !micGranted -> micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            else -> runCatching { WakeWordControl.start(context) }
+        }
+    }
+
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Filled.Hearing, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Spacer(modifier = Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Wake Word", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    text = when {
+                        !settings.wakeAlwaysOn -> "Tap the mic / orb to talk"
+                        wakeStatus.listening -> "Always-on • Listening for \"Hey Jarvis\""
+                        wakeStatus.enabled -> "Always-on • ${wakeStatus.detail}"
+                        else -> "Always-on • Not running yet"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            TextButton(onClick = {
+                onSettingsChange(settings.copy(wakeAlwaysOn = false))
+                WakeWordControl.stop(context)
+            }) { Text("Tap") }
+            TextButton(onClick = {
+                onSettingsChange(settings.copy(wakeAlwaysOn = true))
+                if (modelReady && micGranted) {
+                    runCatching { WakeWordControl.start(context) }
+                }
+            }) { Text("Always-on") }
+        }
+
+        if (settings.wakeAlwaysOn) {
+            // ── Offline model ──────────────────────────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (modelReady) "✓" else "○",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (modelReady) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Offline model (English, ~41 MB)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = when (val state = downloadState) {
+                            is VoskModelManager.DownloadState.Downloading ->
+                                "Downloading… ${state.percent}%"
+                            is VoskModelManager.DownloadState.Extracting -> "Extracting…"
+                            is VoskModelManager.DownloadState.Error ->
+                                "Download failed: ${state.message}"
+                            else -> if (modelReady) "Ready on this device" else "Needed for offline listening"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (downloadState is VoskModelManager.DownloadState.Error) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                }
+                if (!modelReady) {
+                    val busy = downloadState is VoskModelManager.DownloadState.Downloading ||
+                        downloadState is VoskModelManager.DownloadState.Extracting
+                    TextButton(
+                        onClick = { scope.launch { VoskModelManager.downloadModel(context) } },
+                        enabled = !busy
+                    ) { Text(if (downloadState is VoskModelManager.DownloadState.Error) "Retry" else "Download") }
+                }
+            }
+            if (downloadState is VoskModelManager.DownloadState.Downloading) {
+                LinearProgressIndicator(
+                    progress = {
+                        (downloadState as VoskModelManager.DownloadState.Downloading).percent / 100f
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                )
+            }
+
+            // ── Microphone permission ──────────────────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (micGranted) "✓" else "○",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (micGranted) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Microphone permission",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                if (!micGranted) {
+                    TextButton(onClick = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) }) {
+                        Text("Grant")
+                    }
+                }
+            }
+
+            // ── Battery whitelist ──────────────────────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (batteryWhitelisted) "✓" else "○",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (batteryWhitelisted) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Battery whitelist", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = "Lets the listener survive in the background (Vivo/iQOO)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                TextButton(onClick = onOpenPermissions) { Text("Open") }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row {
+                Button(
+                    onClick = { startListening() },
+                    enabled = modelReady && micGranted && !wakeStatus.enabled,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Start listening") }
+                Spacer(modifier = Modifier.width(10.dp))
+                OutlinedButton(
+                    onClick = { WakeWordControl.stop(context) },
+                    enabled = wakeStatus.enabled,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Stop") }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = when {
+                    !modelReady -> "Download the offline model to enable always-on listening."
+                    !micGranted -> "Grant the microphone permission to enable always-on listening."
+                    else -> "Status: ${wakeStatus.detail}"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+        }
     }
 }
 

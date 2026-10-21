@@ -11,6 +11,7 @@ import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
 import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.service.ScreenShareState
+import com.nshd.jarvis2.service.WakeWordControl
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -123,6 +124,9 @@ object VoiceSessionManager {
         active = true
         reconnectAttempts = 0
         _captions.value = emptyList()
+        // Mic arbitration (Level 6): the wake-word service releases the
+        // microphone while a voice session owns it, and resumes after.
+        runCatching { WakeWordControl.setSessionActive(true) }
 
         val gemini = providerStore.loadConfig(ProviderPresets.GEMINI.id)
         if (gemini.apiKey.isNotBlank()) {
@@ -143,6 +147,7 @@ object VoiceSessionManager {
 
     fun stop() {
         stopInternal(resetUi = true)
+        runCatching { WakeWordControl.setSessionActive(false) }
     }
 
     fun setMicMuted(muted: Boolean) {
@@ -194,6 +199,7 @@ object VoiceSessionManager {
         fallback?.shutdown()
         fallback = null
         active = false
+        runCatching { WakeWordControl.setSessionActive(false) }
         _amplitude.value = 0f
         _uiState.value = _uiState.value.copy(
             status = VoiceStatus.ERROR,

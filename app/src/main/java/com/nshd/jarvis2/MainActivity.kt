@@ -9,7 +9,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import android.content.Intent
+import android.os.Build
+import com.nshd.jarvis2.service.WakeWordControl
 import com.nshd.jarvis2.ui.AppNavRequests
+import com.nshd.jarvis2.voice.VoskModelManager
 import com.nshd.jarvis2.ui.AppTheme
 import com.nshd.jarvis2.ui.JarvisApp
 
@@ -30,7 +33,12 @@ data class JarvisSettings(
     /** Gemini Live model, WITHOUT the "models/" prefix (the client adds it). */
     val liveModel: String = "gemini-2.5-flash-native-audio-preview-12-2025",
     /** Floating-overlay companion (see AvatarCatalog); default "droid". */
-    val avatarId: String = "droid"
+    val avatarId: String = "droid",
+    /** Voice biometrics enrollment (Level 6): samples recorded on-device. */
+    val biometricsEnrolled: Boolean = false,
+    val biometricsSampleCount: Int = 0,
+    /** Human-readable enrollment date, e.g. "21 Oct 2026" ("" when none). */
+    val biometricsEnrolledDate: String = ""
 )
 
 class MainActivity : ComponentActivity() {
@@ -43,6 +51,13 @@ class MainActivity : ComponentActivity() {
         handleNavIntent(intent)
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         settings = loadSettings()
+        // Always-on wake word was left enabled: restart the listener (the
+        // service is START_STICKY too, this also covers a fresh process).
+        if (settings.wakeAlwaysOn &&
+            VoskModelManager.status(this) == VoskModelManager.ModelStatus.READY
+        ) {
+            runCatching { WakeWordControl.start(this) }
+        }
         setContent {
             JarvisApp(
                 settings = settings,
@@ -62,7 +77,17 @@ class MainActivity : ComponentActivity() {
 
     /** The floating overlay bubble asks for the Voice screen via this extra. */
     private fun handleNavIntent(intent: Intent?) {
-        if (intent?.getBooleanExtra(EXTRA_OPEN_VOICE, false) == true) {
+        if (intent == null) return
+        // Wake-word launches must punch through the lock screen: the flags
+        // have to be set before the content shows (API 27+ activity calls).
+        if (intent.getBooleanExtra(EXTRA_FROM_WAKE, false)) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(true)
+                setTurnScreenOn(true)
+            }
+            intent.removeExtra(EXTRA_FROM_WAKE)
+        }
+        if (intent.getBooleanExtra(EXTRA_OPEN_VOICE, false) == true) {
             AppNavRequests.requestVoice()
             intent.removeExtra(EXTRA_OPEN_VOICE)
         }
@@ -88,7 +113,10 @@ class MainActivity : ComponentActivity() {
             liveModel = prefs.getString(
                 KEY_LIVE_MODEL, "gemini-2.5-flash-native-audio-preview-12-2025"
             ) ?: "gemini-2.5-flash-native-audio-preview-12-2025",
-            avatarId = prefs.getString(KEY_AVATAR_ID, "droid") ?: "droid"
+            avatarId = prefs.getString(KEY_AVATAR_ID, "droid") ?: "droid",
+            biometricsEnrolled = prefs.getBoolean(KEY_BIO_ENROLLED, false),
+            biometricsSampleCount = prefs.getInt(KEY_BIO_COUNT, 0),
+            biometricsEnrolledDate = prefs.getString(KEY_BIO_DATE, "") ?: ""
         )
     }
 
@@ -106,11 +134,16 @@ class MainActivity : ComponentActivity() {
             .putString(KEY_CUSTOM_VOICE, s.customVoiceName)
             .putString(KEY_LIVE_MODEL, s.liveModel)
             .putString(KEY_AVATAR_ID, s.avatarId)
+            .putBoolean(KEY_BIO_ENROLLED, s.biometricsEnrolled)
+            .putInt(KEY_BIO_COUNT, s.biometricsSampleCount)
+            .putString(KEY_BIO_DATE, s.biometricsEnrolledDate)
             .apply()
     }
 
     companion object {
         const val EXTRA_OPEN_VOICE = "open_voice"
+        /** Wake word fired: show over the lock screen and turn it on. */
+        const val EXTRA_FROM_WAKE = "from_wake"
         private const val PREFS_NAME = "jarvis_settings"
         private const val KEY_ASSISTANT_NAME = "assistant_name"
         private const val KEY_CALLSIGN = "callsign"
@@ -124,5 +157,8 @@ class MainActivity : ComponentActivity() {
         private const val KEY_CUSTOM_VOICE = "custom_voice_name"
         private const val KEY_LIVE_MODEL = "live_model"
         private const val KEY_AVATAR_ID = "avatar_id"
+        private const val KEY_BIO_ENROLLED = "biometrics_enrolled"
+        private const val KEY_BIO_COUNT = "biometrics_sample_count"
+        private const val KEY_BIO_DATE = "biometrics_enrolled_date"
     }
 }
