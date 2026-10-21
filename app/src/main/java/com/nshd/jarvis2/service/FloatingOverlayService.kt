@@ -110,6 +110,8 @@ class FloatingOverlayService : Service() {
 
     // ── Overlay construction ───────────────────────────────────────────
 
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
     private fun showOverlayIfPermitted() {
         if (!Settings.canDrawOverlays(this)) {
             stopSelf()
@@ -117,8 +119,6 @@ class FloatingOverlayService : Service() {
         }
         val wm = getSystemService(WindowManager::class.java) ?: return
         windowManager = wm
-        val density = resources.displayMetrics.density
-        fun dp(value: Int): Int = (value * density).toInt()
         val bubbleSize = dp(56)
 
         val bubble = ImageView(this).apply {
@@ -130,7 +130,7 @@ class FloatingOverlayService : Service() {
             layoutParams = FrameLayout.LayoutParams(bubbleSize, bubbleSize)
         }
 
-        val hud = buildHud(dp)
+        val hud = buildHud(::dp)
         hud.visibility = View.GONE
 
         val root = FrameLayout(this).apply {
