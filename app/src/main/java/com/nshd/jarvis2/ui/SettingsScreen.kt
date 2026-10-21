@@ -543,7 +543,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(18.dp))
         Text(
-            text = "JARVIS • v0.6.0-L6",
+            text = "JARVIS • v0.7.0-D1",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)
@@ -999,7 +999,8 @@ private fun ThemeDialog(
                             onClick = { onSettingsChange(settings.copy(theme = theme)) }
                         )
                         Text(
-                            theme.name.lowercase().replaceFirstChar { it.uppercase() },
+                            theme.name.lowercase().replaceFirstChar { it.uppercase() } +
+                                if (theme == AppTheme.PURPLE) " (default)" else "",
                             style = MaterialTheme.typography.bodyLarge
                         )
                     }
@@ -1071,12 +1072,12 @@ private fun GroupCard(
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit
 ) {
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(JarvisDimens.radiusCard),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(16.dp), content = content)
+        Column(modifier = Modifier.padding(JarvisDimens.cardPadding), content = content)
     }
 }
 

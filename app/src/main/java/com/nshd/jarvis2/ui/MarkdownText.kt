@@ -135,10 +135,12 @@ fun MarkdownText(content: String, textColor: Color) {
     }
 }
 
-private val CanvasBackground = Color(0xFF20121F)
-private val CanvasCodeColor = Color(0xFFF5EDE6)
+// D1: deep-plum canvas (#241A33 — the snackbar plum) so code reads as a
+// plum-family object inside the purple design system, in every theme.
+private val CanvasBackground = Color(0xFF241A33)
+private val CanvasCodeColor = Color(0xFFF5F0FA)
 private val CanvasHeaderColor = Color(0xFFCFC4D8)
-private val CanvasAccent = Color(0xFFFFB59E)
+private val CanvasAccent = Color(0xFFD8B4FE)
 
 @Composable
 private fun CodeCanvas(lang: String, code: String) {
@@ -147,7 +149,7 @@ private fun CodeCanvas(lang: String, code: String) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 6.dp)
-            .background(CanvasBackground, RoundedCornerShape(14.dp))
+            .background(CanvasBackground, RoundedCornerShape(JarvisDimens.radiusField))
     ) {
         Row(
             modifier = Modifier

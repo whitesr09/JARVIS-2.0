@@ -132,9 +132,9 @@ private fun StatusPill(listening: Boolean) {
 @Composable
 private fun WeatherCard() {
     Card(
-        shape = RoundedCornerShape(24.dp),
+        shape = RoundedCornerShape(JarvisDimens.radiusCard),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.heroElevation),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
@@ -194,9 +194,9 @@ private fun QuickTile(
     onClick: () -> Unit
 ) {
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(JarvisDimens.radiusCard),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
         modifier = modifier.clickable(onClick = onClick)
     ) {
         Column(

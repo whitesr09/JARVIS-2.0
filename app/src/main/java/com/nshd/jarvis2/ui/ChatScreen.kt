@@ -199,9 +199,9 @@ fun ChatScreen(settings: JarvisSettings) {
                         contentAlignment = Alignment.CenterStart
                     ) {
                         Card(
-                            shape = RoundedCornerShape(18.dp),
+                            shape = RoundedCornerShape(JarvisDimens.radiusCard),
                             colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                containerColor = MaterialTheme.colorScheme.surface
                             )
                         ) {
                             Text(
@@ -226,12 +226,14 @@ fun ChatScreen(settings: JarvisSettings) {
             FilterChip(
                 selected = mode == ChatMode.JARVIS,
                 onClick = { mode = ChatMode.JARVIS },
-                label = { Text(settings.assistantName) }
+                label = { Text(settings.assistantName) },
+                shape = RoundedCornerShape(50)
             )
             FilterChip(
                 selected = mode == ChatMode.CODE,
                 onClick = { mode = ChatMode.CODE },
-                label = { Text("<> Code") }
+                label = { Text("<> Code") },
+                shape = RoundedCornerShape(50)
             )
         }
 
@@ -248,7 +250,7 @@ fun ChatScreen(settings: JarvisSettings) {
                 value = input,
                 onValueChange = { input = it },
                 placeholder = { Text("Message ${settings.assistantName}") },
-                shape = RoundedCornerShape(24.dp),
+                shape = RoundedCornerShape(JarvisDimens.radiusField),
                 modifier = Modifier.weight(1f),
                 maxLines = 4
             )
@@ -294,9 +296,9 @@ private fun MessageBubble(msg: UiMessage) {
     if (msg.isTool) {
         Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
             Card(
-                shape = RoundedCornerShape(12.dp),
+                shape = RoundedCornerShape(JarvisDimens.radiusField),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
                 ),
                 modifier = Modifier.widthIn(max = 340.dp)
             ) {
@@ -317,13 +319,13 @@ private fun MessageBubble(msg: UiMessage) {
         Column(modifier = Modifier.widthIn(max = 320.dp)) {
             Card(
                 shape = RoundedCornerShape(
-                    topStart = 18.dp, topEnd = 18.dp,
-                    bottomStart = if (msg.fromUser) 18.dp else 4.dp,
-                    bottomEnd = if (msg.fromUser) 4.dp else 18.dp
+                    topStart = JarvisDimens.radiusCard, topEnd = JarvisDimens.radiusCard,
+                    bottomStart = if (msg.fromUser) JarvisDimens.radiusCard else 6.dp,
+                    bottomEnd = if (msg.fromUser) 6.dp else JarvisDimens.radiusCard
                 ),
                 colors = CardDefaults.cardColors(
                     containerColor = if (msg.fromUser) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.surfaceVariant
+                    else MaterialTheme.colorScheme.surface
                 )
             ) {
                 Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {

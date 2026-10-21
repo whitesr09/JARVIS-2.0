@@ -20,7 +20,7 @@ import com.nshd.jarvis2.ui.JarvisApp
 data class JarvisSettings(
     val assistantName: String = "Jarvis",
     val callsign: String = "Nishad",
-    val theme: AppTheme = AppTheme.SUNSET,
+    val theme: AppTheme = AppTheme.PURPLE,
     val customBgHex: String? = null,
     val language: String = "Auto",
     val persona: String = "Jarvis Pro",
@@ -94,10 +94,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadSettings(): JarvisSettings {
-        val theme = try {
-            AppTheme.valueOf(prefs.getString(KEY_THEME, AppTheme.SUNSET.name) ?: AppTheme.SUNSET.name)
-        } catch (e: IllegalArgumentException) {
-            AppTheme.SUNSET
+        // D1 migration: the SUNSET theme was retired in favour of PURPLE
+        // (Warm Minimal refresh) — a stored "SUNSET" reads as PURPLE, as
+        // does any unknown value.
+        val rawTheme = prefs.getString(KEY_THEME, AppTheme.PURPLE.name) ?: AppTheme.PURPLE.name
+        val theme = if (rawTheme == "SUNSET") {
+            AppTheme.PURPLE
+        } else {
+            try {
+                AppTheme.valueOf(rawTheme)
+            } catch (e: IllegalArgumentException) {
+                AppTheme.PURPLE
+            }
         }
         return JarvisSettings(
             assistantName = prefs.getString(KEY_ASSISTANT_NAME, "Jarvis") ?: "Jarvis",

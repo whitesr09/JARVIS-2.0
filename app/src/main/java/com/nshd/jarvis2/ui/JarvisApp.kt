@@ -1,5 +1,6 @@
 package com.nshd.jarvis2.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Home
@@ -19,6 +21,7 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -33,6 +36,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.nshd.jarvis2.JarvisSettings
@@ -131,7 +136,12 @@ fun JarvisApp(
     }
 }
 
-/** Bottom bar with a raised center mic button, like the reference (Page 1). */
+/**
+ * Bottom bar with a raised center mic button, like the reference (Page 1).
+ * D1 Warm Minimal: FLAT bar surface (white in the light themes) with a
+ * hairline top border and a soft purple-tinted shadow; the selected tab
+ * sits in a lavender pill behind its icon; the mic FAB is flat purple.
+ */
 @Composable
 private fun JarvisBottomBar(
     tab: Tab,
@@ -140,14 +150,24 @@ private fun JarvisBottomBar(
     onMic: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxWidth()) {
-        Surface(
-            tonalElevation = 3.dp,
-            shadowElevation = 8.dp,
-            color = MaterialTheme.colorScheme.surface,
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
+                .shadow(
+                    elevation = JarvisDimens.navElevation,
+                    shape = RectangleShape,
+                    spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                    ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                )
+                .background(MaterialTheme.colorScheme.surface)
         ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant)
+            )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -166,7 +186,12 @@ private fun JarvisBottomBar(
             shape = CircleShape,
             containerColor = if (listening) MaterialTheme.colorScheme.error
             else MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
+            contentColor = if (listening) MaterialTheme.colorScheme.onError
+            else MaterialTheme.colorScheme.onPrimary,
+            elevation = FloatingActionButtonDefaults.elevation(
+                defaultElevation = JarvisDimens.fabElevation,
+                pressedElevation = JarvisDimens.fabElevation
+            ),
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .size(60.dp)
@@ -198,7 +223,18 @@ private fun NavItem(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(vertical = 4.dp)
         ) {
-            Icon(imageVector = icon, contentDescription = label, tint = tint)
+            Box(
+                modifier = Modifier
+                    .size(width = 56.dp, height = 32.dp)
+                    .background(
+                        color = if (selected) MaterialTheme.colorScheme.primaryContainer
+                        else androidx.compose.ui.graphics.Color.Transparent,
+                        shape = RoundedCornerShape(50)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(imageVector = icon, contentDescription = label, tint = tint)
+            }
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelSmall,

@@ -175,7 +175,8 @@ fun ApiConnectionScreen(onBack: () -> Unit) {
                         selected = editId == preset.id,
                         onClick = { editId = preset.id; testResult = null },
                         label = { Text(preset.label) },
-                        modifier = Modifier.padding(end = 6.dp)
+                        modifier = Modifier.padding(end = 6.dp),
+                        shape = RoundedCornerShape(50)
                     )
                 }
             }

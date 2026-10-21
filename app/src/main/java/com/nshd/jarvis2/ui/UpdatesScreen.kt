@@ -51,13 +51,25 @@ fun UpdatesScreen() {
                 "MediaProjection screen share at ~1 FPS streaming into Gemini Live; " +
                 "accessibility screenshots; see_screen + vision_tap tools for " +
                 "pixel-level targeting.\n" +
-                "L6 Always-on — current build: offline Vosk wake word (\"Hey Jarvis\") " +
+                "L6 Always-on — done: offline Vosk wake word (\"Hey Jarvis\") " +
                 "in a microphone foreground service — screen-off and locked, grammar-" +
                 "constrained, battery-aware auto-pause (≤20% pauses, charging or " +
                 ">30% resumes), mic arbitration with voice sessions, lock-screen " +
                 "wake; voice-biometrics enrollment (3 samples stored on-device — " +
                 "verification matching arrives in a later update).\n" +
                 "All six levels built — Jarvis complete build."
+        )
+        InfoCard(
+            title = "Design refresh — D1 (Warm Minimal · Purple)",
+            body = "Current build: the D1 design refresh restyles the whole app on " +
+                "the Warm Minimal direction — flat white cards on a calm " +
+                "lavender-tinted background, very soft shadows, one friendly " +
+                "typeface (Manrope) everywhere, and a token-driven theme system. " +
+                "Purple is the new default theme (the old Sunset retired into " +
+                "it); Light, Dark and Red follow the same calm flat treatment, " +
+                "and a custom background hex now derives its own surface ladder. " +
+                "D2 (per-screen restyle + transitions) and D3 (orb + HUD polish) " +
+                "follow."
         )
         InfoCard(
             title = "Verified actions & recovery",
@@ -90,9 +102,9 @@ fun UpdatesScreen() {
 @Composable
 private fun InfoCard(title: String, body: String) {
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(JarvisDimens.radiusCard),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = 12.dp)

@@ -173,13 +173,15 @@ fun MemoryScreen(onBack: () -> Unit) {
                 FilterChip(
                     selected = categoryFilter == null,
                     onClick = { categoryFilter = null },
-                    label = { Text("All") }
+                    label = { Text("All") },
+                    shape = RoundedCornerShape(50)
                 )
                 MemoryCategories.FILTERABLE.forEach { cat ->
                     FilterChip(
                         selected = categoryFilter == cat,
                         onClick = { categoryFilter = cat },
-                        label = { Text(cat) }
+                        label = { Text(cat) },
+                        shape = RoundedCornerShape(50)
                     )
                 }
             }
@@ -354,7 +356,8 @@ private fun FactEditorDialog(
                                 FilterChip(
                                     selected = category == cat,
                                     onClick = { category = cat },
-                                    label = { Text(cat) }
+                                    label = { Text(cat) },
+                                    shape = RoundedCornerShape(50)
                                 )
                             }
                         }

@@ -256,7 +256,8 @@ private fun VoiceSessionBody(
                         if (shareControl.active) "Sharing screen — tap to stop"
                         else "Share screen"
                     )
-                }
+                },
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(50)
             )
         }
         Spacer(modifier = Modifier.height(10.dp))
