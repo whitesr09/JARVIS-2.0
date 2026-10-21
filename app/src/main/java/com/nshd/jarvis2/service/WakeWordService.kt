@@ -148,7 +148,6 @@ class WakeWordService : Service(), RecognitionListener {
                 model = loadedModel
                 recognizer = rec
                 speechService = speech
-                speech.setListener(this@WakeWordService)
                 engineReady = true
                 mainHandler.post { applyEngineState() }
             } catch (e: Exception) {
@@ -176,7 +175,7 @@ class WakeWordService : Service(), RecognitionListener {
         val batteryPaused = REASON_BATTERY in pauseReasons
         if (shouldListen && !listeningNow) {
             try {
-                speechService?.startListening()
+                speechService?.startListening(this@WakeWordService)
                 listeningNow = true
             } catch (e: Exception) {
                 WakeState.set(
