@@ -2,6 +2,7 @@ package com.nshd.jarvis2.ui
 
 import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Accessibility
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Api
 import androidx.compose.material.icons.filled.Chat
@@ -23,6 +25,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Layers
@@ -32,12 +35,15 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
@@ -47,6 +53,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,6 +62,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.nshd.jarvis2.JarvisSettings
+import com.nshd.jarvis2.hands.DeepIntents
+import com.nshd.jarvis2.service.JarvisAccessibilityService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 val JARVIS_LANGUAGES = listOf(
     "Auto", "English", "Hindi", "Hinglish", "Telugu", "Tamil", "Kannada",
@@ -80,6 +92,9 @@ fun SettingsScreen(
     var showLanguage by remember { mutableStateOf(false) }
     var showTheme by remember { mutableStateOf(false) }
     var showVoice by remember { mutableStateOf(false) }
+    var screenPreview by remember { mutableStateOf<String?>(null) }
+    var torchOn by remember { mutableStateOf(false) }
+    val settingsScope = rememberCoroutineScope()
 
     fun openUrl(url: String) {
         runCatching {
@@ -246,6 +261,72 @@ fun SettingsScreen(
             }
         }
 
+        SectionTitle("Digital Hands")
+        GroupCard {
+            val handsEnabled = JarvisAccessibilityService.isEnabled()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.Accessibility,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Accessibility Service", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        text = if (handsEnabled) "Enabled — Jarvis can read and operate the current screen"
+                        else "Not enabled — intent and hardware tools still work",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                OutlinedButton(onClick = {
+                    runCatching {
+                        context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                    }
+                }) { Text("Open") }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "Guardrails: payments, unknown-number calls and similar risky actions always ask first.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row {
+                Button(
+                    onClick = {
+                        screenPreview = JarvisAccessibilityService.instance
+                            ?.screenReader()
+                            ?.serialize()
+                            ?: "Accessibility is not enabled. Enable Jarvis Digital Hands first, then try Read screen again."
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.Visibility, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Read screen")
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                OutlinedButton(
+                    onClick = {
+                        val target = !torchOn
+                        settingsScope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                DeepIntents(context).toggleTorch(target)
+                            }
+                            if (result.success) torchOn = target
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.FlashOn, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(if (torchOn) "Torch off" else "Torch")
+                }
+            }
+        }
+
         SectionTitle("Appearance")
         GroupCard {
             SettingsRow(
@@ -299,7 +380,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(18.dp))
         Text(
-            text = "JARVIS • v0.3.0-L3",
+            text = "JARVIS • v0.4.0-L4",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)
@@ -314,6 +395,25 @@ fun SettingsScreen(
             title = { Text(info?.title ?: "") },
             text = { Text(info?.body ?: "") },
             confirmButton = { TextButton(onClick = { info = null }) { Text("OK") } }
+        )
+    }
+
+    if (screenPreview != null) {
+        AlertDialog(
+            onDismissRequest = { screenPreview = null },
+            title = { Text("Current screen") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(screenPreview ?: "")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { screenPreview = null }) { Text("Close") }
+            }
         )
     }
 

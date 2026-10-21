@@ -29,9 +29,10 @@ import java.util.concurrent.TimeUnit
  *    missing "models/" prefix is added). No allow-list, no silent
  *    substitution — JARVIS-2.0's user-editable-model rule.
  *
- * Setup JSON uses snake_case keys like the shipping P4/P7 code. No tool
- * declarations this level. The API key travels as the URL query param
- * (the only auth this API offers here) — the URL is NEVER logged.
+ * Setup JSON uses snake_case keys like the shipping P4/P7 code. Level 4
+ * adds the shared phone-tool declarations and tool-response handling. The
+ * API key travels as the URL query param (the only auth this API offers
+ * here) — the URL is NEVER logged.
  *
  * All listener callbacks fire on the OkHttp WebSocket thread; consumers
  * must be thread-safe (StateFlow writes are).
@@ -42,6 +43,7 @@ class GeminiLiveClient(
     private val voiceName: String,
     private val systemPrompt: String,
     private val resumptionHandle: String?,
+    private val toolDeclarations: JSONArray? = null,
     private val listener: Listener
 ) {
     interface Listener {
@@ -77,6 +79,9 @@ class GeminiLiveClient(
 
         /** Socket closed (not by us). */
         fun onClosed(reason: String)
+
+        /** A model tool/function call to execute locally. */
+        fun onToolCall(id: String, name: String, args: JSONObject)
     }
 
     private val model: String = if (model.startsWith("models/")) model else "models/$model"
@@ -126,6 +131,26 @@ class GeminiLiveClient(
         ws.send(payload.toString())
     }
 
+    /** Return one locally executed tool result to the Live model. */
+    fun sendToolResponse(id: String, name: String, result: JSONObject) {
+        val ws = webSocket ?: return
+        val functionResponse = JSONObject()
+            .put("id", id)
+            .put("name", name)
+            .put(
+                "response",
+                JSONObject().put("result", result.toString())
+            )
+        val payload = JSONObject().put(
+            "tool_response",
+            JSONObject().put(
+                "function_responses",
+                JSONArray().put(functionResponse)
+            )
+        )
+        ws.send(payload.toString())
+    }
+
     /** Deliberate teardown — no error/closed callbacks are surfaced after this. */
     fun close() {
         closedByUser = true
@@ -170,6 +195,14 @@ class GeminiLiveClient(
             // setup but still parsed the results). They power our captions.
             .put("input_audio_transcription", JSONObject())
             .put("output_audio_transcription", JSONObject())
+        if (toolDeclarations != null && toolDeclarations.length() > 0) {
+            setup.put(
+                "tools",
+                JSONArray().put(
+                    JSONObject().put("function_declarations", toolDeclarations)
+                )
+            )
+        }
         if (!resumptionHandle.isNullOrBlank()) {
             setup.put("session_resumption", JSONObject().put("handle", resumptionHandle))
         }
@@ -213,10 +246,13 @@ class GeminiLiveClient(
             if (message.isNotBlank()) listener.onError(message)
         }
 
+        dispatchToolCalls(root.optJSONObject("toolCall"))
+
         val content = root.optJSONObject("serverContent") ?: return
 
         // P7: an early serverContent implies the setup was accepted.
         markSetupComplete()
+        dispatchToolCalls(content.optJSONObject("toolCall"))
 
         if (content.optBoolean("interrupted")) {
             listener.onInterrupted()
@@ -252,6 +288,36 @@ class GeminiLiveClient(
 
         if (content.optBoolean("turnComplete") || content.optBoolean("generationComplete")) {
             listener.onTurnComplete()
+        }
+    }
+
+    private fun dispatchToolCalls(toolCall: JSONObject?) {
+        val calls = toolCall?.optJSONArray("functionCalls")
+            ?: toolCall?.optJSONArray("function_calls")
+            ?: return
+        for (i in 0 until calls.length()) {
+            val call = calls.optJSONObject(i) ?: continue
+            val function = call.optJSONObject("function")
+            val name = call.optString("name")
+                .ifBlank { function?.optString("name").orEmpty() }
+            if (name.isBlank()) continue
+            val rawArgs = call.opt("args")
+                ?: call.opt("arguments")
+                ?: function?.opt("args")
+                ?: function?.opt("arguments")
+            val args = when (rawArgs) {
+                is JSONObject -> rawArgs
+                is String -> try {
+                    JSONObject(rawArgs)
+                } catch (e: Exception) {
+                    JSONObject()
+                }
+                else -> JSONObject()
+            }
+            val id = call.optString("id")
+                .ifBlank { function?.optString("id").orEmpty() }
+                .ifBlank { "live_call_$i" }
+            listener.onToolCall(id, name, args)
         }
     }
 

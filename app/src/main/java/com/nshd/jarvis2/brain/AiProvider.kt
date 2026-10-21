@@ -11,8 +11,26 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-/** One chat message in OpenAI-compatible shape. */
-data class ChatMsg(val role: String, val content: String)
+/** One chat message in OpenAI-compatible shape, with optional tool-call data. */
+data class ChatMsg(
+    val role: String,
+    val content: String,
+    /** Required on role="tool" messages so the provider can pair a result. */
+    val toolCallId: String? = null,
+    /** Raw JSON array for an assistant turn that requested tool calls. */
+    val toolCallsJson: String? = null
+)
+
+data class ToolCall(
+    val id: String,
+    val name: String,
+    val argumentsJson: String
+)
+
+data class ModelReply(
+    val content: String,
+    val toolCalls: List<ToolCall> = emptyList()
+)
 
 data class TestResult(val ok: Boolean, val latencyMs: Long, val detail: String)
 
@@ -24,6 +42,13 @@ interface AiProvider {
 
     /** @throws AiException on HTTP / network / parse failure. */
     suspend fun chat(messages: List<ChatMsg>, model: String): String
+
+    /** Chat completion that may return tool calls when [tools] is supplied. */
+    suspend fun chatWithTools(
+        messages: List<ChatMsg>,
+        model: String,
+        tools: JSONArray?
+    ): ModelReply
 
     suspend fun testConnection(): TestResult
 }
@@ -57,48 +82,104 @@ class OpenAiCompatibleProvider(
         builder.header("Authorization", "Bearer $apiKey")
             .header("Content-Type", "application/json")
 
-    override suspend fun chat(messages: List<ChatMsg>, model: String): String =
-        withContext(Dispatchers.IO) {
-            if (baseUrl.isBlank()) throw AiException("No base URL configured")
-            if (apiKey.isBlank()) throw AiException("No API key configured")
-            if (model.isBlank()) throw AiException("No model configured")
+    override suspend fun chat(messages: List<ChatMsg>, model: String): String {
+        val reply = chatWithTools(messages, model, tools = null)
+        if (reply.content.isBlank()) throw AiException("Empty reply from model")
+        return reply.content
+    }
 
-            val msgArray = JSONArray()
-            messages.forEach { m ->
-                msgArray.put(JSONObject().put("role", m.role).put("content", m.content))
+    override suspend fun chatWithTools(
+        messages: List<ChatMsg>,
+        model: String,
+        tools: JSONArray?
+    ): ModelReply = withContext(Dispatchers.IO) {
+        if (baseUrl.isBlank()) throw AiException("No base URL configured")
+        if (apiKey.isBlank()) throw AiException("No API key configured")
+        if (model.isBlank()) throw AiException("No model configured")
+
+        val payload = JSONObject()
+            .put("model", model)
+            .put("messages", serializeMessages(messages))
+        if (tools != null && tools.length() > 0) {
+            payload.put("tools", tools)
+            payload.put("tool_choice", "auto")
+        }
+
+        val request = authed(Request.Builder().url(endpoint("/chat/completions")))
+            .post(payload.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        val response = try {
+            client.newCall(request).execute()
+        } catch (e: IOException) {
+            throw AiException("Network error: ${e.message ?: "unreachable"}")
+        }
+        response.use {
+            val bodyText = it.body?.string().orEmpty()
+            if (!it.isSuccessful) {
+                val brief = bodyText.replace('\n', ' ').take(160)
+                throw AiException("HTTP ${it.code}${if (brief.isNotBlank()) ": $brief" else ""}")
             }
-            val payload = JSONObject()
-                .put("model", model)
-                .put("messages", msgArray)
-
-            val request = authed(Request.Builder().url(endpoint("/chat/completions")))
-                .post(payload.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-
-            val response = try {
-                client.newCall(request).execute()
-            } catch (e: IOException) {
-                throw AiException("Network error: ${e.message ?: "unreachable"}")
-            }
-            response.use {
-                val bodyText = it.body?.string().orEmpty()
-                if (!it.isSuccessful) {
-                    val brief = bodyText.replace('\n', ' ').take(160)
-                    throw AiException("HTTP ${it.code}${if (brief.isNotBlank()) ": $brief" else ""}")
+            try {
+                val message = JSONObject(bodyText)
+                    .getJSONArray("choices")
+                    .getJSONObject(0)
+                    .getJSONObject("message")
+                val content = message.optString("content")
+                val calls = mutableListOf<ToolCall>()
+                val toolCalls = message.optJSONArray("tool_calls")
+                if (toolCalls != null) {
+                    for (i in 0 until toolCalls.length()) {
+                        val call = toolCalls.optJSONObject(i) ?: continue
+                        val function = call.optJSONObject("function") ?: continue
+                        val name = function.optString("name")
+                        if (name.isBlank()) continue
+                        val rawArguments = function.opt("arguments")
+                        val arguments = when (rawArguments) {
+                            is JSONObject -> rawArguments.toString()
+                            is JSONArray -> rawArguments.toString()
+                            null -> "{}"
+                            else -> rawArguments.toString()
+                        }
+                        calls += ToolCall(
+                            id = call.optString("id").ifBlank { "call_$i" },
+                            name = name,
+                            argumentsJson = arguments.ifBlank { "{}" }
+                        )
+                    }
                 }
-                val content = try {
-                    JSONObject(bodyText)
-                        .getJSONArray("choices")
-                        .getJSONObject(0)
-                        .getJSONObject("message")
-                        .optString("content")
-                } catch (e: Exception) {
-                    throw AiException("Unexpected response format")
+                if (content.isBlank() && calls.isEmpty()) {
+                    throw AiException("Empty reply from model")
                 }
-                if (content.isBlank()) throw AiException("Empty reply from model")
-                content
+                ModelReply(content = content, toolCalls = calls)
+            } catch (e: AiException) {
+                throw e
+            } catch (e: Exception) {
+                throw AiException("Unexpected response format")
             }
         }
+    }
+
+    private fun serializeMessages(messages: List<ChatMsg>): JSONArray {
+        val array = JSONArray()
+        messages.forEach { message ->
+            val item = JSONObject().put("role", message.role)
+            if (message.role == "tool" && !message.toolCallId.isNullOrBlank()) {
+                item.put("tool_call_id", message.toolCallId)
+            }
+            if (!message.toolCallsJson.isNullOrBlank()) {
+                item.put("tool_calls", JSONArray(message.toolCallsJson))
+                item.put(
+                    "content",
+                    if (message.content.isBlank()) JSONObject.NULL else message.content
+                )
+            } else {
+                item.put("content", message.content)
+            }
+            array.put(item)
+        }
+        return array
+    }
 
     override suspend fun testConnection(): TestResult = withContext(Dispatchers.IO) {
         if (baseUrl.isBlank()) return@withContext TestResult(false, 0, "No base URL set")

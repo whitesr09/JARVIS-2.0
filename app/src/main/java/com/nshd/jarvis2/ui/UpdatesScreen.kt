@@ -39,11 +39,13 @@ fun UpdatesScreen() {
                 "permissions dashboard.\n" +
                 "L2 Brain — done: provider layer + failover, encrypted API keys, " +
                 "real chat + Code mode, Memory Core, permanent signing.\n" +
-                "L3 Voice — current build: Gemini Live WebSocket loop (tap-to-talk orb, " +
+                "L3 Voice — done: Gemini Live WebSocket loop (tap-to-talk orb, " +
                 "barge-in, session resumption), fallback speech recognition + TTS via " +
                 "the L2 brain, 5 Gemini voices + custom voice, silent execution + finish " +
                 "chime, personas + 12 languages in the prompt.\n" +
-                "L4 Digital Hands — accessibility automation, deep intents, hardware controls, contact-aware calling & messaging.\n" +
+                "L4 Digital Hands — current build: accessibility screen reader and verified " +
+                "actions, 14 phone tools with native hard-guardrail confirmations, deep " +
+                "intents, hardware controls, ContactsResolver, and WhatsApp/YouTube flows.\n" +
                 "L5 Vision + Overlay — MediaProjection targeting, floating avatar + 4-step Task HUD.\n" +
                 "L6 Always-on — Vosk wake word, voice biometrics, battery-aware modes."
         )

@@ -2,13 +2,15 @@ package com.nshd.jarvis2.voice
 
 import android.content.Context
 import com.nshd.jarvis2.JarvisSettings
-import com.nshd.jarvis2.brain.ChatMsg
-import com.nshd.jarvis2.brain.ChatOutcome
-import com.nshd.jarvis2.brain.FailoverRouter
+import com.nshd.jarvis2.brain.AgentPipeline
 import com.nshd.jarvis2.brain.PersonaPrompts
 import com.nshd.jarvis2.brain.ProviderPresets
 import com.nshd.jarvis2.brain.ProviderStore
+import com.nshd.jarvis2.brain.tools.ToolExecutor
+import com.nshd.jarvis2.brain.tools.ToolRegistry
+import com.nshd.jarvis2.brain.tools.ToolResult
 import com.nshd.jarvis2.memory.MemoryDb
+import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -45,8 +47,9 @@ data class VoiceUiState(
  *    capture uplink + 24 kHz playback, server VAD turn-taking, barge-in
  *    flush, session-resumption handles persisted across the ~10 min
  *    server limit (goAway → reconnect with handle).
- *  - FALLBACK (no Gemini key): SpeechRecognizer → FailoverRouter (L2
- *    REST brain) → TextToSpeech, looped until the user ends the session.
+ *  - FALLBACK (no Gemini key): SpeechRecognizer → AgentPipeline (the
+ *    same local/quick-command/tool pipeline as Chat) → TextToSpeech,
+ *    looped until the user ends the session.
  *
  * Finished turns on both paths are persisted into MemoryDb chat history,
  * so voice conversations show up in the Chat tab. In Silent Execution
@@ -231,6 +234,7 @@ object VoiceSessionManager {
                 voiceName = voice,
                 systemPrompt = prompt,
                 resumptionHandle = handle,
+                toolDeclarations = ToolRegistry.liveFunctionDeclarations(),
                 listener = LiveListener()
             )
             client = liveClient
@@ -340,6 +344,35 @@ object VoiceSessionManager {
             if (!active || reconnecting) return
             fail(reason)
         }
+
+        override fun onToolCall(id: String, name: String, args: JSONObject) {
+            if (!active) return
+            val ctx = appContext ?: return
+            val db = memoryDb ?: return
+            scope.launch(Dispatchers.IO) {
+                val result: ToolResult = try {
+                    ToolExecutor(ctx, db).execute(name, args)
+                } catch (e: Exception) {
+                    ToolResult(
+                        false,
+                        "Tool $name failed safely: ${e.message ?: "unexpected error"}"
+                    )
+                }
+                if (active) {
+                    addCaption(
+                        VoiceCaption(
+                            fromUser = false,
+                            text = "${if (result.success) "✅" else "❌"} $name: " +
+                                result.message.lineSequence().firstOrNull().orEmpty()
+                        )
+                    )
+                    val response = JSONObject()
+                        .put("success", result.success)
+                        .put("message", result.message)
+                    client?.sendToolResponse(id, name, response)
+                }
+            }
+        }
     }
 
     private fun finalizeLiveTurn() {
@@ -446,47 +479,39 @@ object VoiceSessionManager {
         val store = providerStore ?: return
         val s = settings ?: return
         val db = memoryDb ?: return
+        val ctx = appContext ?: return
         scope.launch {
-            val outcome = withContext(Dispatchers.IO) {
-                val facts = db.allFacts(null, null)
-                val systemPrompt = PersonaPrompts.build(s, facts, codeMode = false)
-                val history = db.lastMessages(20).map {
-                    ChatMsg(role = it.role, content = it.content)
-                }
-                val all = mutableListOf(ChatMsg("system", systemPrompt))
-                all += history
-                if (history.lastOrNull()?.content != userText) {
-                    all += ChatMsg("user", userText)
-                }
-                FailoverRouter(store.orderedConfigs()).chat(all, preferReasoningModel = false)
+            // Fallback voice now uses exactly the same pipeline as text
+            // chat: local memory commands, deterministic quick commands
+            // (which work with no API key), then the tool agent loop.
+            val reply = try {
+                AgentPipeline.handleUserText(
+                    context = ctx,
+                    text = userText,
+                    settings = s,
+                    memoryDb = db,
+                    providerStore = store,
+                    codeMode = false,
+                    onEvent = { event ->
+                        addCaption(VoiceCaption(fromUser = false, text = event))
+                    }
+                )
+            } catch (e: Exception) {
+                "I hit a problem handling that: ${e.message ?: "unexpected error"}"
             }
             if (!active) return@launch
-            // The user's line was already persisted by nobody yet — persist
-            // both sides of the turn now (same store as text chat).
-            withContext(Dispatchers.IO) { db.addMessage("user", userText) }
-
-            when (outcome) {
-                is ChatOutcome.Success -> {
-                    addCaption(VoiceCaption(fromUser = false, text = outcome.reply))
-                    withContext(Dispatchers.IO) { db.addMessage("assistant", outcome.reply) }
-                    speakOrChime(outcome.reply)
-                }
-                is ChatOutcome.NoKey -> {
-                    val msg = "Please configure your API Key in Settings → " +
-                        "API & Connection first — then I can answer out loud."
-                    addCaption(VoiceCaption(fromUser = false, text = msg))
-                    speakOrChime(msg)
-                }
-                is ChatOutcome.AllFailed -> {
-                    addCaption(
-                        VoiceCaption(
-                            fromUser = false,
-                            text = "I couldn't reach any provider just now: ${outcome.summary}"
-                        )
-                    )
-                    chime?.playError()
-                    resumeFallbackListening()
-                }
+            withContext(Dispatchers.IO) {
+                db.addMessage("user", userText)
+                db.addMessage("assistant", reply)
+            }
+            addCaption(VoiceCaption(fromUser = false, text = reply))
+            if (reply.startsWith("I couldn't reach any provider") ||
+                reply.startsWith("I hit a problem")
+            ) {
+                chime?.playError()
+                resumeFallbackListening()
+            } else {
+                speakOrChime(reply)
             }
         }
     }

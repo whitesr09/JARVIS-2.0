@@ -152,6 +152,7 @@ fun VoiceScreen(
             )
         }
     }
+    ConfirmGateDialog()
 }
 
 /** Orb + status + captions + controls, shown once the mic is granted. */

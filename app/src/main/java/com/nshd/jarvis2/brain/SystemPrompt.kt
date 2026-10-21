@@ -29,6 +29,14 @@ object PersonaPrompts {
             sb.append("\nUse these naturally when relevant; never read the list back " +
                 "unless he asks what you remember.")
         }
+        sb.append(
+            "\n\nPHONE TOOLS: You can control this phone with the provided tools. " +
+                "Prefer inspect_screen before tapping so you act on the current UI, and prefer " +
+                "deep-intent tools (whatsapp_message, youtube_play, open_app) before raw taps. " +
+                "After each action, use the returned screen state to verify progress. Never attempt " +
+                "to bypass a confirmation: payments and other hard-guardrail actions are gated by " +
+                "the app and will ask ${settings.callsign} directly."
+        )
         if (codeMode) {
             sb.append(
                 "\n\nCODE MODE: You are now acting as an expert coding assistant. " +

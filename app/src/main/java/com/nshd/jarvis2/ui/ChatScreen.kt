@@ -42,12 +42,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.nshd.jarvis2.JarvisSettings
-import com.nshd.jarvis2.brain.ChatMsg
-import com.nshd.jarvis2.brain.ChatOutcome
-import com.nshd.jarvis2.brain.FailoverRouter
-import com.nshd.jarvis2.brain.PersonaPrompts
+import com.nshd.jarvis2.brain.AgentPipeline
 import com.nshd.jarvis2.brain.ProviderStore
-import com.nshd.jarvis2.memory.MemoryCategories
 import com.nshd.jarvis2.memory.MemoryDb
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -56,51 +52,16 @@ import kotlinx.coroutines.withContext
 private data class UiMessage(
     val fromUser: Boolean,
     val text: String,
-    val caption: String? = null
+    val caption: String? = null,
+    val isTool: Boolean = false
 )
 
 private enum class ChatMode { JARVIS, CODE }
 
-private val REMEMBER_PATTERNS = listOf(
-    Regex("(?i)^remember that\\s+(.+)$"),
-    Regex("(?i)^remember:\\s*(.+)$"),
-    Regex("(?i)^remember\\s+(.+)$"),
-    Regex("(?i)^save memory:\\s*(.+)$"),
-    Regex("(?i)^save this to memory:\\s*(.+)$"),
-    Regex("(?i)^save to memory:\\s*(.+)$")
-)
-
-private fun extractRemember(text: String): String? {
-    val trimmed = text.trim()
-    for (pattern in REMEMBER_PATTERNS) {
-        pattern.matchEntire(trimmed)?.let { return it.groupValues[1].trim() }
-    }
-    return null
-}
-
-private fun inferCategory(fact: String): String {
-    val lower = fact.lowercase()
-    val preferenceStarters = listOf("i like", "i love", "i prefer", "i enjoy", "i hate")
-    return if (preferenceStarters.any { lower.startsWith(it) }) {
-        MemoryCategories.PREFERENCES
-    } else {
-        MemoryCategories.GENERAL
-    }
-}
-
-private fun isMemoryListRequest(text: String): Boolean {
-    val lower = text.trim().lowercase()
-    return lower.contains("what do you remember") ||
-        lower.contains("list memories") ||
-        lower.contains("what do you know about me") ||
-        lower == "show memories" ||
-        lower == "my memories"
-}
-
 /**
- * Level 2: the real brain. History persists in MemoryDb; replies stream
- * through FailoverRouter (active provider first, then the next configured
- * ones). "remember …" is handled locally — no model call needed.
+ * Chat uses the shared [AgentPipeline]: local memory commands and
+ * deterministic phone commands first, then the Level 4 tool-calling agent
+ * loop. Tool activity is persisted as role="tool" history.
  */
 @Composable
 fun ChatScreen(settings: JarvisSettings) {
@@ -131,7 +92,11 @@ fun ChatScreen(settings: JarvisSettings) {
         } else {
             history.forEach { stored ->
                 messages.add(
-                    UiMessage(fromUser = stored.role == "user", text = stored.content)
+                    UiMessage(
+                        fromUser = stored.role == "user",
+                        text = stored.content,
+                        isTool = stored.role == "tool"
+                    )
                 )
             }
         }
@@ -150,6 +115,11 @@ fun ChatScreen(settings: JarvisSettings) {
         }
     }
 
+    fun appendToolEvent(event: String) {
+        messages.add(UiMessage(fromUser = false, text = event, isTool = true))
+        scope.launch(Dispatchers.IO) { db.addMessage("tool", event) }
+    }
+
     fun send() {
         val text = input.trim()
         if (text.isEmpty() || sending) return
@@ -157,70 +127,28 @@ fun ChatScreen(settings: JarvisSettings) {
         messages.add(UiMessage(fromUser = true, text = text))
         scope.launch(Dispatchers.IO) { db.addMessage("user", text) }
 
-        // ── Local memory commands (no model call) ────────────────────
-        val rememberFact = extractRemember(text)
-        if (rememberFact != null) {
-            if (rememberFact.isBlank()) {
-                appendAssistant("Tell me what to remember after \"remember\" — e.g. \"remember my exam is on Friday\".")
-                return
-            }
-            val category = inferCategory(rememberFact)
-            scope.launch {
-                withContext(Dispatchers.IO) { db.addFact(category, rememberFact) }
-                appendAssistant("Saved to memory ✅ — I'll remember: $rememberFact")
-            }
-            return
-        }
-        if (isMemoryListRequest(text)) {
-            scope.launch {
-                val facts = withContext(Dispatchers.IO) { db.allFacts(null, null) }
-                val reply = if (facts.isEmpty()) {
-                    "You haven't saved any memories yet. Tell me \"remember …\" and " +
-                        "I'll keep it in my Memory Core."
-                } else {
-                    buildString {
-                        append("Here's what I remember about you, ${settings.callsign}:\n")
-                        facts.forEach { f -> append("\n• [${f.category}] ${f.text}") }
-                    }
-                }
-                appendAssistant(reply)
-            }
-            return
-        }
-
-        // ── Model call via failover router ────────────────────────────
+        // Shared pipeline: memory commands → quick phone commands → agent loop.
         sending = true
         val codeMode = mode == ChatMode.CODE
+        val appContext = context.applicationContext
         scope.launch {
-            val outcome = withContext(Dispatchers.IO) {
-                val facts = db.allFacts(null, null)
-                val systemPrompt = PersonaPrompts.build(settings, facts, codeMode)
-                val history = db.lastMessages(20).map {
-                    ChatMsg(role = it.role, content = it.content)
-                }
-                val all = mutableListOf(ChatMsg("system", systemPrompt))
-                all += history
-                if (history.lastOrNull()?.content != text) {
-                    all += ChatMsg("user", text)
-                }
-                FailoverRouter(providerStore.orderedConfigs())
-                    .chat(all, preferReasoningModel = codeMode)
-            }
-            sending = false
-            when (outcome) {
-                is ChatOutcome.Success -> appendAssistant(
-                    text = outcome.reply,
-                    caption = "via ${outcome.providerLabel} • ${outcome.model}"
+            try {
+                val reply = AgentPipeline.handleUserText(
+                    context = appContext,
+                    text = text,
+                    settings = settings,
+                    memoryDb = db,
+                    providerStore = providerStore,
+                    codeMode = codeMode,
+                    onEvent = { event -> appendToolEvent(event) }
                 )
-                is ChatOutcome.NoKey -> appendAssistant(
-                    text = "Please configure your API Key in Settings → API & Connection " +
-                        "first. Your keys stay encrypted on this device — and if one " +
-                        "provider fails, I'll automatically try the next configured one."
+                appendAssistant(reply)
+            } catch (e: Exception) {
+                appendAssistant(
+                    "I hit a problem handling that: ${e.message ?: "unexpected error"}"
                 )
-                is ChatOutcome.AllFailed -> appendAssistant(
-                    text = "I couldn't reach any provider just now:\n${outcome.summary}\n\n" +
-                        "Check your connection or keys in Settings → API & Connection."
-                )
+            } finally {
+                sending = false
             }
         }
     }
@@ -335,6 +263,8 @@ fun ChatScreen(settings: JarvisSettings) {
         }
     }
 
+    ConfirmGateDialog()
+
     if (showClearConfirm) {
         AlertDialog(
             onDismissRequest = { showClearConfirm = false },
@@ -361,6 +291,25 @@ fun ChatScreen(settings: JarvisSettings) {
 
 @Composable
 private fun MessageBubble(msg: UiMessage) {
+    if (msg.isTool) {
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                modifier = Modifier.widthIn(max = 340.dp)
+            ) {
+                Text(
+                    text = msg.text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                )
+            }
+        }
+        return
+    }
     Box(
         modifier = Modifier.fillMaxWidth(),
         contentAlignment = if (msg.fromUser) Alignment.CenterEnd else Alignment.CenterStart

@@ -3,11 +3,17 @@ package com.nshd.jarvis2.service
 import android.accessibilityservice.AccessibilityService
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
+import com.nshd.jarvis2.hands.ScreenReader
+import com.nshd.jarvis2.hands.UiElement
 
 /**
- * Digital Hands foundation (Level 1): the service registers itself and can
- * read the current screen's text and perform global actions. The automation
- * engine (click/type/swipe, verified action loop) lands in Level 4.
+ * Digital Hands service (Level 4).
+ *
+ * The important Level 4 change is root selection: use the focused active
+ * window, never an arbitrary first window. Dialogs, keyboards, split-screen
+ * and floating windows can reorder [windows], and acting on a guessed root
+ * can tap the wrong application.
  */
 class JarvisAccessibilityService : AccessibilityService() {
 
@@ -17,37 +23,44 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // L1: no event handling — the agent loop arrives in Level 4.
+        event?.packageName?.toString()?.takeIf { it.isNotBlank() }?.let {
+            lastPackageName = it
+        }
     }
 
     override fun onInterrupt() {
-        // Nothing to interrupt in L1.
+        // Android requires this callback; individual actions are short-lived.
     }
 
     override fun onDestroy() {
-        if (instance === this) instance = null
+        if (instance === this) {
+            instance = null
+            lastSnapshot = emptyList()
+        }
         super.onDestroy()
     }
 
-    /** All visible text + content descriptions on the current screen (max 100 entries). */
-    fun screenText(): List<String> {
-        val root = rootInActiveWindow ?: return emptyList()
-        val out = mutableListOf<String>()
-        collectText(root, out)
-        return out
+    /** Root of the focused application window, with conservative fallbacks. */
+    fun activeRoot(): AccessibilityNodeInfo? {
+        rootInActiveWindow?.let { return it }
+        val appWindows = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+        appWindows.firstOrNull { it.isFocused }?.root?.let { return it }
+        appWindows.firstOrNull { it.isActive }?.root?.let { return it }
+        return null
     }
 
-    private fun collectText(node: AccessibilityNodeInfo?, out: MutableList<String>) {
-        if (node == null || out.size >= MAX_SCREEN_TEXT) return
-        node.text?.toString()?.takeIf { it.isNotBlank() }?.let { out.add(it) }
-        if (out.size < MAX_SCREEN_TEXT) {
-            node.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { out.add(it) }
-        }
-        for (i in 0 until node.childCount) {
-            if (out.size >= MAX_SCREEN_TEXT) break
-            collectText(node.getChild(i), out)
-        }
+    fun screenReader(): ScreenReader = ScreenReader(this)
+
+    internal fun updateLastSnapshot(elements: List<UiElement>, packageName: String?) {
+        lastSnapshot = elements
+        if (!packageName.isNullOrBlank()) lastPackageName = packageName
     }
+
+    /** Retained for older UI callers; now backed by the structured reader. */
+    fun screenText(): List<String> = screenReader().snapshot()
+        .map { it.label }
+        .filter { it.isNotBlank() }
+        .take(MAX_SCREEN_TEXT)
 
     fun goHome(): Boolean = performGlobalAction(GLOBAL_ACTION_HOME)
 
@@ -63,6 +76,15 @@ class JarvisAccessibilityService : AccessibilityService() {
         @Volatile
         var instance: JarvisAccessibilityService? = null
             private set
+
+        /** Elements from the most recent [ScreenReader.snapshot] call. */
+        @Volatile
+        var lastSnapshot: List<UiElement> = emptyList()
+            internal set
+
+        @Volatile
+        var lastPackageName: String? = null
+            internal set
 
         fun isEnabled(): Boolean = instance != null
     }
