@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.ColorStateList
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -28,7 +29,10 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import com.nshd.jarvis2.MainActivity
 import com.nshd.jarvis2.hands.TaskState
+import com.nshd.jarvis2.ui.AppTheme
 import com.nshd.jarvis2.ui.AvatarCatalog
+import com.nshd.jarvis2.ui.HudPalette
+import com.nshd.jarvis2.ui.ThemePalette
 import com.nshd.jarvis2.voice.VoiceSessionManager
 import com.nshd.jarvis2.voice.VoiceStatus
 import kotlinx.coroutines.CoroutineScope
@@ -63,7 +67,11 @@ class FloatingOverlayService : Service() {
     private var hudStepViews: List<TextView> = emptyList()
     private var hudProgressBar: ProgressBar? = null
     private var hudStatusView: TextView? = null
+    private var hudBackground: GradientDrawable? = null
     private var params: WindowManager.LayoutParams? = null
+
+    /** Current theme palette for the HUD (D3) — re-read on every start. */
+    private var palette: HudPalette = ThemePalette.hudPalette(AppTheme.PURPLE, null)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -85,6 +93,7 @@ class FloatingOverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         running = true
+        palette = readPalette()
         createNotificationChannel()
         startForegroundCompat(buildNotificationText())
         showOverlayIfPermitted()
@@ -94,6 +103,10 @@ class FloatingOverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Re-read the chosen avatar so picking a new one refreshes the bubble.
         refreshAvatar()
+        // Re-read the theme palette too — MainActivity re-sends a start
+        // when the theme changes, so the HUD follows without a restart
+        // of the whole service (D3 theme-blind HUD fix).
+        applyPalette(readPalette())
         return START_STICKY
     }
 
@@ -168,8 +181,10 @@ class FloatingOverlayService : Service() {
         val panelBg = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = dp(16).toFloat()
-            setColor(0xF2FFFFFF.toInt())
+            setColor(palette.background)
+            setStroke(dp(1), palette.border)
         }
+        hudBackground = panelBg
         val steps = mutableListOf<TextView>()
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -181,7 +196,7 @@ class FloatingOverlayService : Service() {
         }
         val goalView = TextView(this).apply {
             textSize = 13f
-            setTextColor(0xFF1D2733.toInt())
+            setTextColor(palette.textPrimary)
             maxLines = 2
         }
         panel.addView(goalView)
@@ -189,7 +204,7 @@ class FloatingOverlayService : Service() {
         repeat(4) {
             val stepView = TextView(this).apply {
                 textSize = 12f
-                setTextColor(0xFF44536A.toInt())
+                setTextColor(palette.textSecondary)
                 maxLines = 1
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -203,6 +218,9 @@ class FloatingOverlayService : Service() {
         val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
             isIndeterminate = true
+            progressTintList = ColorStateList.valueOf(palette.accent)
+            indeterminateTintList = ColorStateList.valueOf(palette.accent)
+            progressBackgroundTintList = ColorStateList.valueOf(palette.progressTrack)
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -212,7 +230,7 @@ class FloatingOverlayService : Service() {
         hudProgressBar = progress
         val status = TextView(this).apply {
             textSize = 11f
-            setTextColor(0xFFCE470F.toInt())
+            setTextColor(palette.accent)
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -234,6 +252,7 @@ class FloatingOverlayService : Service() {
         rootView = null
         bubbleView = null
         hudPanel = null
+        hudBackground = null
     }
 
     // ── State observation ──────────────────────────────────────────────
@@ -458,6 +477,42 @@ class FloatingOverlayService : Service() {
         bubbleView?.setImageResource(currentAvatarRes())
     }
 
+    // ── Theme palette (D3) ─────────────────────────────────────────────
+
+    /** Reads the saved theme (+ custom hex) from the app's settings prefs. */
+    private fun readPalette(): HudPalette {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val rawTheme = prefs.getString(KEY_THEME, AppTheme.PURPLE.name) ?: AppTheme.PURPLE.name
+        // Mirror MainActivity's migration: the retired SUNSET reads as PURPLE.
+        val theme = if (rawTheme == "SUNSET") {
+            AppTheme.PURPLE
+        } else {
+            try {
+                AppTheme.valueOf(rawTheme)
+            } catch (e: IllegalArgumentException) {
+                AppTheme.PURPLE
+            }
+        }
+        return ThemePalette.hudPalette(theme, prefs.getString(KEY_CUSTOM_BG, null))
+    }
+
+    /** Repaints the HUD with [newPalette]; a no-op before the HUD exists. */
+    private fun applyPalette(newPalette: HudPalette) {
+        palette = newPalette
+        hudBackground?.let { bg ->
+            bg.setColor(newPalette.background)
+            bg.setStroke(dp(1), newPalette.border)
+        }
+        hudGoalView?.setTextColor(newPalette.textPrimary)
+        hudStepViews.forEach { it.setTextColor(newPalette.textSecondary) }
+        hudStatusView?.setTextColor(newPalette.accent)
+        hudProgressBar?.let { bar ->
+            bar.progressTintList = ColorStateList.valueOf(newPalette.accent)
+            bar.indeterminateTintList = ColorStateList.valueOf(newPalette.accent)
+            bar.progressBackgroundTintList = ColorStateList.valueOf(newPalette.progressTrack)
+        }
+    }
+
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID,
@@ -522,6 +577,8 @@ class FloatingOverlayService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val PREFS_NAME = "jarvis_settings"
         private const val KEY_AVATAR_ID = "avatar_id"
+        private const val KEY_THEME = "theme"
+        private const val KEY_CUSTOM_BG = "custom_bg"
         private const val TOUCH_SLOP_PX = 14f
         private const val TAP_MAX_MS = 350L
         private const val DOUBLE_TAP_MS = 320L

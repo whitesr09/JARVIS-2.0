@@ -10,6 +10,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import android.content.Intent
 import android.os.Build
+import com.nshd.jarvis2.service.FloatingOverlayService
 import com.nshd.jarvis2.service.WakeWordControl
 import com.nshd.jarvis2.ui.AppNavRequests
 import com.nshd.jarvis2.voice.VoskModelManager
@@ -62,8 +63,15 @@ class MainActivity : ComponentActivity() {
             JarvisApp(
                 settings = settings,
                 onSettingsChange = { updated ->
+                    val themeChanged = updated.theme != settings.theme ||
+                        updated.customBgHex != settings.customBgHex
                     settings = updated
                     saveSettings(updated)
+                    // D3: a running overlay re-reads its HUD palette on
+                    // start, so a theme change re-skins the HUD live.
+                    if (themeChanged && FloatingOverlayService.isRunning()) {
+                        runCatching { FloatingOverlayService.start(this) }
+                    }
                 }
             )
         }

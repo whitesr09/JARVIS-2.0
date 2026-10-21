@@ -43,8 +43,20 @@ fun UpdatesScreen() {
 
         RoadmapCard()
         InfoCard(
+            title = "Design refresh — D3 (orb + HUD polish)",
+            body = "Done: the final design pass. The orb now breathes instead " +
+                "of jittering (its response to your voice is smoothed), shifts " +
+                "palette with its state — a tighter swirl while thinking, the " +
+                "error colour on failure — and sits on the soft purple glow " +
+                "Warm Minimal allows it. The floating Task HUD is no longer " +
+                "theme-blind: it follows the app theme (including a custom " +
+                "background hex) and re-skins live when you change themes. " +
+                "A full accessibility and code-review QA pass closed the " +
+                "refresh out."
+        )
+        InfoCard(
             title = "Design refresh — D2 (screens + motion)",
-            body = "This build: every screen is restyled onto the D1 tokens — " +
+            body = "Done: every screen is restyled onto the D1 tokens — " +
                 "one radius and spacing ladder, token cards everywhere, and a " +
                 "shared status-pill language (permissions, providers, roadmap). " +
                 "Navigation now crossfades with a soft directional slide, " +
@@ -179,14 +191,14 @@ private val ROADMAP = listOf(
     RoadmapEntry(
         "D2 Screens + motion",
         "Per-screen restyle on the D1 tokens and the motion system — screen " +
-            "transitions, list entry, shared status pills. This build.",
-        RoadmapStatus.CURRENT
+            "transitions, list entry, shared status pills.",
+        RoadmapStatus.DONE
     ),
     RoadmapEntry(
         "D3 Orb + HUD polish",
-        "Orb state palettes and amplitude curve, floating HUD restyle, final " +
-            "accessibility + code-review QA pass.",
-        RoadmapStatus.UPCOMING
+        "Orb state palettes and amplitude curve, theme-following floating " +
+            "HUD, final accessibility + code-review QA pass. This build.",
+        RoadmapStatus.CURRENT
     )
 )
 
@@ -254,6 +266,12 @@ private fun RoadmapCard() {
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                text = "v1.0.0 — design complete: Warm Minimal · Purple across " +
+                    "every screen, the orb, and the floating HUD.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }

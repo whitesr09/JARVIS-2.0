@@ -175,6 +175,9 @@ private fun VoiceSessionBody(
         listening = uiState.status == VoiceStatus.LISTENING ||
             uiState.status == VoiceStatus.FALLBACK_ACTIVE,
         speaking = uiState.status == VoiceStatus.SPEAKING,
+        thinking = uiState.status == VoiceStatus.THINKING ||
+            uiState.status == VoiceStatus.CONNECTING,
+        error = uiState.status == VoiceStatus.ERROR,
         amplitude = amplitude,
         modifier = Modifier
             .size(250.dp)

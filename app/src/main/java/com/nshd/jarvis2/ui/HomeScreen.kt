@@ -28,12 +28,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.nshd.jarvis2.JarvisSettings
+import com.nshd.jarvis2.voice.VoiceSessionManager
+import com.nshd.jarvis2.voice.VoiceStatus
 
 @Composable
 fun HomeScreen(
@@ -76,8 +80,15 @@ fun HomeScreen(
         )
         Spacer(modifier = Modifier.height(JarvisDimens.spaceXl))
 
+        // The Home orb mirrors the live voice session state (D3 tints):
+        // thinking swirl while the brain works, error colour on failure.
+        val voiceState by VoiceSessionManager.uiState.collectAsState()
         ParticleOrb(
             listening = listening,
+            speaking = voiceState.status == VoiceStatus.SPEAKING,
+            thinking = voiceState.status == VoiceStatus.THINKING ||
+                voiceState.status == VoiceStatus.CONNECTING,
+            error = voiceState.status == VoiceStatus.ERROR,
             modifier = Modifier
                 .size(230.dp)
                 .clickable(onClick = onOpenVoice)

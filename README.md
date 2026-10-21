@@ -4,7 +4,7 @@
 
 Jarvis talks (real-time voice), sees your screen (accessibility tree + screen-vision fallback), and acts for you — tapping, typing, scrolling and controlling hardware — while a floating avatar and task HUD show exactly what it's doing. No accounts, no external backend: your API keys, memory and voice stay on your device.
 
-> **Current level: L1 — Foundation.** Gradle/CI scaffold, theme engine (Sunset / Light / Dark / Red + custom hex), animated particle-orb home, chat shell, settings with operator identity, and the full 11-authorization permissions dashboard. The brain, voice and automation land level by level (see roadmap).
+> **Current release: v1.0.0 — all six levels built, design complete.** Real-time voice (Gemini Live + on-device fallback), a provider-failover brain with Memory Core, accessibility automation with hard safety guardrails, screen vision, a floating avatar with task HUD, and an offline "Hey Jarvis" wake word. The UI runs the Warm Minimal · Purple design system (Purple / Light / Dark / Red themes + custom hex).
 
 ## Build the APK (GitHub Actions)
 
@@ -27,7 +27,7 @@ You can also run the workflow manually from the Actions tab (**Run workflow**).
 
 | Level | Scope |
 |---|---|
-| **L1 Foundation** *(current)* | Scaffold + CI, theme engine, orb home, bottom nav with raised mic, chat shell, settings, permissions dashboard, developer section |
+| **L1 Foundation** | Scaffold + CI, theme engine, orb home, bottom nav with raised mic, chat shell, settings, permissions dashboard, developer section |
 | **L2 Brain** | Provider layer (Gemini + Groq / FreeLLMAPI / OpenRouter) with free-tier failover, API key settings + connection test, real chat + Code mode (markdown/highlight/copy), Memory Core |
 | **L3 Voice** | Gemini Live WebSocket voice loop, tap-to-talk orb, TTS voices + custom voice, personas + 12 languages, silent execution + finish chime |
 | **L4 Digital Hands** | Full accessibility automation, deep intents, verified action loop + recovery, hardware controls, contact-aware calling/messaging with hard safety guardrails |
