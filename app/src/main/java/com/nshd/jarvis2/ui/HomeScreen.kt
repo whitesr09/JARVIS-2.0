@@ -49,7 +49,9 @@ fun HomeScreen(
             .padding(horizontal = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(14.dp))
+        A11yWarningBanner(onFix = onOpenSettings)
+        Spacer(modifier = Modifier.height(14.dp))
         Text(
             text = settings.assistantName,
             style = MaterialTheme.typography.headlineMedium,

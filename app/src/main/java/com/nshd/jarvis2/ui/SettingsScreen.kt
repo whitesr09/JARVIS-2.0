@@ -1,6 +1,7 @@
 package com.nshd.jarvis2.ui
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -10,6 +11,8 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,15 +23,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Accessibility
-import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Api
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Fingerprint
@@ -41,7 +43,6 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material3.AlertDialog
@@ -55,6 +56,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -75,7 +77,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.painterResource
 import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.JarvisSettings
+import com.nshd.jarvis2.R
 import com.nshd.jarvis2.hands.DeepIntents
+import com.nshd.jarvis2.service.A11yStatus
 import com.nshd.jarvis2.service.FloatingOverlayService
 import com.nshd.jarvis2.service.JarvisAccessibilityService
 import com.nshd.jarvis2.service.WakeState
@@ -490,6 +494,74 @@ fun SettingsScreen(
             }
         }
 
+        SectionTitle("Keep Accessibility Alive (Vivo/iQOO)")
+        GroupCard {
+            val a11yOn = A11yStatus.isEnabled(context)
+            val batteryFree = A11yStatus.isIgnoringBatteryOptimizations(context)
+            Text(
+                text = "Status: Accessibility ${if (a11yOn) "ON" else "OFF"} • " +
+                    "Battery ${if (batteryFree) "unrestricted" else "optimized"}",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = if (a11yOn && batteryFree) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.error
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Vivo/iQOO phones silently switch off accessibility for " +
+                    "sideloaded apps. These three steps keep Jarvis alive — " +
+                    "do them once, and re-check them if accessibility turns off again.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            KeepAliveStep(
+                step = "1",
+                title = "Allow restricted settings",
+                caption = "On the App info page that opens, tap ⋮ (top right) → " +
+                    "\"Allow restricted settings\", then enable Jarvis under " +
+                    "Accessibility. Android 13+ blocks accessibility for " +
+                    "sideloaded apps until this is allowed.",
+                buttonLabel = "Open App info"
+            ) {
+                runCatching {
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                    )
+                }
+            }
+            KeepAliveStep(
+                step = "2",
+                title = "Autostart ON",
+                caption = "In iManager → App manager → Autostart, turn Jarvis ON " +
+                    "so the phone doesn't kill it in the background.",
+                buttonLabel = "Open Autostart"
+            ) { openAutostartSettings(context) }
+            KeepAliveStep(
+                step = "3",
+                title = "Battery: Unrestricted",
+                caption = if (batteryFree) {
+                    "Done — Jarvis already runs unrestricted. ✓"
+                } else {
+                    "Choose \"Unrestricted\" on the page that opens so the " +
+                        "system doesn't freeze Jarvis to save battery."
+                },
+                buttonLabel = "Open Battery settings"
+            ) {
+                runCatching {
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                    )
+                }
+            }
+        }
+
         SectionTitle("Appearance")
         GroupCard {
             SettingsRow(
@@ -502,48 +574,42 @@ fun SettingsScreen(
         SectionTitle("Developer")
         GroupCard {
             Text(
-                text = "Follow me",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(bottom = 6.dp)
-            )
-            LinkRow(Icons.Filled.AlternateEmail, "Instagram", "@__nshd.__") {
-                openUrl("https://www.instagram.com/__nshd.__")
-            }
-            LinkRow(Icons.Filled.Chat, "WhatsApp", "+91 8590455801") {
-                openUrl("https://wa.me/+918590455801")
-            }
-            LinkRow(Icons.Filled.Send, "Telegram", "@nshd_0") {
-                openUrl("https://t.me/nshd_0")
-            }
-            LinkRow(Icons.Filled.Email, "Email", "nishadahammed081@gmail.com") {
-                openUrl("mailto:nishadahammed081@gmail.com")
-            }
-            LinkRow(Icons.Filled.Code, "GitHub", "@whitesr09") {
-                openUrl("https://github.com/whitesr09")
-            }
-        }
-
-        SectionTitle("Credits")
-        GroupCard {
-            Text(
-                text = "Developed by N S H D",
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Reference design & tutorial: Tech GPTx — " +
-                    "github.com/techgptx/Playlist. Credit to Tech GPTx for the JARVIS " +
-                    "AI Android source code / tutorial that inspired this design.",
-                style = MaterialTheme.typography.bodySmall,
+                text = "Developed by",
+                style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Text(
+                text = "N S H D",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            // Icon links ONLY — no addresses, numbers or URLs displayed.
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                DeveloperBrandButton(R.drawable.brand_instagram, "Instagram") {
+                    openUrl("https://www.instagram.com/__nshd.__")
+                }
+                DeveloperBrandButton(R.drawable.brand_whatsapp, "WhatsApp") {
+                    openUrl("https://wa.me/+918590455801")
+                }
+                DeveloperBrandButton(R.drawable.brand_telegram, "Telegram") {
+                    openUrl("https://t.me/nshd_0")
+                }
+                DeveloperBrandButton(R.drawable.brand_github, "GitHub") {
+                    openUrl("https://github.com/whitesr09")
+                }
+                DeveloperIconButton(Icons.Filled.Email, "Email") {
+                    openUrl("mailto:nishadahammed081@gmail.com")
+                }
+                DeveloperIconButton(Icons.Filled.Call, "Call") {
+                    openUrl("tel:+918590455801")
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(18.dp))
         Text(
-            text = "JARVIS • v0.7.0-D1",
+            text = "JARVIS • v0.8.0-F1",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)
@@ -1113,12 +1179,129 @@ private fun SettingsRow(
     }
 }
 
+/** One numbered step of the Vivo/iQOO accessibility keep-alive guide. */
 @Composable
-private fun LinkRow(
-    icon: ImageVector,
+private fun KeepAliveStep(
+    step: String,
     title: String,
-    subtitle: String,
+    caption: String,
+    buttonLabel: String,
+    onOpen: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.primaryContainer,
+            modifier = Modifier.size(28.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = step,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = caption,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedButton(onClick = onOpen) { Text(buttonLabel) }
+        }
+    }
+}
+
+/** Circular tonal button with a brand vector drawable (Developer section). */
+@Composable
+private fun DeveloperBrandButton(
+    drawableRes: Int,
+    contentDescription: String,
     onClick: () -> Unit
 ) {
-    SettingsRow(icon = icon, title = title, subtitle = subtitle, onClick = onClick)
+    Surface(
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier
+            .size(48.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                painter = painterResource(drawableRes),
+                contentDescription = contentDescription,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+    }
+}
+
+/** Circular tonal button with a Material icon (Developer section). */
+@Composable
+private fun DeveloperIconButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier
+            .size(48.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+    }
+}
+
+/**
+ * Opens the OEM autostart manager. Vivo/iQOO ship it inside their
+ * permission manager; other builds fall back to this app's App info
+ * page, from where autostart can usually be reached.
+ */
+private fun openAutostartSettings(context: Context) {
+    val vivoIntent = Intent().setComponent(
+        ComponentName(
+            "com.vivo.permissionmanager",
+            "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
+        )
+    )
+    if (runCatching { context.startActivity(vivoIntent) }.isSuccess) return
+    val iqooIntent = Intent().setComponent(
+        ComponentName(
+            "com.iqoo.secure",
+            "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"
+        )
+    )
+    if (runCatching { context.startActivity(iqooIntent) }.isSuccess) return
+    runCatching {
+        context.startActivity(
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:${context.packageName}")
+            )
+        )
+    }
 }

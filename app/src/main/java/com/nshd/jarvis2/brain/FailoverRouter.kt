@@ -33,7 +33,8 @@ class FailoverRouter(
 
     suspend fun chat(
         messages: List<ChatMsg>,
-        preferReasoningModel: Boolean
+        preferReasoningModel: Boolean,
+        onDelta: (String) -> Unit = {}
     ): ChatOutcome {
         val configured = configsInOrder.filter { it.isConfigured }
         if (configured.isEmpty()) return ChatOutcome.NoKey
@@ -46,8 +47,13 @@ class FailoverRouter(
                 continue
             }
             try {
-                val reply = config.toProvider().chat(messages, model)
-                return ChatOutcome.Success(reply, config.label, model)
+                // Streamed for responsiveness; deltas flow to the caller.
+                // Failover still applies because a provider that dies before
+                // emitting anything throws (see chatStream's rules).
+                val reply = config.toProvider()
+                    .chatStream(messages, model, tools = null, onDelta = onDelta)
+                if (reply.content.isBlank()) throw AiException("Empty reply from model")
+                return ChatOutcome.Success(reply.content, config.label, model)
             } catch (e: AiException) {
                 failures += "${config.label}: ${e.message ?: "failed"}"
             } catch (e: Exception) {
@@ -70,7 +76,8 @@ class FailoverRouter(
         systemAndHistory: List<ChatMsg>,
         maxSteps: Int = 10,
         preferReasoningModel: Boolean = false,
-        onEvent: (String) -> Unit = {}
+        onEvent: (String) -> Unit = {},
+        onAssistantDelta: (String) -> Unit = {}
     ): String {
         val configured = configsInOrder.filter { it.isConfigured }
         if (configured.isEmpty()) {
@@ -91,10 +98,11 @@ class FailoverRouter(
             try {
                 var step = 0
                 while (step < maxSteps.coerceAtLeast(1)) {
-                    val reply = provider.chatWithTools(
+                    val reply = provider.chatStream(
                         conversation,
                         model,
-                        ToolRegistry.openAiTools()
+                        ToolRegistry.openAiTools(),
+                        onDelta = onAssistantDelta
                     )
                     if (reply.toolCalls.isEmpty()) {
                         return reply.content.ifBlank {
@@ -146,13 +154,14 @@ class FailoverRouter(
                 }
 
                 onEvent("⚠️ Tool step limit reached — asking ${config.label} for a summary")
-                val summary = provider.chatWithTools(
+                val summary = provider.chatStream(
                     conversation + ChatMsg(
                         "user",
                         "You have reached the tool-step limit. Summarise what was accomplished and what remains, without calling more tools."
                     ),
                     model,
-                    tools = null
+                    tools = null,
+                    onDelta = onAssistantDelta
                 )
                 return summary.content.ifBlank {
                     "I reached the tool-step limit. The actions and results above show what was completed."

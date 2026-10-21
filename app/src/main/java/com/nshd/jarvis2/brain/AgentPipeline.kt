@@ -32,7 +32,8 @@ object AgentPipeline {
         memoryDb: MemoryDb,
         providerStore: ProviderStore,
         codeMode: Boolean = false,
-        onEvent: (String) -> Unit = {}
+        onEvent: (String) -> Unit = {},
+        onAssistantDelta: (String) -> Unit = {}
     ): String {
         // Feed the floating overlay's Task HUD (Level 5): begin with the
         // caller's own coroutine Job so the overlay's abort can cancel it.
@@ -48,7 +49,10 @@ object AgentPipeline {
         }
         return try {
             val result = withContext(Dispatchers.IO) {
-                dispatch(context, text, settings, memoryDb, providerStore, codeMode, hudEvent)
+                dispatch(
+                    context, text, settings, memoryDb, providerStore,
+                    codeMode, hudEvent, onAssistantDelta
+                )
             }
             TaskState.finish(
                 success = !result.startsWith("I couldn't") && !result.startsWith("Please configure"),
@@ -71,7 +75,8 @@ object AgentPipeline {
         memoryDb: MemoryDb,
         providerStore: ProviderStore,
         codeMode: Boolean = false,
-        onEvent: (String) -> Unit = {}
+        onEvent: (String) -> Unit = {},
+        onAssistantDelta: (String) -> Unit = {}
     ): String = withContext(Dispatchers.IO) {
         val clean = text.trim()
         if (clean.isBlank()) return@withContext "I didn't catch that — please try again."
@@ -116,7 +121,9 @@ object AgentPipeline {
         // ── Model + tools ──────────────────────────────────────────────
         val facts = memoryDb.allFacts(null, null)
         val systemPrompt = PersonaPrompts.build(settings, facts, codeMode)
-        val history = memoryDb.lastMessages(20)
+        // Trim what's SENT (stored history stays intact): last 16 turns
+        // keeps prompts small, which keeps free-tier latency down.
+        val history = memoryDb.lastMessages(16)
             .filter { it.role == "user" || it.role == "assistant" }
             .map { ChatMsg(role = it.role, content = it.content) }
         val messages = mutableListOf(ChatMsg("system", systemPrompt))
@@ -129,7 +136,8 @@ object AgentPipeline {
             systemAndHistory = messages,
             maxSteps = 10,
             preferReasoningModel = codeMode,
-            onEvent = onEvent
+            onEvent = onEvent,
+            onAssistantDelta = onAssistantDelta
         )
     }
 

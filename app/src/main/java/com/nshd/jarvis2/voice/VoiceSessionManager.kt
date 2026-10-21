@@ -249,6 +249,7 @@ object VoiceSessionManager {
                 systemPrompt = prompt,
                 resumptionHandle = handle,
                 toolDeclarations = ToolRegistry.liveFunctionDeclarations(),
+                languageCode = FallbackVoice.liveLanguageCode(s.language),
                 listener = LiveListener()
             )
             client = liveClient
@@ -354,8 +355,8 @@ object VoiceSessionManager {
         override fun onSessionEnding() {
             if (!active || reconnecting) return
             // goAway: the server is about to close — reconnect WITH the
-            // stored handle so the conversation survives (the fix for
-            // the Tech GPTx 10-minute context-loss gap).
+            // stored handle so the conversation survives the ~10-minute
+            // session limit instead of losing context.
             if (reconnectAttempts >= MAX_RECONNECTS) return
             reconnecting = true
             reconnectAttempts++

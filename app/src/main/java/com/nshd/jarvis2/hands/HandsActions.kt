@@ -25,7 +25,7 @@ data class ActionResult(val success: Boolean, val message: String)
  * The single mutation gate for accessibility actions.
  *
  * Every public action is serialised through one mutex and bounded to 15
- * seconds (P7). Click handling deliberately never performs both an
+ * seconds. Click handling deliberately never performs both an
  * accessibility ACTION_CLICK and a gesture tap for the same target: the
  * gesture is used only when no clickable node accepts the action.
  */

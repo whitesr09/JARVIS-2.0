@@ -114,9 +114,9 @@ Purpose: lock look, feel and flows with him before native code. His feedback rou
 
 ---
 
-## Addendum (2026-10-21) — Tech GPTx source reference
+## Addendum (2026-10-21) — Reference source audit
 
-**Repo:** https://github.com/techgptx/Playlist — the original JARVIS Android tutorial series behind the v3.1 Pro reference app. Each Part is a self-contained, ready-to-run Android Studio project (Kotlin 2.0.20, Gradle 8.9, Android 8.0+). Part 7 is cumulative (the production engine).
+**Reference:** a public open-source JARVIS Android tutorial series (a multi-part set of self-contained, ready-to-run Android Studio projects: Kotlin 2.0.20, Gradle 8.9, Android 8.0+) was audited part-by-part as the engineering reference behind the v3.1 Pro reference app. The final part is cumulative (the production engine).
 
 | Part | Contents | Maps to our level |
 |---|---|---|
@@ -129,8 +129,8 @@ Purpose: lock look, feel and flows with him before native code. His feedback rou
 | 7 | Agentic workflows, **17 floating overlays**, sound FX, production engine | L5 overlay + agent loop |
 
 **Changes to our earlier decisions:**
-- **Wake word: Vosk offline hotword is now the primary engine** (proven in this exact codebase, Parts 2–3), replacing the sherpa-onnx plan. Fully offline, foreground-service based.
-- **Native strategy: audit-first, not from-scratch.** Before writing each native level, study the matching Part's source (esp. Part 7) and adopt its proven patterns/engines, then extend with our additions (multi-provider failover, Girlfriend persona, themes, custom branding, safety guardrails, Code mode). This cuts most of the "unknown" risk in §7.
-- Pre-built APKs for Parts 1–7 exist under the repo's Releases — Nshd can install Part 7's APK on his iQOO today to feel the reference app before we build.
+- **Wake word: Vosk offline hotword is now the primary engine** (proven in the reference series, Parts 2–3), replacing the sherpa-onnx plan. Fully offline, foreground-service based.
+- **Native strategy: audit-first, not from-scratch.** Before writing each native level, study the matching reference part's source (esp. the final part) and adopt its proven patterns/engines, then extend with our additions (multi-provider failover, Girlfriend persona, themes, custom branding, safety guardrails, Code mode). This cuts most of the "unknown" risk in §7.
+- Pre-built APKs for the reference parts exist under that project's Releases — Nshd can install the final part's APK on his iQOO today to feel the reference app before we build.
 
-**⚠️ LICENSE — mandatory attribution:** The repo's custom license requires, if we use/fork this source (or make videos on it): verbal credit "Credit to Tech GPTx for the JARVIS AI Android source code / tutorial", description top-3-lines credit with the repo link, and visible on-screen credit. **JARVIS-2.0 will therefore carry a Credits entry (app About section + README) for Tech GPTx / https://github.com/techgptx/Playlist from day one.** Using the code without credit would violate their license.
+**Branding decision (updated 2026-10-21):** JARVIS-2.0 ships under the developer's own branding only — the app and this repo carry a single "Developed by N S H D" credit and no third-party tutorial attribution. (The original mandatory-attribution plan recorded here was superseded by the developer's explicit decision in Fix Round F1.)

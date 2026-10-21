@@ -10,11 +10,11 @@ import android.os.Process
 import kotlin.math.sqrt
 
 /**
- * Microphone capture for the Gemini Live uplink — pattern from Tech GPTx
- * Parts 4/7 (see techgptx-voice-audit.md §3): VOICE_COMMUNICATION source,
- * 16 kHz mono PCM16, 640-byte (20 ms) chunks for low latency, hardware
- * AEC / NS / AGC attached on the record session when the device offers
- * them (needed so the user can barge in while Jarvis is speaking).
+ * Microphone capture for the Gemini Live uplink: VOICE_COMMUNICATION
+ * source, 16 kHz mono PCM16, 640-byte (20 ms) chunks for low latency,
+ * hardware AEC / NS / AGC attached on the record session when the
+ * device offers them (needed so the user can barge in while Jarvis is
+ * speaking).
  *
  * Chunks are delivered verbatim to [onChunk]; per-chunk RMS (0..1) goes to
  * [onAmplitude] for the orb. Muting is the caller's job (send nothing) —
@@ -51,7 +51,7 @@ class AudioCapture(
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
-                // P4 sizing: generous internal buffer so the reader never starves.
+                // Generous internal buffer so the reader never starves.
                 maxOf(minBuffer * 4, 32_000)
             )
         } catch (e: Exception) {
@@ -153,7 +153,7 @@ class AudioCapture(
     companion object {
         const val SAMPLE_RATE = 16_000
 
-        /** 20 ms of 16 kHz mono PCM16 — the P4/P7 low-latency chunk. */
+        /** 20 ms of 16 kHz mono PCM16 — the low-latency chunk size. */
         const val CHUNK_BYTES = 640
 
         /** RMS of PCM16 samples in [bytes], normalized toward 0..1 (sqrt for orb visibility). */

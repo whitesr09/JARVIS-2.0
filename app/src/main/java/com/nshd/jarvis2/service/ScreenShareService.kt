@@ -27,9 +27,8 @@ import kotlin.math.roundToInt
 
 /**
  * MediaProjection screen share (Level 5): captures the display at ~1 FPS
- * into [ScreenShareState] as JPEG q70 frames (width ≤ 720), following
- * the Tech GPTx Part 5/6 pattern (VirtualDisplay + ImageReader, 1000 ms
- * minimum frame interval).
+ * into [ScreenShareState] as JPEG q70 frames (width ≤ 720), using a
+ * VirtualDisplay + ImageReader with a 1000 ms minimum frame interval.
  *
  * Started only after the user grants the system consent dialog; the
  * resultCode + consent Intent arrive as start extras. Runs as a

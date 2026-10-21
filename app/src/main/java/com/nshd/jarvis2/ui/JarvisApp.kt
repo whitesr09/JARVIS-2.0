@@ -119,7 +119,10 @@ fun JarvisApp(
                             onOpenSettings = { tab = Tab.SETTINGS },
                             onOpenVoice = { subScreen = SubScreen.VOICE }
                         )
-                        Tab.CHAT -> ChatScreen(settings = settings)
+                        Tab.CHAT -> ChatScreen(
+                            settings = settings,
+                            onOpenSettings = { tab = Tab.SETTINGS }
+                        )
                         Tab.SETTINGS -> SettingsScreen(
                             settings = settings,
                             onSettingsChange = onSettingsChange,

@@ -8,13 +8,12 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 
 /**
- * Playback for Gemini Live audio — pattern from Tech GPTx Part 7 (§3 of
- * the audit): AudioTrack MODE_STREAM at 24 kHz mono PCM16 (exactly what
- * the Live API sends — no resampling), USAGE_MEDIA (loudspeaker /
- * headphones, never the earpiece), and a LARGE buffer (~96,000 bytes,
- * 2 s of headroom). P7 removed the low-latency performance mode because
- * it caused underrun loops on MediaTek/Qualcomm FastMixers — we keep
- * that lesson.
+ * Playback for Gemini Live audio: AudioTrack MODE_STREAM at 24 kHz mono
+ * PCM16 (exactly what the Live API sends — no resampling), USAGE_MEDIA
+ * (loudspeaker / headphones, never the earpiece), and a LARGE buffer
+ * (~96,000 bytes, 2 s of headroom). The low-latency performance mode is
+ * deliberately NOT used: it causes underrun loops on MediaTek/Qualcomm
+ * FastMixers.
  *
  * A dedicated writer thread drains an internal queue. [flush] is the
  * barge-in primitive: drop everything queued and reset the hardware

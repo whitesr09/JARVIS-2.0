@@ -36,7 +36,7 @@ import org.vosk.android.SpeechService
  * Always-on wake word (Level 6): a microphone foreground service running
  * the Vosk offline recognizer with a grammar constrained to the wake
  * phrases, so "Hey Jarvis" works with the screen off, locked, and with
- * no network at all (pattern: Tech GPTx Part 2 hotword service).
+ * no network at all.
  *
  * Mic arbitration: a voice session owns the microphone — the service
  * pauses recognition while one runs (see [WakeWordControl]) and resumes

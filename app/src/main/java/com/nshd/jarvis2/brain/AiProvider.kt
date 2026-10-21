@@ -56,6 +56,24 @@ interface AiProvider {
         tools: JSONArray?
     ): ModelReply
 
+    /**
+     * Streaming variant of [chatWithTools]: content deltas are delivered to
+     * [onDelta] as they arrive; the returned [ModelReply] is the complete
+     * accumulation (full content + any tool calls). The default
+     * implementation degrades to a single-shot call and emits the full
+     * content once, so non-streaming providers still work.
+     */
+    suspend fun chatStream(
+        messages: List<ChatMsg>,
+        model: String,
+        tools: JSONArray?,
+        onDelta: (String) -> Unit
+    ): ModelReply {
+        val reply = chatWithTools(messages, model, tools)
+        if (reply.content.isNotBlank()) onDelta(reply.content)
+        return reply
+    }
+
     suspend fun testConnection(): TestResult
 }
 
@@ -79,6 +97,16 @@ class OpenAiCompatibleProvider(
             .readTimeout(90, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .callTimeout(120, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /** Streaming calls: no overall call timeout (long generations stream). */
+    private val streamClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.MILLISECONDS)
             .build()
     }
 
@@ -164,6 +192,146 @@ class OpenAiCompatibleProvider(
                 throw AiException("Unexpected response format")
             }
         }
+    }
+
+    /**
+     * SSE streaming chat completion ("stream": true). Content deltas go to
+     * [onDelta] live; tool-call fragments are accumulated per index and
+     * returned as complete [ToolCall]s so the agent loop works unchanged.
+     *
+     * Failure rules (shared with the router):
+     *  - HTTP 400 whose body names "stream" → the provider rejects
+     *    streaming: retry ONCE non-streamed on this same provider and emit
+     *    its content as a single delta.
+     *  - Network death before ANY delta → [AiException], so the router may
+     *    fail over to the next provider.
+     *  - Network death AFTER deltas → return the partial text marked
+     *    "(connection dropped)" and NO tool calls (the words are already on
+     *    screen; replaying could double-execute a phone action).
+     */
+    override suspend fun chatStream(
+        messages: List<ChatMsg>,
+        model: String,
+        tools: JSONArray?,
+        onDelta: (String) -> Unit
+    ): ModelReply = withContext(Dispatchers.IO) {
+        if (baseUrl.isBlank()) throw AiException("No base URL configured")
+        if (apiKey.isBlank()) throw AiException("No API key configured")
+        if (model.isBlank()) throw AiException("No model configured")
+
+        val payload = JSONObject()
+            .put("model", model)
+            .put("messages", serializeMessages(messages))
+            .put("stream", true)
+        if (tools != null && tools.length() > 0) {
+            payload.put("tools", tools)
+            payload.put("tool_choice", "auto")
+        }
+        val request = authed(Request.Builder().url(endpoint("/chat/completions")))
+            .post(payload.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        val response = try {
+            streamClient.newCall(request).execute()
+        } catch (e: IOException) {
+            throw AiException("Network error: ${e.message ?: "unreachable"}")
+        }
+
+        response.use {
+            if (!it.isSuccessful) {
+                val bodyText = it.body?.string().orEmpty()
+                if (it.code == 400 && bodyText.contains("stream", ignoreCase = true)) {
+                    val reply = chatWithTools(messages, model, tools)
+                    if (reply.content.isNotBlank()) onDelta(reply.content)
+                    return@withContext reply
+                }
+                val brief = bodyText.replace('\n', ' ').take(160)
+                throw AiException("HTTP ${it.code}${if (brief.isNotBlank()) ": $brief" else ""}")
+            }
+            val source = it.body?.source()
+                ?: throw AiException("Empty streaming response")
+            val content = StringBuilder()
+            val toolBuilders = sortedMapOf<Int, ToolCallBuilder>()
+            var emittedAny = false
+            var sawDone = false
+            try {
+                while (true) {
+                    val line = source.readUtf8Line() ?: break
+                    val trimmed = line.trim()
+                    if (!trimmed.startsWith("data:")) continue
+                    val data = trimmed.removePrefix("data:").trim()
+                    if (data.isEmpty()) continue
+                    if (data == "[DONE]") {
+                        sawDone = true
+                        break
+                    }
+                    val chunk = try {
+                        JSONObject(data)
+                    } catch (e: Exception) {
+                        continue
+                    }
+                    val delta = chunk.optJSONArray("choices")
+                        ?.optJSONObject(0)
+                        ?.optJSONObject("delta") ?: continue
+                    val piece = delta.optString("content")
+                    if (piece.isNotEmpty()) {
+                        content.append(piece)
+                        emittedAny = true
+                        onDelta(piece)
+                    }
+                    val calls = delta.optJSONArray("tool_calls") ?: continue
+                    for (i in 0 until calls.length()) {
+                        val call = calls.optJSONObject(i) ?: continue
+                        val index = call.optInt("index", i)
+                        val builder = toolBuilders.getOrPut(index) { ToolCallBuilder() }
+                        call.optString("id")
+                            .takeIf { id -> id.isNotBlank() }
+                            ?.let { id -> builder.id = id }
+                        val function = call.optJSONObject("function") ?: continue
+                        function.optString("name")
+                            .takeIf { n -> n.isNotBlank() }
+                            ?.let { n -> builder.name.append(n) }
+                        when (val argsPart = function.opt("arguments")) {
+                            is String -> builder.arguments.append(argsPart)
+                            null -> Unit
+                            else -> builder.arguments.append(argsPart.toString())
+                        }
+                    }
+                }
+            } catch (e: IOException) {
+                if (emittedAny) {
+                    val partial = content.toString().trimEnd() + "\n(connection dropped)"
+                    return@withContext ModelReply(content = partial)
+                }
+                throw AiException("Network error: ${e.message ?: "stream interrupted"}")
+            }
+            if (!sawDone && !emittedAny && toolBuilders.isEmpty()) {
+                throw AiException("Empty reply from model")
+            }
+            val calls = toolBuilders.entries.mapIndexedNotNull { position, (_, builder) ->
+                val name = builder.name.toString()
+                if (name.isBlank()) {
+                    null
+                } else {
+                    ToolCall(
+                        id = builder.id.ifBlank { "call_$position" },
+                        name = name,
+                        argumentsJson = builder.arguments.toString().ifBlank { "{}" }
+                    )
+                }
+            }
+            if (content.isBlank() && calls.isEmpty()) {
+                throw AiException("Empty reply from model")
+            }
+            ModelReply(content = content.toString(), toolCalls = calls)
+        }
+    }
+
+    /** Accumulates one streamed tool call (id + name + argument fragments). */
+    private class ToolCallBuilder {
+        var id: String = ""
+        val name = StringBuilder()
+        val arguments = StringBuilder()
     }
 
     private fun serializeMessages(messages: List<ChatMsg>): JSONArray {

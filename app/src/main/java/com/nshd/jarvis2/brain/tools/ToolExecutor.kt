@@ -336,7 +336,7 @@ class ToolExecutor(
 
     companion object {
         private const val MAX_UNCONFIRMED_BULK = 5
-        private const val MAX_SUMMARY_ELEMENTS = 25
+        private const val MAX_SUMMARY_ELEMENTS = 15
         private val UI_MUTATION_TOOLS = setOf(
             "open_app", "click_element", "click_text", "type_text", "scroll",
             "press_key", "tap_percent", "whatsapp_message", "youtube_play"

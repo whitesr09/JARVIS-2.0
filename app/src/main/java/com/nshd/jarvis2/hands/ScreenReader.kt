@@ -80,7 +80,7 @@ class ScreenReader(private val service: JarvisAccessibilityService) {
         return elements
     }
 
-    /** P7-style signature: package plus the bounded tree's identifying data. */
+    /** Screen signature: package plus the bounded tree's identifying data. */
     fun signature(): Int {
         val scan = scan()
         var hash = scan.packageName?.hashCode() ?: 0

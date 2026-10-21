@@ -64,7 +64,7 @@ private enum class ChatMode { JARVIS, CODE }
  * loop. Tool activity is persisted as role="tool" history.
  */
 @Composable
-fun ChatScreen(settings: JarvisSettings) {
+fun ChatScreen(settings: JarvisSettings, onOpenSettings: () -> Unit = {}) {
     val context = LocalContext.current
     val db = remember { MemoryDb(context) }
     val providerStore = remember { ProviderStore(context) }
@@ -76,6 +76,28 @@ fun ChatScreen(settings: JarvisSettings) {
     var showClearConfirm by remember { mutableStateOf(false) }
     val messages = remember { mutableStateListOf<UiMessage>() }
     val listState = rememberLazyListState()
+
+    // Live streaming bubble: deltas accumulate in a plain buffer (written
+    // from the streaming thread); the Compose state is refreshed at most
+    // every ~50 ms so recomposition stays cheap.
+    val streamBuffer = remember { StringBuilder() }
+    var streamingText by remember { mutableStateOf("") }
+    var lastStreamUiUpdate by remember { mutableStateOf(0L) }
+
+    fun onAssistantDelta(delta: String) {
+        synchronized(streamBuffer) { streamBuffer.append(delta) }
+        val now = System.currentTimeMillis()
+        if (now - lastStreamUiUpdate >= 50L) {
+            lastStreamUiUpdate = now
+            streamingText = synchronized(streamBuffer) { streamBuffer.toString() }
+        }
+    }
+
+    fun resetStream() {
+        synchronized(streamBuffer) { streamBuffer.setLength(0) }
+        streamingText = ""
+        lastStreamUiUpdate = 0L
+    }
 
     fun greeting(): UiMessage = UiMessage(
         fromUser = false,
@@ -108,6 +130,13 @@ fun ChatScreen(settings: JarvisSettings) {
         }
     }
 
+    // Keep the live streaming bubble pinned to the bottom as it grows.
+    LaunchedEffect(streamingText) {
+        if (streamingText.isNotEmpty() && messages.isNotEmpty()) {
+            listState.scrollToItem(messages.lastIndex + 1)
+        }
+    }
+
     fun appendAssistant(text: String, caption: String? = null, persist: Boolean = true) {
         messages.add(UiMessage(fromUser = false, text = text, caption = caption))
         if (persist) {
@@ -116,6 +145,9 @@ fun ChatScreen(settings: JarvisSettings) {
     }
 
     fun appendToolEvent(event: String) {
+        // A new tool turn starts: the previous turn's streamed narration
+        // is superseded by the tool activity + the upcoming final reply.
+        if (event.startsWith("🔧")) resetStream()
         messages.add(UiMessage(fromUser = false, text = event, isTool = true))
         scope.launch(Dispatchers.IO) { db.addMessage("tool", event) }
     }
@@ -129,6 +161,7 @@ fun ChatScreen(settings: JarvisSettings) {
 
         // Shared pipeline: memory commands → quick phone commands → agent loop.
         sending = true
+        resetStream()
         val codeMode = mode == ChatMode.CODE
         val appContext = context.applicationContext
         scope.launch {
@@ -140,20 +173,29 @@ fun ChatScreen(settings: JarvisSettings) {
                     memoryDb = db,
                     providerStore = providerStore,
                     codeMode = codeMode,
-                    onEvent = { event -> appendToolEvent(event) }
+                    onEvent = { event -> appendToolEvent(event) },
+                    onAssistantDelta = { delta -> onAssistantDelta(delta) }
                 )
+                // Flush any throttled tail, then persist the final text
+                // once as the permanent bubble and retire the live one.
+                streamingText = synchronized(streamBuffer) { streamBuffer.toString() }
                 appendAssistant(reply)
             } catch (e: Exception) {
                 appendAssistant(
                     "I hit a problem handling that: ${e.message ?: "unexpected error"}"
                 )
             } finally {
+                resetStream()
                 sending = false
             }
         }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
+        A11yWarningBanner(
+            onFix = onOpenSettings,
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp)
+        )
         // Header
         Row(
             modifier = Modifier
@@ -194,22 +236,29 @@ fun ChatScreen(settings: JarvisSettings) {
             items(messages) { msg -> MessageBubble(msg) }
             if (sending) {
                 item {
-                    Box(
-                        modifier = Modifier.fillMaxWidth(),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        Card(
-                            shape = RoundedCornerShape(JarvisDimens.radiusCard),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surface
-                            )
+                    if (streamingText.isNotEmpty()) {
+                        // Live bubble: the reply growing in real time.
+                        MessageBubble(
+                            UiMessage(fromUser = false, text = streamingText)
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentAlignment = Alignment.CenterStart
                         ) {
-                            Text(
-                                text = "• • •",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                            )
+                            Card(
+                                shape = RoundedCornerShape(JarvisDimens.radiusCard),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surface
+                                )
+                            ) {
+                                Text(
+                                    text = "• • •",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                                )
+                            }
                         }
                     }
                 }

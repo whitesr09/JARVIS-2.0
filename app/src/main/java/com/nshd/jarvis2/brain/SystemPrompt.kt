@@ -40,6 +40,15 @@ object PersonaPrompts {
                 "when a target has no text (icons, images, custom-drawn controls). When screen " +
                 "share is on, its frames stream to the voice session automatically."
         )
+        sb.append(
+            "\n\nACCURACY RULES: If a command is ambiguous (contact name, target, " +
+                "content), ask ONE short clarifying question instead of guessing. Before " +
+                "tapping UI elements, inspect the screen. For names of people, prefer exact " +
+                "contact matches; Indian names may be spelled phonetically — consider close " +
+                "variants before declaring not found. Keep spoken/chat replies short " +
+                "unless detail is asked — final task summaries are at most 2 sentences " +
+                "by default."
+        )
         if (codeMode) {
             sb.append(
                 "\n\nCODE MODE: You are now acting as an expert coding assistant. " +

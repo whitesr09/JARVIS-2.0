@@ -49,7 +49,8 @@ class FallbackVoice(
     }
 
     private val appContext = context.applicationContext
-    private val locale: Locale = localeForLanguage(languageName)
+    private val languageTag: String = sttLanguageTag(languageName)
+    private val locale: Locale = Locale.forLanguageTag(languageTag)
 
     private var recognizer: SpeechRecognizer? = null
 
@@ -99,7 +100,9 @@ class FallbackVoice(
                 RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
             )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, locale.toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, languageTag)
+            putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
@@ -207,19 +210,33 @@ class FallbackVoice(
     companion object {
         private const val UTTERANCE_ID = "jarvis-fallback-reply"
 
-        /** Maps the app's 12 language names (Settings) to locales. */
-        fun localeForLanguage(language: String): Locale = when (language) {
-            "English" -> Locale.ENGLISH
-            "Hindi", "Hinglish" -> Locale("hi", "IN")
-            "Telugu" -> Locale("te", "IN")
-            "Tamil" -> Locale("ta", "IN")
-            "Kannada" -> Locale("kn", "IN")
-            "Malayalam" -> Locale("ml", "IN")
-            "Bengali" -> Locale("bn", "IN")
-            "Marathi" -> Locale("mr", "IN")
-            "Gujarati" -> Locale("gu", "IN")
-            "Bhojpuri" -> Locale("bho", "IN")
-            else -> Locale.getDefault() // "Auto"
+        /**
+         * Maps the app's 12 language names (Settings) to BCP-47 tags for
+         * speech recognition. India variants are the default — the user's
+         * accent and names are Indian, and recognising en-US against them
+         * was a top cause of misheard commands. Bhojpuri has no widely
+         * deployed recognizer, so Hindi (its closest) is used; "Auto"
+         * also lands on en-IN.
+         */
+        fun sttLanguageTag(language: String): String = when (language) {
+            "Hindi", "Hinglish", "Bhojpuri" -> "hi-IN"
+            "Malayalam" -> "ml-IN"
+            "Tamil" -> "ta-IN"
+            "Telugu" -> "te-IN"
+            "Kannada" -> "kn-IN"
+            "Bengali" -> "bn-IN"
+            "Marathi" -> "mr-IN"
+            "Gujarati" -> "gu-IN"
+            else -> "en-IN" // "English" and "Auto"
+        }
+
+        /**
+         * Language code for the Gemini Live speech_config, or null when
+         * the selection shouldn't pin one ("Auto", "Hinglish").
+         */
+        fun liveLanguageCode(language: String): String? = when (language) {
+            "Auto", "Hinglish" -> null
+            else -> sttLanguageTag(language)
         }
     }
 }

@@ -46,8 +46,3 @@ Full design: see [MASTER-PLAN.md](MASTER-PLAN.md). A clickable pre-build replica
 - Email: nishadahammed081@gmail.com
 - GitHub: https://github.com/whitesr09
 - Phone: +91 8590455801
-
-## Credits
-
-Reference design & tutorial: **Tech GPTx** — https://github.com/techgptx/Playlist
-Credit to Tech GPTx for the JARVIS AI Android source code / tutorial that inspired this design.

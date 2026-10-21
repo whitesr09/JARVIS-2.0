@@ -128,7 +128,9 @@ fun PermissionsScreen(onBack: () -> Unit) {
         ),
         PermissionItem(
             title = "Accessibility Service",
-            description = "Digital Hands — see the screen, tap, type, scroll",
+            description = "Digital Hands — see the screen, tap, type, scroll. " +
+                "On Vivo/iQOO it may switch itself off — re-enable it here; " +
+                "Settings → Digital Hands has a keep-alive guide.",
             granted = isAccessibilityEnabled(context),
             actionLabel = "Manage",
             onAction = { openIntent(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }

@@ -13,15 +13,13 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
- * Gemini Live (BidiGenerateContent) WebSocket client — built from the
- * Tech GPTx Part 4/7 pattern audit (techgptx-voice-audit.md), with their
- * gaps fixed:
+ * Gemini Live (BidiGenerateContent) WebSocket client:
  *
- *  - P7 behaviour, not P4: audio does NOT flow until the server sends
- *    top-level "setupComplete" (an early serverContent also counts as
- *    implicit setup-complete, per P7).
- *  - Session resumption IS implemented (their code lacked it entirely):
- *    the setup carries "session_resumption" when a handle is stored,
+ *  - Audio does NOT flow until the server sends top-level
+ *    "setupComplete" (an early serverContent also counts as implicit
+ *    setup-complete).
+ *  - Session resumption IS implemented: the setup carries
+ *    "session_resumption" when a handle is stored,
  *    "sessionResumptionUpdate" handles are persisted via [Listener],
  *    and "goAway" is surfaced so the session can reconnect with the
  *    handle instead of losing the conversation at the ~10 min limit.
@@ -29,10 +27,10 @@ import java.util.concurrent.TimeUnit
  *    missing "models/" prefix is added). No allow-list, no silent
  *    substitution — JARVIS-2.0's user-editable-model rule.
  *
- * Setup JSON uses snake_case keys like the shipping P4/P7 code. Level 4
- * adds the shared phone-tool declarations and tool-response handling. The
- * API key travels as the URL query param (the only auth this API offers
- * here) — the URL is NEVER logged.
+ * Setup JSON uses snake_case keys. Level 4 adds the shared phone-tool
+ * declarations and tool-response handling. The API key travels as the
+ * URL query param (the only auth this API offers here) — the URL is
+ * NEVER logged.
  *
  * All listener callbacks fire on the OkHttp WebSocket thread; consumers
  * must be thread-safe (StateFlow writes are).
@@ -44,6 +42,8 @@ class GeminiLiveClient(
     private val systemPrompt: String,
     private val resumptionHandle: String?,
     private val toolDeclarations: JSONArray? = null,
+    /** BCP-47 code for speech_config.language_code; null = let Live decide. */
+    private val languageCode: String? = null,
     private val listener: Listener
 ) {
     interface Listener {
@@ -132,9 +132,9 @@ class GeminiLiveClient(
     }
 
     /**
-     * Stream one screen-share frame (JPEG) as Live video input — the
-     * audit's Part 5/6 pattern uses {"realtimeInput":{"video":{...}}}.
-     * Callers throttle to ~1 FPS. No-ops until setup completes.
+     * Stream one screen-share frame (JPEG) as Live video input using
+     * {"realtimeInput":{"video":{...}}}. Callers throttle to ~1 FPS.
+     * No-ops until setup completes.
      */
     fun sendVideoFrame(jpeg: ByteArray) {
         val ws = webSocket ?: return
@@ -183,22 +183,27 @@ class GeminiLiveClient(
     // ── Setup ──────────────────────────────────────────────────────────
 
     private fun buildSetupJson(): String {
+        val speechConfig = JSONObject().put(
+            "voice_config",
+            JSONObject().put(
+                "prebuilt_voice_config",
+                JSONObject().put("voice_name", voiceName)
+            )
+        )
+        // Pin the spoken language when the user picked a concrete one —
+        // unpinned Live sessions drift to US English and mishear Indian
+        // names/accents. Accepted by the Live API; ignored harmlessly
+        // by revisions that don't support it.
+        if (!languageCode.isNullOrBlank()) {
+            speechConfig.put("language_code", languageCode)
+        }
         val generationConfig = JSONObject()
             .put("response_modalities", JSONArray().put("AUDIO"))
-            .put(
-                "speech_config",
-                JSONObject().put(
-                    "voice_config",
-                    JSONObject().put(
-                        "prebuilt_voice_config",
-                        JSONObject().put("voice_name", voiceName)
-                    )
-                )
-            )
+            .put("speech_config", speechConfig)
             .put("temperature", 0.6)
-        // P7 lesson: native-audio 2.5 models default to a 2048-token
-        // thinking budget that adds 2–3 s of speech delay — disable it.
-        // Only sent for 2.5 models, exactly like P7.
+        // Native-audio 2.5 models default to a 2048-token thinking
+        // budget that adds 2–3 s of speech delay — disable it. Only
+        // sent for 2.5 models.
         if (model.contains("2.5")) {
             generationConfig.put("thinking_config", JSONObject().put("thinking_budget", 0))
         }
@@ -212,8 +217,7 @@ class GeminiLiveClient(
                     JSONArray().put(JSONObject().put("text", systemPrompt))
                 )
             )
-            // Transcription configs (P4 had them; P7 dropped them from the
-            // setup but still parsed the results). They power our captions.
+            // Transcription configs — they power our captions.
             .put("input_audio_transcription", JSONObject())
             .put("output_audio_transcription", JSONObject())
         if (toolDeclarations != null && toolDeclarations.length() > 0) {
@@ -271,7 +275,7 @@ class GeminiLiveClient(
 
         val content = root.optJSONObject("serverContent") ?: return
 
-        // P7: an early serverContent implies the setup was accepted.
+        // An early serverContent implies the setup was accepted.
         markSetupComplete()
         dispatchToolCalls(content.optJSONObject("toolCall"))
 
