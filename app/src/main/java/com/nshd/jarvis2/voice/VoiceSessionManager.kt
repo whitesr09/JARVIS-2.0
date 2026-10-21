@@ -238,7 +238,7 @@ object VoiceSessionManager {
         }
     }
 
-    private inner class LiveListener : GeminiLiveClient.Listener {
+    private class LiveListener : GeminiLiveClient.Listener {
         override fun onSetupComplete() {
             if (!active) return
             reconnectAttempts = 0
@@ -382,7 +382,7 @@ object VoiceSessionManager {
         fb.startListening()
     }
 
-    private inner class FallbackListener : FallbackVoice.Listener {
+    private class FallbackListener : FallbackVoice.Listener {
         override fun onResult(text: String) {
             if (!active) return
             // Finalize the (possibly partial) live caption, then close the turn.
@@ -557,9 +557,7 @@ object VoiceSessionManager {
         }
     }
 
-    companion object {
-        private const val LIVE_PREFS = "jarvis_live_session"
-        private const val KEY_RESUMPTION_HANDLE = "resumption_handle"
-        private const val MAX_RECONNECTS = 3
-    }
+    private const val LIVE_PREFS = "jarvis_live_session"
+    private const val KEY_RESUMPTION_HANDLE = "resumption_handle"
+    private const val MAX_RECONNECTS = 3
 }
