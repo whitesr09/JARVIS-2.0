@@ -18,7 +18,13 @@ data class ChatMsg(
     /** Required on role="tool" messages so the provider can pair a result. */
     val toolCallId: String? = null,
     /** Raw JSON array for an assistant turn that requested tool calls. */
-    val toolCallsJson: String? = null
+    val toolCallsJson: String? = null,
+    /**
+     * Optional JPEG screenshot (Base64, no data-URL prefix). When set the
+     * message serializes as OpenAI content parts:
+     * [{type:text, text:content}, {type:image_url, image_url:{url:data:…}}].
+     */
+    val imageBase64: String? = null
 )
 
 data class ToolCall(
@@ -172,6 +178,23 @@ class OpenAiCompatibleProvider(
                 item.put(
                     "content",
                     if (message.content.isBlank()) JSONObject.NULL else message.content
+                )
+            } else if (!message.imageBase64.isNullOrBlank()) {
+                item.put(
+                    "content",
+                    JSONArray()
+                        .put(JSONObject().put("type", "text").put("text", message.content))
+                        .put(
+                            JSONObject()
+                                .put("type", "image_url")
+                                .put(
+                                    "image_url",
+                                    JSONObject().put(
+                                        "url",
+                                        "data:image/jpeg;base64,${message.imageBase64}"
+                                    )
+                                )
+                        )
                 )
             } else {
                 item.put("content", message.content)

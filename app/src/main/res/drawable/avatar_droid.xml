@@ -1,0 +1,37 @@
+<!-- Droid — rounded robot head with antenna and glowing eyes, no backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FF8496A9"
+        android:pathData="M5.25,24 h3.75 v7.5 h-3.75 Z" />
+    <path
+        android:fillColor="#FF8496A9"
+        android:pathData="M39,24 h3.75 v7.5 h-3.75 Z" />
+    <path
+        android:fillColor="#FF8496A9"
+        android:pathData="M21.5,7.5 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M24,15 V10"
+        android:strokeWidth="2.25"
+        android:strokeColor="#FF8496A9"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#FFA9B7C6"
+        android:pathData="M17.25,15 h13.5 a7.5,7.5 0 0 1 7.5,7.5 v9 a7.5,7.5 0 0 1 -7.5,7.5 h-13.5 a7.5,7.5 0 0 1 -7.5,-7.5 v-9 a7.5,7.5 0 0 1 7.5,-7.5 Z" />
+    <path
+        android:fillColor="#FFE8FBFF"
+        android:pathData="M15.5,25.5 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0" />
+    <path
+        android:fillColor="#FFE8FBFF"
+        android:pathData="M27.5,25.5 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M18.75,33 h10.5"
+        android:strokeWidth="2"
+        android:strokeColor="#FF2F3542"
+        android:strokeLineCap="round" />
+</vector>

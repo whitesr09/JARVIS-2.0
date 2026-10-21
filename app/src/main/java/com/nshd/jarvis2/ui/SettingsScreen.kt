@@ -61,8 +61,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.painterResource
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.hands.DeepIntents
+import com.nshd.jarvis2.service.FloatingOverlayService
 import com.nshd.jarvis2.service.JarvisAccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -84,7 +86,8 @@ fun SettingsScreen(
     onSettingsChange: (JarvisSettings) -> Unit,
     onOpenPermissions: () -> Unit,
     onOpenApi: () -> Unit,
-    onOpenMemory: () -> Unit
+    onOpenMemory: () -> Unit,
+    onOpenAvatars: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var info by remember { mutableStateOf<InfoDialog?>(null) }
@@ -95,6 +98,8 @@ fun SettingsScreen(
     var screenPreview by remember { mutableStateOf<String?>(null) }
     var torchOn by remember { mutableStateOf(false) }
     val settingsScope = rememberCoroutineScope()
+    val screenShare = rememberScreenShareControl()
+    val overlayRunningState = remember { mutableStateOf(FloatingOverlayService.isRunning()) }
 
     fun openUrl(url: String) {
         runCatching {
@@ -253,11 +258,88 @@ fun SettingsScreen(
             SettingsRow(Icons.Filled.Security, "System Permissions", "11 authorizations") {
                 onOpenPermissions()
             }
-            SettingsRow(Icons.Filled.Layers, "Overlay Avatars", "12 companions + Task HUD") {
-                info = InfoDialog(
-                    "Overlay Avatars",
-                    "The floating avatar set and the 4-step Task HUD arrive in Level 5."
+            SettingsRow(
+                Icons.Filled.Layers, "Floating Avatar",
+                AvatarCatalog.byId(settings.avatarId).label + " • 12 companions + Task HUD"
+            ) {
+                onOpenAvatars()
+            }
+        }
+
+        SectionTitle("Floating Avatar & Vision")
+        GroupCard {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    painter = painterResource(AvatarCatalog.byId(settings.avatarId).resId),
+                    contentDescription = null,
+                    tint = androidx.compose.ui.graphics.Color.Unspecified,
+                    modifier = Modifier.size(44.dp)
                 )
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = AvatarCatalog.byId(settings.avatarId).label,
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = if (overlayRunningState.value) {
+                            "Floating over other apps • double-tap it for the Task HUD"
+                        } else {
+                            "Not floating right now"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                TextButton(onClick = onOpenAvatars) { Text("Change") }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Row {
+                Button(
+                    onClick = {
+                        if (!Settings.canDrawOverlays(context)) {
+                            onOpenPermissions()
+                        } else {
+                            FloatingOverlayService.start(context)
+                            overlayRunningState.value = true
+                        }
+                    },
+                    enabled = !overlayRunningState.value,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Start floating") }
+                Spacer(modifier = Modifier.width(10.dp))
+                OutlinedButton(
+                    onClick = {
+                        FloatingOverlayService.stop(context)
+                        overlayRunningState.value = false
+                    },
+                    enabled = overlayRunningState.value,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Stop") }
+            }
+            Spacer(modifier = Modifier.height(14.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.Visibility,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Screen Share (Vision)", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        text = if (screenShare.active) {
+                            "Sharing ~1 frame/sec — the voice session and vision tools can see the screen"
+                        } else {
+                            "Off — start it and Jarvis can watch the screen for vision targeting"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                OutlinedButton(onClick = { screenShare.toggle() }) {
+                    Text(if (screenShare.active) "Stop" else "Start")
+                }
             }
         }
 
@@ -380,7 +462,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(18.dp))
         Text(
-            text = "JARVIS • v0.4.0-L4",
+            text = "JARVIS • v0.5.0-L5",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)

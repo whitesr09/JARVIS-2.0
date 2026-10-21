@@ -131,6 +131,27 @@ class GeminiLiveClient(
         ws.send(payload.toString())
     }
 
+    /**
+     * Stream one screen-share frame (JPEG) as Live video input — the
+     * audit's Part 5/6 pattern uses {"realtimeInput":{"video":{...}}}.
+     * Callers throttle to ~1 FPS. No-ops until setup completes.
+     */
+    fun sendVideoFrame(jpeg: ByteArray) {
+        val ws = webSocket ?: return
+        if (!setupComplete || jpeg.isEmpty()) return
+        val payload = JSONObject()
+            .put(
+                "realtimeInput",
+                JSONObject().put(
+                    "video",
+                    JSONObject()
+                        .put("mimeType", "image/jpeg")
+                        .put("data", Base64.encodeToString(jpeg, Base64.NO_WRAP))
+                )
+            )
+        ws.send(payload.toString())
+    }
+
     /** Return one locally executed tool result to the Live model. */
     fun sendToolResponse(id: String, name: String, result: JSONObject) {
         val ws = webSocket ?: return

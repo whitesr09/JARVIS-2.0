@@ -12,8 +12,8 @@ android {
         applicationId = "com.nshd.jarvis2"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4.0-L4"
+        versionCode = 5
+        versionName = "0.5.0-L5"
     }
 
     // ── Permanent signing (Level 2) ────────────────────────────────────

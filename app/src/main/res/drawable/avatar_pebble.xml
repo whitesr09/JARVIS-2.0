@@ -1,0 +1,27 @@
+<!-- Pebble — the tilted oval stone IS the character, no extra backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <group
+        android:rotation="-8"
+        android:pivotX="24"
+        android:pivotY="26.25">
+        <path
+            android:fillColor="#FFB8E986"
+            android:pathData="M6.75,26.25 a17.25,12.75 0 1,0 34.5,0 a17.25,12.75 0 1,0 -34.5,0" />
+    </group>
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M15.7,24.75 a2.3,2.3 0 1,0 4.6,0 a2.3,2.3 0 1,0 -4.6,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M27.7,24.75 a2.3,2.3 0 1,0 4.6,0 a2.3,2.3 0 1,0 -4.6,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M18.75,31.5 q5.25,4.5 10.5,0"
+        android:strokeWidth="2"
+        android:strokeColor="#FF2F3542"
+        android:strokeLineCap="round" />
+</vector>

@@ -1,0 +1,22 @@
+<!-- Hexagon — the single shape IS the character, no extra backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FFFC5C65"
+        android:pathData="M24,3.75 L41.25,13.5 L41.25,34.5 L24,44.25 L6.75,34.5 L6.75,13.5 Z" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M15.7,22.5 a2.3,2.3 0 1,0 4.6,0 a2.3,2.3 0 1,0 -4.6,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M27.7,22.5 a2.3,2.3 0 1,0 4.6,0 a2.3,2.3 0 1,0 -4.6,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M18.75,30 q5.25,4.5 10.5,0"
+        android:strokeWidth="2"
+        android:strokeColor="#FF2F3542"
+        android:strokeLineCap="round" />
+</vector>

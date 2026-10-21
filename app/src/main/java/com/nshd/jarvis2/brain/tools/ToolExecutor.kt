@@ -5,12 +5,19 @@ import com.nshd.jarvis2.hands.ActionResult
 import com.nshd.jarvis2.hands.ContactResolution
 import com.nshd.jarvis2.hands.ContactsResolver
 import com.nshd.jarvis2.hands.DeepIntents
+import com.nshd.jarvis2.hands.GroundingResult
 import com.nshd.jarvis2.hands.HandsActions
+import com.nshd.jarvis2.hands.VisionGrounder
 import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.service.JarvisAccessibilityService
 import org.json.JSONObject
 
-data class ToolResult(val success: Boolean, val message: String)
+data class ToolResult(
+    val success: Boolean,
+    val message: String,
+    /** Optional Base64 JPEG the agent loop forwards to the model as vision input. */
+    val imageBase64: String? = null
+)
 
 /**
  * Executes registry tools and enforces the Level 4 hard guardrails locally.
@@ -25,6 +32,7 @@ class ToolExecutor(
     private val appContext = context.applicationContext
     private val intents = DeepIntents(appContext)
     private val contactsResolver = ContactsResolver(appContext, memoryDb)
+    private val vision = VisionGrounder(appContext)
 
     suspend fun execute(name: String, args: JSONObject): ToolResult =
         execute(name, args, includeScreenSummary = true)
@@ -39,7 +47,9 @@ class ToolExecutor(
         } catch (e: Exception) {
             ToolResult(false, "Tool $name failed safely: ${e.message ?: "unexpected error"}")
         }
-        if (!includeScreenSummary || name == "inspect_screen") return raw
+        if (!includeScreenSummary || name == "inspect_screen" ||
+            name == "see_screen" || name == "vision_tap"
+        ) return raw
         val service = JarvisAccessibilityService.instance ?: return raw
         if (name in UI_MUTATION_TOOLS) {
             // Give the target app a brief chance to finish its transition so
@@ -96,7 +106,70 @@ class ToolExecutor(
                 intents.setBrightness(args.optInt("percent")).toToolResult()
             } else missing("percent")
             "call_contact" -> callContact(args)
+            "see_screen" -> seeScreen()
+            "vision_tap" -> visionTap(args)
             else -> ToolResult(false, "Unknown tool: $name")
+        }
+    }
+
+    private suspend fun seeScreen(): ToolResult {
+        val image = vision.captureImageBase64()
+            ?: return ToolResult(
+                false,
+                "No screen image is available. Enable the Accessibility Service " +
+                    "(Permissions → Accessibility) or start Screen Share in Settings, then ask again."
+            )
+        val source = vision.captureSourceName() ?: "screen capture"
+        return ToolResult(
+            true,
+            "Screenshot captured via $source and attached as the next message — " +
+                "inspect the pixels directly.",
+            imageBase64 = image
+        )
+    }
+
+    private suspend fun visionTap(args: JSONObject): ToolResult {
+        val description = args.requiredString("description") ?: return missing("description")
+        val service = JarvisAccessibilityService.instance
+            ?: return ToolResult(
+                false,
+                "Accessibility is not enabled, so the grounded tap cannot be performed. " +
+                    "Enable Jarvis Digital Hands in Permissions → Accessibility Service first."
+            )
+        val image = vision.captureImageBase64()
+            ?: return ToolResult(
+                false,
+                "No screen image is available for grounding. Start Screen Share in " +
+                    "Settings or check the Accessibility Service, then ask again."
+            )
+        return when (val grounded = vision.ground(description, image)) {
+            is GroundingResult.Failed -> ToolResult(false, grounded.message)
+            is GroundingResult.Found -> {
+                val before = service.screenReader().signature()
+                val tapped = HandsActions.tapPercent(grounded.x / 10.0, grounded.y / 10.0)
+                if (!tapped.success) {
+                    ToolResult(false, "Vision found \"$description\" but the tap failed: ${tapped.message}")
+                } else {
+                    HandsActions.waitForSettle(1_200)
+                    val changed = service.screenReader().signature() != before
+                    val summary = try {
+                        service.screenReader().serialize(MAX_SUMMARY_ELEMENTS)
+                    } catch (e: Exception) {
+                        ""
+                    }
+                    ToolResult(
+                        true,
+                        "Tapped \"$description\" at (${grounded.x}, ${grounded.y}) via " +
+                            "${grounded.providerLabel} vision. " +
+                            if (changed) {
+                                "The screen changed after the tap.\nScreen now:\n$summary"
+                            } else {
+                                "The tap landed but the screen signature did not change — " +
+                                    "the target may not have responded.\nScreen now:\n$summary"
+                            }
+                    )
+                }
+            }
         }
     }
 

@@ -57,7 +57,7 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <!-- Floating overlay bubble (full avatar + HUD lands in Level 5) -->
+        <!-- Floating overlay (Level 5: 12 avatars, drag/snap, Task HUD) -->
         <service
             android:name=".service.FloatingOverlayService"
             android:exported="false"
@@ -66,6 +66,12 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Floating assistant overlay bubble for the Jarvis agent" />
         </service>
+
+        <!-- MediaProjection screen share (Level 5 vision, ~1 FPS) -->
+        <service
+            android:name=".service.ScreenShareService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
     </application>
 </manifest>

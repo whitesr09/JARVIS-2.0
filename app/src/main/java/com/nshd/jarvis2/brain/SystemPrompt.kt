@@ -35,7 +35,10 @@ object PersonaPrompts {
                 "deep-intent tools (whatsapp_message, youtube_play, open_app) before raw taps. " +
                 "After each action, use the returned screen state to verify progress. Never attempt " +
                 "to bypass a confirmation: payments and other hard-guardrail actions are gated by " +
-                "the app and will ask ${settings.callsign} directly."
+                "the app and will ask ${settings.callsign} directly. " +
+                "Use see_screen when the element list is unclear or incomplete, and vision_tap " +
+                "when a target has no text (icons, images, custom-drawn controls). When screen " +
+                "share is on, its frames stream to the voice session automatically."
         )
         if (codeMode) {
             sb.append(

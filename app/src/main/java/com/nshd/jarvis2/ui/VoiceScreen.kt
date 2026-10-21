@@ -241,6 +241,27 @@ private fun VoiceSessionBody(
 
     Spacer(modifier = Modifier.height(12.dp))
 
+    // ── Screen share (LIVE sessions): frames stream to Gemini Live ────
+    if (uiState.mode == VoiceMode.LIVE) {
+        val shareControl = rememberScreenShareControl()
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            androidx.compose.material3.FilterChip(
+                selected = shareControl.active,
+                onClick = { shareControl.toggle() },
+                label = {
+                    Text(
+                        if (shareControl.active) "Sharing screen — tap to stop"
+                        else "Share screen"
+                    )
+                }
+            )
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+    }
+
     // ── Controls / error actions ───────────────────────────────────────
     if (uiState.status == VoiceStatus.ERROR) {
         Card(

@@ -1,0 +1,31 @@
+<!-- Alien — ported from the simulator SVG (64 grid -> 48). Character only, no backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FF57B83B"
+        android:pathData="M22,3.8 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M24,10.5 V5.8"
+        android:strokeWidth="2"
+        android:strokeColor="#FF57B83B"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#FF7ED957"
+        android:pathData="M9,26.25 a15,16.5 0 1,0 30,0 a15,16.5 0 1,0 -30,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M15.7,25 a2.3,2.3 0 1,0 4.6,0 a2.3,2.3 0 1,0 -4.6,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M27.7,25 a2.3,2.3 0 1,0 4.6,0 a2.3,2.3 0 1,0 -4.6,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M18.75,33 q5.25,4.5 10.5,0"
+        android:strokeWidth="2"
+        android:strokeColor="#FF2F3542"
+        android:strokeLineCap="round" />
+</vector>

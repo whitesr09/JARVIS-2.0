@@ -131,6 +131,16 @@ class FailoverRouter(
                             content = result.message,
                             toolCallId = call.id
                         )
+                        // Vision tools (see_screen) attach a screenshot:
+                        // deliver it as a following user message with image
+                        // content parts so the model can actually see it.
+                        if (!result.imageBase64.isNullOrBlank()) {
+                            conversation += ChatMsg(
+                                role = "user",
+                                content = "Screen image:",
+                                imageBase64 = result.imageBase64
+                            )
+                        }
                     }
                     step++
                 }

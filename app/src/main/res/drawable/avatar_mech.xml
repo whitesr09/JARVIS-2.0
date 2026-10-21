@@ -1,0 +1,31 @@
+<!-- Mech — angular robot head with visor eyes, character only, no backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FF5D7186"
+        android:pathData="M21.75,6.75 a2.25,2.25 0 1,0 4.5,0 a2.25,2.25 0 1,0 -4.5,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M24,13.5 V9"
+        android:strokeWidth="2.25"
+        android:strokeColor="#FF5D7186"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#FF778CA3"
+        android:pathData="M15.75,13.5 h16.5 a6,6 0 0 1 6,6 v14.25 a6,6 0 0 1 -6,6 h-16.5 a6,6 0 0 1 -6,-6 v-14.25 a6,6 0 0 1 6,-6 Z" />
+    <path
+        android:fillColor="#FFBEEFFF"
+        android:pathData="M15,21.75 h6 v7.5 h-6 Z" />
+    <path
+        android:fillColor="#FFBEEFFF"
+        android:pathData="M27,21.75 h6 v7.5 h-6 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M18,34.5 h12"
+        android:strokeWidth="2"
+        android:strokeColor="#FF2F3542"
+        android:strokeLineCap="round" />
+</vector>

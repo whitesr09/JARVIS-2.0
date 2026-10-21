@@ -10,6 +10,7 @@ import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
 import com.nshd.jarvis2.memory.MemoryDb
+import com.nshd.jarvis2.service.ScreenShareState
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -100,6 +101,9 @@ object VoiceSessionManager {
 
     private var pulseJob: Job? = null
 
+    /** Screen-share → Live video forwarder (Level 5), Live path only. */
+    private var shareJob: Job? = null
+
     private val isSilent: Boolean get() = settings?.silentExecution == true
 
     // ── Lifecycle ──────────────────────────────────────────────────────
@@ -155,6 +159,8 @@ object VoiceSessionManager {
         active = false
         pulseJob?.cancel()
         pulseJob = null
+        shareJob?.cancel()
+        shareJob = null
         capture?.stop()
         capture = null
         client?.close()
@@ -177,6 +183,8 @@ object VoiceSessionManager {
 
     private fun fail(message: String) {
         pulseJob?.cancel()
+        shareJob?.cancel()
+        shareJob = null
         capture?.stop()
         capture = null
         client?.close()
@@ -239,6 +247,32 @@ object VoiceSessionManager {
             )
             client = liveClient
             liveClient.connect()
+            startShareForwarder()
+        }
+    }
+
+    /**
+     * While a Live session runs and screen share is active, forward the
+     * freshest shared frame to Gemini Live as video input, throttled to
+     * ~1 FPS (the share service itself already publishes at 1 FPS; the
+     * poll + sequence check keeps us at or below that rate).
+     */
+    private fun startShareForwarder() {
+        shareJob?.cancel()
+        shareJob = scope.launch {
+            var lastSeq = 0L
+            while (active) {
+                if (ScreenShareState.active.value) {
+                    val seq = ScreenShareState.frameSeq.value
+                    if (seq != lastSeq) {
+                        lastSeq = seq
+                        ScreenShareState.latestJpeg.value?.let { jpeg ->
+                            client?.sendVideoFrame(jpeg)
+                        }
+                    }
+                }
+                delay(1000)
+            }
         }
     }
 

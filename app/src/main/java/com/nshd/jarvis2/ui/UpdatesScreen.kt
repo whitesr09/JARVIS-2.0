@@ -43,10 +43,14 @@ fun UpdatesScreen() {
                 "barge-in, session resumption), fallback speech recognition + TTS via " +
                 "the L2 brain, 5 Gemini voices + custom voice, silent execution + finish " +
                 "chime, personas + 12 languages in the prompt.\n" +
-                "L4 Digital Hands — current build: accessibility screen reader and verified " +
-                "actions, 14 phone tools with native hard-guardrail confirmations, deep " +
+                "L4 Digital Hands — done: accessibility screen reader and verified " +
+                "actions, phone tools with native hard-guardrail confirmations, deep " +
                 "intents, hardware controls, ContactsResolver, and WhatsApp/YouTube flows.\n" +
-                "L5 Vision + Overlay — MediaProjection targeting, floating avatar + 4-step Task HUD.\n" +
+                "L5 Vision + Overlay — current build: all 12 floating avatars (transparent, " +
+                "no backdrop) with drag/edge-snap, tap-to-abort and the 4-step Task HUD; " +
+                "MediaProjection screen share at ~1 FPS streaming into Gemini Live; " +
+                "accessibility screenshots; see_screen + vision_tap tools for " +
+                "pixel-level targeting.\n" +
                 "L6 Always-on — Vosk wake word, voice biometrics, battery-aware modes."
         )
         InfoCard(

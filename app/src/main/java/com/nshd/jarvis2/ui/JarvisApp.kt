@@ -25,6 +25,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,8 +39,8 @@ import com.nshd.jarvis2.JarvisSettings
 
 private enum class Tab { HOME, CHAT, SETTINGS, UPDATES }
 
-/** Full-screen destinations layered over the tabs (L2: API + Memory, L3: Voice). */
-private enum class SubScreen { NONE, PERMISSIONS, API, MEMORY, VOICE }
+/** Full-screen destinations layered over the tabs (L2: API + Memory, L3: Voice, L5: Avatars). */
+private enum class SubScreen { NONE, PERMISSIONS, API, MEMORY, VOICE, AVATARS }
 
 @Composable
 fun JarvisApp(
@@ -48,6 +50,14 @@ fun JarvisApp(
     JarvisTheme(theme = settings.theme, customBgHex = settings.customBgHex) {
         var tab by remember { mutableStateOf(Tab.HOME) }
         var subScreen by remember { mutableStateOf(SubScreen.NONE) }
+
+        // Overlay bubble tap (and other external requests) land here.
+        val voiceRequested by AppNavRequests.voiceRequested.collectAsState()
+        LaunchedEffect(voiceRequested) {
+            if (AppNavRequests.consumeVoiceRequest()) {
+                subScreen = SubScreen.VOICE
+            }
+        }
 
         Scaffold(
             bottomBar = {
@@ -89,6 +99,12 @@ fun JarvisApp(
                             tab = Tab.SETTINGS
                         }
                     )
+                    SubScreen.AVATARS -> AvatarsScreen(
+                        settings = settings,
+                        onSettingsChange = onSettingsChange,
+                        onBack = { subScreen = SubScreen.NONE },
+                        onOpenPermissions = { subScreen = SubScreen.PERMISSIONS }
+                    )
                     SubScreen.NONE -> when (tab) {
                         Tab.HOME -> HomeScreen(
                             settings = settings,
@@ -104,7 +120,8 @@ fun JarvisApp(
                             onSettingsChange = onSettingsChange,
                             onOpenPermissions = { subScreen = SubScreen.PERMISSIONS },
                             onOpenApi = { subScreen = SubScreen.API },
-                            onOpenMemory = { subScreen = SubScreen.MEMORY }
+                            onOpenMemory = { subScreen = SubScreen.MEMORY },
+                            onOpenAvatars = { subScreen = SubScreen.AVATARS }
                         )
                         Tab.UPDATES -> UpdatesScreen()
                     }

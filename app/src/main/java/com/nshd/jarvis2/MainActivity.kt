@@ -8,6 +8,8 @@ import androidx.activity.compose.setContent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import android.content.Intent
+import com.nshd.jarvis2.ui.AppNavRequests
 import com.nshd.jarvis2.ui.AppTheme
 import com.nshd.jarvis2.ui.JarvisApp
 
@@ -26,7 +28,9 @@ data class JarvisSettings(
     /** Free-text custom voice name — overrides [voiceName] when non-blank. */
     val customVoiceName: String = "",
     /** Gemini Live model, WITHOUT the "models/" prefix (the client adds it). */
-    val liveModel: String = "gemini-2.5-flash-native-audio-preview-12-2025"
+    val liveModel: String = "gemini-2.5-flash-native-audio-preview-12-2025",
+    /** Floating-overlay companion (see AvatarCatalog); default "droid". */
+    val avatarId: String = "droid"
 )
 
 class MainActivity : ComponentActivity() {
@@ -36,6 +40,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleNavIntent(intent)
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         settings = loadSettings()
         setContent {
@@ -46,6 +51,20 @@ class MainActivity : ComponentActivity() {
                     saveSettings(updated)
                 }
             )
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNavIntent(intent)
+    }
+
+    /** The floating overlay bubble asks for the Voice screen via this extra. */
+    private fun handleNavIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_OPEN_VOICE, false) == true) {
+            AppNavRequests.requestVoice()
+            intent.removeExtra(EXTRA_OPEN_VOICE)
         }
     }
 
@@ -68,7 +87,8 @@ class MainActivity : ComponentActivity() {
             customVoiceName = prefs.getString(KEY_CUSTOM_VOICE, "") ?: "",
             liveModel = prefs.getString(
                 KEY_LIVE_MODEL, "gemini-2.5-flash-native-audio-preview-12-2025"
-            ) ?: "gemini-2.5-flash-native-audio-preview-12-2025"
+            ) ?: "gemini-2.5-flash-native-audio-preview-12-2025",
+            avatarId = prefs.getString(KEY_AVATAR_ID, "droid") ?: "droid"
         )
     }
 
@@ -85,10 +105,12 @@ class MainActivity : ComponentActivity() {
             .putString(KEY_VOICE_NAME, s.voiceName)
             .putString(KEY_CUSTOM_VOICE, s.customVoiceName)
             .putString(KEY_LIVE_MODEL, s.liveModel)
+            .putString(KEY_AVATAR_ID, s.avatarId)
             .apply()
     }
 
     companion object {
+        const val EXTRA_OPEN_VOICE = "open_voice"
         private const val PREFS_NAME = "jarvis_settings"
         private const val KEY_ASSISTANT_NAME = "assistant_name"
         private const val KEY_CALLSIGN = "callsign"
@@ -101,5 +123,6 @@ class MainActivity : ComponentActivity() {
         private const val KEY_VOICE_NAME = "voice_name"
         private const val KEY_CUSTOM_VOICE = "custom_voice_name"
         private const val KEY_LIVE_MODEL = "live_model"
+        private const val KEY_AVATAR_ID = "avatar_id"
     }
 }

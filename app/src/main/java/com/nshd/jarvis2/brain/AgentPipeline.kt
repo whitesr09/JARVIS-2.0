@@ -4,9 +4,12 @@ import android.content.Context
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.hands.DeepIntents
+import com.nshd.jarvis2.hands.TaskState
 import com.nshd.jarvis2.memory.MemoryCategories
 import com.nshd.jarvis2.memory.MemoryDb
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -23,6 +26,45 @@ import org.json.JSONObject
 object AgentPipeline {
 
     suspend fun handleUserText(
+        context: Context,
+        text: String,
+        settings: JarvisSettings,
+        memoryDb: MemoryDb,
+        providerStore: ProviderStore,
+        codeMode: Boolean = false,
+        onEvent: (String) -> Unit = {}
+    ): String {
+        // Feed the floating overlay's Task HUD (Level 5): begin with the
+        // caller's own coroutine Job so the overlay's abort can cancel it.
+        TaskState.begin(
+            goal = text.trim().take(60),
+            job = currentCoroutineContext()[kotlinx.coroutines.Job]
+                ?: kotlinx.coroutines.Job(),
+            maxSteps = 10
+        )
+        val hudEvent: (String) -> Unit = { event ->
+            TaskState.step(event)
+            onEvent(event)
+        }
+        return try {
+            val result = withContext(Dispatchers.IO) {
+                dispatch(context, text, settings, memoryDb, providerStore, codeMode, hudEvent)
+            }
+            TaskState.finish(
+                success = !result.startsWith("I couldn't") && !result.startsWith("Please configure"),
+                summary = result.lineSequence().firstOrNull()?.take(80).orEmpty()
+            )
+            result
+        } catch (e: CancellationException) {
+            TaskState.finish(false, "Aborted")
+            throw e
+        } catch (e: Exception) {
+            TaskState.finish(false, e.message ?: "Failed")
+            throw e
+        }
+    }
+
+    private suspend fun dispatch(
         context: Context,
         text: String,
         settings: JarvisSettings,

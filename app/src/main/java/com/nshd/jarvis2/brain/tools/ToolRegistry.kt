@@ -134,6 +134,19 @@ object ToolRegistry {
                 properties = JSONObject().put("contact", stringProperty("Contact name, saved alias or phone number")),
                 required = listOf("contact")
             )
+        ),
+        ToolSpec(
+            "see_screen",
+            "Look at the actual screen pixels (a screenshot is attached as the next message). Use when the accessibility element list is unclear, incomplete, or the app draws its own UI (games, canvas, images).",
+            schema(properties = JSONObject())
+        ),
+        ToolSpec(
+            "vision_tap",
+            "Tap a visual target described in words (an icon, image or unlabelled control) by finding it in a screenshot with the vision model. Use when the target has no text and does not appear in inspect_screen.",
+            schema(
+                properties = JSONObject().put("description", stringProperty("What to tap, described visually, e.g. \"the blue send arrow icon at the bottom right\"")),
+                required = listOf("description")
+            )
         )
     )
 

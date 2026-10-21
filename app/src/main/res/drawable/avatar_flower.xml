@@ -1,0 +1,37 @@
+<!-- Flower — five petals around a face centre, character only, no backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FF78E08F"
+        android:pathData="M16.9,11.25 a7.1,7.1 0 1,0 14.2,0 a7.1,7.1 0 1,0 -14.2,0" />
+    <path
+        android:fillColor="#FF78E08F"
+        android:pathData="M28.9,19.5 a7.1,7.1 0 1,0 14.2,0 a7.1,7.1 0 1,0 -14.2,0" />
+    <path
+        android:fillColor="#FF78E08F"
+        android:pathData="M24.4,34.5 a7.1,7.1 0 1,0 14.2,0 a7.1,7.1 0 1,0 -14.2,0" />
+    <path
+        android:fillColor="#FF78E08F"
+        android:pathData="M9.4,34.5 a7.1,7.1 0 1,0 14.2,0 a7.1,7.1 0 1,0 -14.2,0" />
+    <path
+        android:fillColor="#FF78E08F"
+        android:pathData="M4.9,19.5 a7.1,7.1 0 1,0 14.2,0 a7.1,7.1 0 1,0 -14.2,0" />
+    <path
+        android:fillColor="#FFFFD32A"
+        android:pathData="M17.25,23.25 a6.75,6.75 0 1,0 13.5,0 a6.75,6.75 0 1,0 -13.5,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M19.8,22 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M25.2,22 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M21.3,25.8 q2.7,2.25 5.4,0"
+        android:strokeWidth="1.7"
+        android:strokeColor="#FF2F3542"
+        android:strokeLineCap="round" />
+</vector>
