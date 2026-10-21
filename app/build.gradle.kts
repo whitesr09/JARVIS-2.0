@@ -12,8 +12,8 @@ android {
         applicationId = "com.nshd.jarvis2"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.8.0-F1"
+        versionCode = 9
+        versionName = "0.9.0-D2"
     }
 
     // ── Permanent signing (Level 2) ────────────────────────────────────
@@ -60,6 +60,7 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2025.09.00"))
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")

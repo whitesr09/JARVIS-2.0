@@ -16,17 +16,19 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -186,11 +188,13 @@ fun PermissionsScreen(onBack: () -> Unit) {
         )
     )
 
+    val grantedCount = items.count { it.granted }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(20.dp)
+            .padding(JarvisDimens.screenPadding)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) {
@@ -202,20 +206,54 @@ fun PermissionsScreen(onBack: () -> Unit) {
                 fontWeight = FontWeight.Bold
             )
         }
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceSm))
         Text(
             text = "Jarvis needs these 11 authorizations to see, hear and act. " +
                 "Each one is only used when a task needs it.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
 
-        items.forEach { item ->
-            PermissionCard(item)
+        // Header summary: how many are granted, with a progress bar.
+        Card(
+            shape = RoundedCornerShape(JarvisDimens.radiusCard),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.heroElevation),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(JarvisDimens.cardPadding)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "$grantedCount of ${items.size} granted",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    JarvisPill(
+                        text = if (grantedCount == items.size) "All set" else "Action needed",
+                        tone = if (grantedCount == items.size) PillTone.SUCCESS else PillTone.WARNING,
+                        icon = if (grantedCount == items.size) Icons.Filled.Check else Icons.Filled.Warning
+                    )
+                }
+                Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
+                LinearProgressIndicator(
+                    progress = { grantedCount.toFloat() / items.size.coerceAtLeast(1) },
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
+
+        items.forEachIndexed { index, item ->
+            AppearOnEntry(index = index) {
+                PermissionCard(item)
+            }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceSm))
         Button(
             onClick = { permissionLauncher.launch(RUNTIME_PERMISSIONS) },
             modifier = Modifier.fillMaxWidth()
@@ -236,41 +274,39 @@ fun PermissionsScreen(onBack: () -> Unit) {
 @Composable
 private fun PermissionCard(item: PermissionItem) {
     Card(
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(JarvisDimens.radiusCard),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(bottom = 10.dp)
+            .padding(bottom = JarvisDimens.spaceMd)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
+        Column(modifier = Modifier.padding(JarvisDimens.cardPadding)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = item.title,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
                 )
-                Text(
-                    text = item.description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = if (item.granted) "GRANTED" else "NOT GRANTED",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = if (item.granted) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.error
+                JarvisPill(
+                    text = if (item.granted) "Granted" else "Not granted",
+                    tone = if (item.granted) PillTone.SUCCESS else PillTone.WARNING,
+                    icon = if (item.granted) Icons.Filled.Check else Icons.Filled.Warning
                 )
             }
-            Spacer(modifier = Modifier.width(10.dp))
+            Spacer(modifier = Modifier.height(JarvisDimens.spaceXs))
+            Text(
+                text = item.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             if (!item.granted) {
-                OutlinedButton(onClick = item.onAction) { Text(item.actionLabel) }
+                Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
+                OutlinedButton(
+                    onClick = item.onAction,
+                    modifier = Modifier.align(Alignment.End)
+                ) { Text(item.actionLabel) }
             }
         }
     }

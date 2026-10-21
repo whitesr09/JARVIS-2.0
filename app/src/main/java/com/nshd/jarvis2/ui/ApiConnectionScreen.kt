@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,10 +20,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -31,6 +34,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -105,22 +109,17 @@ fun ApiConnectionScreen(onBack: () -> Unit) {
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
         ) {
-            Text(
-                text = "Active provider — tried first",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(8.dp))
+            SectionLabel("Active provider — tried first")
+            Spacer(modifier = Modifier.height(JarvisDimens.spaceSm))
             Card(
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(JarvisDimens.radiusCard),
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                Column(modifier = Modifier.padding(vertical = JarvisDimens.spaceSm)) {
                     ProviderPresets.ALL.forEach { preset ->
                         val cfg = remember(preset.id, refreshTick) { store.loadConfig(preset.id) }
                         Row(
@@ -131,7 +130,10 @@ fun ApiConnectionScreen(onBack: () -> Unit) {
                                     store.setActiveProviderId(preset.id)
                                     editId = preset.id
                                 }
-                                .padding(horizontal = 10.dp, vertical = 2.dp),
+                                .padding(
+                                    horizontal = JarvisDimens.spaceLg,
+                                    vertical = JarvisDimens.spaceSm
+                                ),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             RadioButton(
@@ -147,47 +149,54 @@ fun ApiConnectionScreen(onBack: () -> Unit) {
                                 style = MaterialTheme.typography.bodyLarge,
                                 modifier = Modifier.weight(1f)
                             )
-                            Text(
-                                text = if (cfg.apiKey.isNotBlank()) "key set" else "no key",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (cfg.apiKey.isNotBlank()) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                }
+                            JarvisPill(
+                                text = if (cfg.apiKey.isNotBlank()) "Key set" else "No key",
+                                tone = if (cfg.apiKey.isNotBlank()) PillTone.SUCCESS else PillTone.WARNING,
+                                icon = if (cfg.apiKey.isNotBlank()) Icons.Filled.Check else Icons.Filled.Warning
                             )
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
-            Text(
-                text = "Edit provider",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(JarvisDimens.spaceXl))
+            SectionLabel("Edit provider")
+            Spacer(modifier = Modifier.height(JarvisDimens.spaceSm))
             Row(modifier = Modifier.fillMaxWidth()) {
                 ProviderPresets.ALL.forEach { preset ->
                     FilterChip(
                         selected = editId == preset.id,
                         onClick = { editId = preset.id; testResult = null },
                         label = { Text(preset.label) },
+                        leadingIcon = if (editId == preset.id) {
+                            {
+                                Icon(
+                                    imageVector = Icons.Filled.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        } else {
+                            null
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimaryContainer
+                        ),
                         modifier = Modifier.padding(end = 6.dp),
                         shape = RoundedCornerShape(50)
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
 
             Card(
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(JarvisDimens.radiusCard),
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.heroElevation),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
@@ -277,26 +286,38 @@ fun ApiConnectionScreen(onBack: () -> Unit) {
                         ) { Text(if (testing) "Testing…" else "Test Connection") }
                     }
                     if (testResult != null) {
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
                         val r = testResult!!
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = if (r.ok) Icons.Filled.Check else Icons.Filled.Close,
-                                contentDescription = null,
-                                tint = if (r.ok) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.error
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (r.ok) {
-                                    "✅ ${r.latencyMs} ms — ${r.detail}"
-                                } else {
-                                    "❌ ${r.detail}"
-                                },
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (r.ok) MaterialTheme.colorScheme.onSurface
-                                else MaterialTheme.colorScheme.error
-                            )
+                        // Inline status banner: semantic container + icon +
+                        // latency — never colour (or emoji) alone.
+                        Surface(
+                            shape = RoundedCornerShape(JarvisDimens.radiusField),
+                            color = if (r.ok) JarvisSemanticColors.successContainer
+                            else MaterialTheme.colorScheme.errorContainer,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(JarvisDimens.spaceMd),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (r.ok) Icons.Filled.Check else Icons.Filled.Close,
+                                    contentDescription = null,
+                                    tint = if (r.ok) JarvisSemanticColors.success
+                                    else MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Spacer(modifier = Modifier.width(JarvisDimens.spaceSm))
+                                Text(
+                                    text = if (r.ok) {
+                                        "Connected • ${r.latencyMs} ms — ${r.detail}"
+                                    } else {
+                                        r.detail
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (r.ok) MaterialTheme.colorScheme.onSurface
+                                    else MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
                         }
                     }
                 }

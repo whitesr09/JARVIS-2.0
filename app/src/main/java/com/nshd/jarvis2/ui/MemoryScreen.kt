@@ -2,6 +2,7 @@ package com.nshd.jarvis2.ui
 
 import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -16,8 +18,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
@@ -25,6 +29,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,6 +39,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -94,7 +100,11 @@ fun MemoryScreen(onBack: () -> Unit) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         floatingActionButton = {
-            FloatingActionButton(onClick = { editing = null; showEditor = true }) {
+            FloatingActionButton(
+                onClick = { editing = null; showEditor = true },
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary
+            ) {
                 Icon(Icons.Filled.Add, contentDescription = "Add memory")
             }
         }
@@ -159,53 +169,72 @@ fun MemoryScreen(onBack: () -> Unit) {
                 placeholder = { Text("Search memories…") },
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 singleLine = true,
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(JarvisDimens.radiusField),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
+                    .padding(horizontal = JarvisDimens.spaceLg)
             )
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
 
             Row(
-                modifier = Modifier.padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                modifier = Modifier.padding(horizontal = JarvisDimens.spaceLg),
+                horizontalArrangement = Arrangement.spacedBy(JarvisDimens.spaceSm)
             ) {
-                FilterChip(
+                MemoryFilterChip(
+                    label = "All",
                     selected = categoryFilter == null,
-                    onClick = { categoryFilter = null },
-                    label = { Text("All") },
-                    shape = RoundedCornerShape(50)
+                    onClick = { categoryFilter = null }
                 )
                 MemoryCategories.FILTERABLE.forEach { cat ->
-                    FilterChip(
+                    MemoryFilterChip(
+                        label = cat,
                         selected = categoryFilter == cat,
-                        onClick = { categoryFilter = cat },
-                        label = { Text(cat) },
-                        shape = RoundedCornerShape(50)
+                        onClick = { categoryFilter = cat }
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
 
             if (facts.isEmpty()) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(32.dp),
+                        .padding(JarvisDimens.space3xl),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        modifier = Modifier.size(64.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Filled.Memory,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(30.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
                     Text(
-                        text = "No memories yet.",
+                        text = "No memories yet",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(JarvisDimens.spaceSm))
                     Text(
-                        text = "Tell Jarvis \"remember …\" in Chat, or tap + ADD here. " +
-                            "Facts are stored only on this device.",
+                        text = "Teach Jarvis something — say \"remember …\" in Chat, " +
+                            "or add a fact yourself. Facts are stored only on this device.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
+                    Button(onClick = { editing = null; showEditor = true }) {
+                        Icon(Icons.Filled.Add, contentDescription = null)
+                        Spacer(modifier = Modifier.width(JarvisDimens.spaceSm))
+                        Text("Add a memory")
+                    }
                 }
             }
 
@@ -213,20 +242,22 @@ fun MemoryScreen(onBack: () -> Unit) {
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                    .padding(horizontal = JarvisDimens.spaceLg),
+                verticalArrangement = Arrangement.spacedBy(JarvisDimens.spaceMd)
             ) {
                 items(facts, key = { it.id }) { fact ->
-                    FactCard(
-                        fact = fact,
-                        onEdit = { editing = fact; showEditor = true },
-                        onDelete = {
-                            scope.launch {
-                                withContext(Dispatchers.IO) { db.deleteFact(fact.id) }
-                                reload()
+                    AppearOnEntry {
+                        FactCard(
+                            fact = fact,
+                            onEdit = { editing = fact; showEditor = true },
+                            onDelete = {
+                                scope.launch {
+                                    withContext(Dispatchers.IO) { db.deleteFact(fact.id) }
+                                    reload()
+                                }
                             }
-                        }
-                    )
+                        )
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(72.dp))
@@ -287,23 +318,45 @@ fun MemoryScreen(onBack: () -> Unit) {
     }
 }
 
+/** Filter chip with the D2 selected treatment: lavender fill + check. */
+@Composable
+private fun MemoryFilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text(label) },
+        leadingIcon = if (selected) {
+            {
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        } else {
+            null
+        },
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimaryContainer
+        ),
+        shape = RoundedCornerShape(50)
+    )
+}
+
 @Composable
 private fun FactCard(fact: Fact, onEdit: () -> Unit, onDelete: () -> Unit) {
     Card(
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(JarvisDimens.radiusCard),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
+        Column(modifier = Modifier.padding(JarvisDimens.cardPadding)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = fact.category.uppercase(),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f)
-                )
+                JarvisPill(text = fact.category, tone = PillTone.PRIMARY)
+                Spacer(modifier = Modifier.weight(1f))
                 IconButton(onClick = onEdit) {
                     Icon(Icons.Filled.Edit, contentDescription = "Edit memory")
                 }
@@ -353,11 +406,10 @@ private fun FactEditorDialog(
                     MemoryCategories.ALL.chunked(3).forEach { rowCats ->
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             rowCats.forEach { cat ->
-                                FilterChip(
+                                MemoryFilterChip(
+                                    label = cat,
                                     selected = category == cat,
-                                    onClick = { category = cat },
-                                    label = { Text(cat) },
-                                    shape = RoundedCornerShape(50)
+                                    onClick = { category = cat }
                                 )
                             }
                         }

@@ -32,7 +32,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -185,7 +184,7 @@ private fun VoiceSessionBody(
 
     Text(
         text = statusText(uiState.status, settings.assistantName, uiState.micMuted),
-        style = MaterialTheme.typography.titleMedium,
+        style = MaterialTheme.typography.headlineSmall,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier.align(Alignment.CenterHorizontally)
     )
@@ -201,45 +200,56 @@ private fun VoiceSessionBody(
         )
     }
 
-    Spacer(modifier = Modifier.height(12.dp))
+    Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
 
-    // ── Captions ───────────────────────────────────────────────────────
+    // ── Captions (flat surface card) ───────────────────────────────────
     val listState = rememberLazyListState()
     LaunchedEffect(captions) {
         if (captions.isNotEmpty()) {
             listState.animateScrollToItem(captions.lastIndex)
         }
     }
-    LazyColumn(
-        state = listState,
+    Card(
+        shape = RoundedCornerShape(JarvisDimens.radiusCard),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
         modifier = Modifier
             .weight(1f)
-            .fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+            .fillMaxWidth()
     ) {
-        items(captions) { caption ->
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = if (caption.fromUser) {
-                    Alignment.End
-                } else {
-                    Alignment.Start
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(JarvisDimens.cardPadding),
+            verticalArrangement = Arrangement.spacedBy(JarvisDimens.spaceSm)
+        ) {
+            items(captions) { caption ->
+                AppearOnEntry {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = if (caption.fromUser) {
+                            Alignment.End
+                        } else {
+                            Alignment.Start
+                        }
+                    ) {
+                        Text(
+                            text = if (caption.fromUser) "You" else settings.assistantName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = caption.text,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
                 }
-            ) {
-                Text(
-                    text = if (caption.fromUser) "You" else settings.assistantName,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = caption.text,
-                    style = MaterialTheme.typography.bodyMedium
-                )
             }
         }
     }
 
-    Spacer(modifier = Modifier.height(12.dp))
+    Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
 
     // ── Screen share (LIVE sessions): frames stream to Gemini Live ────
     if (uiState.mode == VoiceMode.LIVE) {
@@ -257,7 +267,11 @@ private fun VoiceSessionBody(
                         else "Share screen"
                     )
                 },
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(50)
+                colors = androidx.compose.material3.FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                    selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
+                ),
+                shape = RoundedCornerShape(50)
             )
         }
         Spacer(modifier = Modifier.height(10.dp))
@@ -266,7 +280,7 @@ private fun VoiceSessionBody(
     // ── Controls / error actions ───────────────────────────────────────
     if (uiState.status == VoiceStatus.ERROR) {
         Card(
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(JarvisDimens.radiusCard),
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.errorContainer
             ),
@@ -302,7 +316,7 @@ private fun VoiceSessionBody(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 16.dp),
+                .padding(bottom = JarvisDimens.spaceLg),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -315,14 +329,22 @@ private fun VoiceSessionBody(
                     contentDescription = if (uiState.micMuted) "Unmute microphone" else "Mute microphone"
                 )
             }
-            Spacer(modifier = Modifier.width(20.dp))
-            Button(onClick = {
-                manager.stop()
-                onBack()
-            }) {
-                Icon(Icons.Filled.CallEnd, contentDescription = null)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("End session")
+            Spacer(modifier = Modifier.width(JarvisDimens.spaceXl))
+            FilledIconButton(
+                onClick = {
+                    manager.stop()
+                    onBack()
+                },
+                colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError
+                ),
+                modifier = Modifier.size(56.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.CallEnd,
+                    contentDescription = "End session"
+                )
             }
         }
     }
@@ -331,21 +353,12 @@ private fun VoiceSessionBody(
 
 @Composable
 private fun ModeBadge(mode: VoiceMode, voiceName: String) {
-    val label = when (mode) {
-        VoiceMode.LIVE -> "LIVE • $voiceName"
-        VoiceMode.FALLBACK -> "FALLBACK"
-        VoiceMode.NONE -> "VOICE"
-    }
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.surfaceVariant
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-        )
+    // Shared pill language: LIVE reads as a success state, the on-device
+    // fallback and the idle badge stay neutral.
+    when (mode) {
+        VoiceMode.LIVE -> JarvisPill(text = "LIVE • $voiceName", tone = PillTone.SUCCESS)
+        VoiceMode.FALLBACK -> JarvisPill(text = "FALLBACK", tone = PillTone.NEUTRAL)
+        VoiceMode.NONE -> JarvisPill(text = "VOICE", tone = PillTone.NEUTRAL)
     }
 }
 

@@ -1,5 +1,12 @@
 package com.nshd.jarvis2.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,6 +43,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -46,6 +54,9 @@ private enum class Tab { HOME, CHAT, SETTINGS, UPDATES }
 
 /** Full-screen destinations layered over the tabs (L2: API + Memory, L3: Voice, L5: Avatars). */
 private enum class SubScreen { NONE, PERMISSIONS, API, MEMORY, VOICE, AVATARS }
+
+/** What is on screen right now — the AnimatedContent target in JarvisApp. */
+private data class ScreenTarget(val tab: Tab, val sub: SubScreen)
 
 @Composable
 fun JarvisApp(
@@ -82,56 +93,92 @@ fun JarvisApp(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                when (subScreen) {
-                    SubScreen.PERMISSIONS -> PermissionsScreen(
-                        onBack = { subScreen = SubScreen.NONE }
-                    )
-                    SubScreen.API -> ApiConnectionScreen(
-                        onBack = { subScreen = SubScreen.NONE }
-                    )
-                    SubScreen.MEMORY -> MemoryScreen(
-                        onBack = { subScreen = SubScreen.NONE }
-                    )
-                    SubScreen.VOICE -> VoiceScreen(
-                        settings = settings,
-                        onBack = { subScreen = SubScreen.NONE },
-                        onOpenChat = {
-                            subScreen = SubScreen.NONE
-                            tab = Tab.CHAT
-                        },
-                        onOpenSettings = {
-                            subScreen = SubScreen.NONE
-                            tab = Tab.SETTINGS
+                val reducedMotion = rememberReducedMotion()
+                // D2 transitions: fade + slight horizontal slide between
+                // tabs and sub-screens (transform/opacity only). State
+                // handling is unchanged — AnimatedContent only animates
+                // the container swap. Reduced motion → plain crossfade.
+                AnimatedContent(
+                    targetState = ScreenTarget(tab, subScreen),
+                    transitionSpec = {
+                        if (reducedMotion) {
+                            fadeIn(JarvisMotion.tweenFast()) togetherWith
+                                fadeOut(JarvisMotion.tweenFast())
+                        } else {
+                            val dir = when {
+                                initialState.sub == SubScreen.NONE &&
+                                    targetState.sub != SubScreen.NONE -> 1
+                                initialState.sub != SubScreen.NONE &&
+                                    targetState.sub == SubScreen.NONE -> -1
+                                initialState.sub != SubScreen.NONE &&
+                                    targetState.sub != SubScreen.NONE -> 1
+                                else -> {
+                                    val d = targetState.tab.ordinal - initialState.tab.ordinal
+                                    if (d < 0) -1 else 1
+                                }
+                            }
+                            (fadeIn(JarvisMotion.tweenSlow()) +
+                                slideInHorizontally(JarvisMotion.tweenSlow()) { w -> dir * w / 6 })
+                                .togetherWith(
+                                    fadeOut(JarvisMotion.tweenFast()) +
+                                        slideOutHorizontally(JarvisMotion.tweenSlow()) { w -> -dir * w / 6 }
+                                )
                         }
-                    )
-                    SubScreen.AVATARS -> AvatarsScreen(
-                        settings = settings,
-                        onSettingsChange = onSettingsChange,
-                        onBack = { subScreen = SubScreen.NONE },
-                        onOpenPermissions = { subScreen = SubScreen.PERMISSIONS }
-                    )
-                    SubScreen.NONE -> when (tab) {
-                        Tab.HOME -> HomeScreen(
-                            settings = settings,
-                            listening = false,
-                            onOpenPermissions = { subScreen = SubScreen.PERMISSIONS },
-                            onOpenMemory = { subScreen = SubScreen.MEMORY },
-                            onOpenSettings = { tab = Tab.SETTINGS },
-                            onOpenVoice = { subScreen = SubScreen.VOICE }
+                    },
+                    label = "screenTransition",
+                    modifier = Modifier.fillMaxSize()
+                ) { target ->
+                    when (target.sub) {
+                        SubScreen.PERMISSIONS -> PermissionsScreen(
+                            onBack = { subScreen = SubScreen.NONE }
                         )
-                        Tab.CHAT -> ChatScreen(
-                            settings = settings,
-                            onOpenSettings = { tab = Tab.SETTINGS }
+                        SubScreen.API -> ApiConnectionScreen(
+                            onBack = { subScreen = SubScreen.NONE }
                         )
-                        Tab.SETTINGS -> SettingsScreen(
+                        SubScreen.MEMORY -> MemoryScreen(
+                            onBack = { subScreen = SubScreen.NONE }
+                        )
+                        SubScreen.VOICE -> VoiceScreen(
+                            settings = settings,
+                            onBack = { subScreen = SubScreen.NONE },
+                            onOpenChat = {
+                                subScreen = SubScreen.NONE
+                                tab = Tab.CHAT
+                            },
+                            onOpenSettings = {
+                                subScreen = SubScreen.NONE
+                                tab = Tab.SETTINGS
+                            }
+                        )
+                        SubScreen.AVATARS -> AvatarsScreen(
                             settings = settings,
                             onSettingsChange = onSettingsChange,
-                            onOpenPermissions = { subScreen = SubScreen.PERMISSIONS },
-                            onOpenApi = { subScreen = SubScreen.API },
-                            onOpenMemory = { subScreen = SubScreen.MEMORY },
-                            onOpenAvatars = { subScreen = SubScreen.AVATARS }
+                            onBack = { subScreen = SubScreen.NONE },
+                            onOpenPermissions = { subScreen = SubScreen.PERMISSIONS }
                         )
-                        Tab.UPDATES -> UpdatesScreen()
+                        SubScreen.NONE -> when (target.tab) {
+                            Tab.HOME -> HomeScreen(
+                                settings = settings,
+                                listening = false,
+                                onOpenPermissions = { subScreen = SubScreen.PERMISSIONS },
+                                onOpenMemory = { subScreen = SubScreen.MEMORY },
+                                onOpenSettings = { tab = Tab.SETTINGS },
+                                onOpenVoice = { subScreen = SubScreen.VOICE }
+                            )
+                            Tab.CHAT -> ChatScreen(
+                                settings = settings,
+                                onOpenSettings = { tab = Tab.SETTINGS }
+                            )
+                            Tab.SETTINGS -> SettingsScreen(
+                                settings = settings,
+                                onSettingsChange = onSettingsChange,
+                                onOpenPermissions = { subScreen = SubScreen.PERMISSIONS },
+                                onOpenApi = { subScreen = SubScreen.API },
+                                onOpenMemory = { subScreen = SubScreen.MEMORY },
+                                onOpenAvatars = { subScreen = SubScreen.AVATARS }
+                            )
+                            Tab.UPDATES -> UpdatesScreen()
+                        }
                     }
                 }
             }
@@ -184,6 +231,12 @@ private fun JarvisBottomBar(
                 NavItem(Icons.Filled.Update, "Updates", tab == Tab.UPDATES) { onTab(Tab.UPDATES) }
             }
         }
+        // Subtle scale-up while a voice session is live (D2 motion).
+        val fabScale by animateFloatAsState(
+            targetValue = if (listening) 1.08f else 1f,
+            animationSpec = JarvisMotion.tweenMed(),
+            label = "fabScale"
+        )
         FloatingActionButton(
             onClick = onMic,
             shape = CircleShape,
@@ -198,6 +251,7 @@ private fun JarvisBottomBar(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .size(60.dp)
+                .scale(fabScale)
         ) {
             Icon(
                 imageVector = if (listening) Icons.Filled.MicOff else Icons.Filled.Mic,

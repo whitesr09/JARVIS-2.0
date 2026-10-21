@@ -34,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -45,7 +46,7 @@ import com.nshd.jarvis2.service.FloatingOverlayService
  * Avatar picker (Level 5): the 12 companions in a 3-column grid.
  * Avatars sit directly on the plain card surface — the drawables are
  * transparent with NO colored disc behind them; selection is shown by a
- * coral border + check badge only.
+ * primary border + check badge only.
  */
 @Composable
 fun AvatarsScreen(
@@ -61,12 +62,12 @@ fun AvatarsScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp)
+            .padding(horizontal = JarvisDimens.screenPadding)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 10.dp),
+                .padding(top = JarvisDimens.spaceMd),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
@@ -86,15 +87,15 @@ fun AvatarsScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
 
         Card(
-            shape = RoundedCornerShape(20.dp),
+            shape = RoundedCornerShape(JarvisDimens.radiusCard),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.heroElevation),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
+            Column(modifier = Modifier.padding(JarvisDimens.cardPadding)) {
                 Text(
                     text = when {
                         !canOverlay -> "Overlay permission is not granted yet — the avatar " +
@@ -145,24 +146,25 @@ fun AvatarsScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            text = "CHOOSE AN AVATAR",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceXl))
+        SectionLabel("Choose an avatar")
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
 
         LazyVerticalGrid(
             columns = GridCells.Fixed(3),
-            contentPadding = PaddingValues(bottom = 20.dp),
-            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
-            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(bottom = JarvisDimens.spaceXl),
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(JarvisDimens.spaceMd),
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(JarvisDimens.spaceMd),
             modifier = Modifier.fillMaxWidth()
         ) {
             items(AvatarCatalog.all) { avatar ->
                 val selected = settings.avatarId == avatar.id
+                // Selected cell swells a touch (spring back on deselect).
+                val cellScale by androidx.compose.animation.core.animateFloatAsState(
+                    targetValue = if (selected) 1.03f else 1f,
+                    animationSpec = JarvisMotion.tweenMed(),
+                    label = "avatarCellScale"
+                )
                 Card(
                     onClick = {
                         onSettingsChange(settings.copy(avatarId = avatar.id))
@@ -171,7 +173,11 @@ fun AvatarsScreen(
                             FloatingOverlayService.start(context)
                         }
                     },
-                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.graphicsLayer {
+                        scaleX = cellScale
+                        scaleY = cellScale
+                    },
+                    shape = RoundedCornerShape(JarvisDimens.radiusCard),
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.surface
                     ),
@@ -180,13 +186,13 @@ fun AvatarsScreen(
                     } else {
                         BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                     },
-                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                    elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation)
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 12.dp)
+                            .padding(vertical = JarvisDimens.spaceMd)
                     ) {
                         // Plain surface behind the avatar — no disc, no plate.
                         Icon(

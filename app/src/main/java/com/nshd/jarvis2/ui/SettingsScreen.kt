@@ -50,6 +50,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -58,6 +59,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -74,6 +76,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.painterResource
 import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.JarvisSettings
@@ -184,14 +187,14 @@ fun SettingsScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(20.dp)
+            .padding(JarvisDimens.screenPadding)
     ) {
         Text(
             text = "Settings & Intelligence",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold
         )
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
 
         // ── Operator card ──────────────────────────────────────────────
         GroupCard {
@@ -236,7 +239,10 @@ fun SettingsScreen(
 
         SectionTitle("Voice & Neural Intelligence")
         GroupCard {
-            SettingsRow(Icons.Filled.Favorite, "AI Persona & Voice", settings.persona) {
+            SettingsRow(
+                Icons.Filled.Favorite, "AI Persona & Voice", settings.persona,
+                showDivider = true
+            ) {
                 showPersona = true
             }
             SettingsRow(Icons.Filled.Language, "Conversation Language", settings.language) {
@@ -265,7 +271,15 @@ fun SettingsScreen(
                 }
                 Switch(
                     checked = settings.silentExecution,
-                    onCheckedChange = { onSettingsChange(settings.copy(silentExecution = it)) }
+                    onCheckedChange = { onSettingsChange(settings.copy(silentExecution = it)) },
+                    colors = SwitchDefaults.colors(
+                        checkedTrackColor = MaterialTheme.colorScheme.primary,
+                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                        checkedBorderColor = MaterialTheme.colorScheme.primary,
+                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        uncheckedBorderColor = MaterialTheme.colorScheme.outline
+                    )
                 )
             }
         }
@@ -334,13 +348,22 @@ fun SettingsScreen(
 
         SectionTitle("System & Data Engine")
         GroupCard {
-            SettingsRow(Icons.Filled.Api, "API & Connection", "Providers, keys & models") {
+            SettingsRow(
+                Icons.Filled.Api, "API & Connection", "Providers, keys & models",
+                showDivider = true
+            ) {
                 onOpenApi()
             }
-            SettingsRow(Icons.Filled.Memory, "Neural Memory Bank", "Facts, preferences, contacts") {
+            SettingsRow(
+                Icons.Filled.Memory, "Neural Memory Bank", "Facts, preferences, contacts",
+                showDivider = true
+            ) {
                 onOpenMemory()
             }
-            SettingsRow(Icons.Filled.Security, "System Permissions", "11 authorizations") {
+            SettingsRow(
+                Icons.Filled.Security, "System Permissions", "11 authorizations",
+                showDivider = true
+            ) {
                 onOpenPermissions()
             }
             SettingsRow(
@@ -609,7 +632,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(18.dp))
         Text(
-            text = "JARVIS • v0.8.0-F1",
+            text = "JARVIS • v0.9.0-D2",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)
@@ -1124,12 +1147,16 @@ private fun PersonaOption(
 
 @Composable
 private fun SectionTitle(text: String) {
+    // D2 section style: letterspaced label (see SectionLabel), one
+    // rhythm of space above / small gap below for every group.
     Text(
         text = text,
-        style = MaterialTheme.typography.titleSmall,
-        fontWeight = FontWeight.Bold,
+        style = MaterialTheme.typography.labelLarge.copy(letterSpacing = 0.9.sp),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 20.dp, bottom = 8.dp)
+        modifier = Modifier.padding(
+            top = JarvisDimens.sectionGap,
+            bottom = JarvisDimens.spaceSm
+        )
     )
 }
 
@@ -1152,30 +1179,40 @@ private fun SettingsRow(
     icon: ImageVector,
     title: String,
     subtitle: String,
+    showDivider: Boolean = false,
     onClick: () -> Unit
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-        Spacer(modifier = Modifier.width(14.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(vertical = JarvisDimens.spaceMd),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Spacer(modifier = Modifier.width(JarvisDimens.spaceLg))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(
+                Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        Icon(
-            Icons.Filled.ChevronRight,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        if (showDivider) {
+            // Hairline aligned with the row text (icon 24 + gap 16).
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.padding(start = 40.dp)
+            )
+        }
     }
 }
 

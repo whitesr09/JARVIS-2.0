@@ -2,6 +2,7 @@ package com.nshd.jarvis2.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -46,25 +48,33 @@ fun HomeScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp),
+            .padding(horizontal = JarvisDimens.screenPadding),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
         A11yWarningBanner(onFix = onOpenSettings)
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
         Text(
             text = settings.assistantName,
-            style = MaterialTheme.typography.headlineMedium,
+            style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
-            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+            color = MaterialTheme.colorScheme.primary
         )
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceSm))
+        // Greeting hierarchy (D2): display line + the operator's name
+        // emphasised in primary on its own line.
         Text(
-            text = "Welcome back, ${settings.callsign}",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold
+            text = "Welcome back,",
+            style = MaterialTheme.typography.displayMedium,
+            modifier = Modifier.fillMaxWidth()
         )
-        Spacer(modifier = Modifier.height(18.dp))
+        Text(
+            text = settings.callsign,
+            style = MaterialTheme.typography.displayMedium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceXl))
 
         ParticleOrb(
             listening = listening,
@@ -73,16 +83,16 @@ fun HomeScreen(
                 .clickable(onClick = onOpenVoice)
         )
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
         StatusPill(listening = listening)
-        Spacer(modifier = Modifier.height(22.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.space2xl))
 
         WeatherCard()
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(JarvisDimens.spaceMd)
         ) {
             QuickTile(
                 icon = Icons.Filled.Smartphone,
@@ -100,7 +110,7 @@ fun HomeScreen(
                 modifier = Modifier.weight(1f)
             ) { onOpenSettings() }
         }
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(JarvisDimens.space3xl))
     }
 }
 
@@ -122,7 +132,7 @@ private fun StatusPill(listening: Boolean) {
             ) {}
             Spacer(modifier = Modifier.size(8.dp))
             Text(
-                text = if (listening) "LISTENING…" else "JARVIS OFF • TAP THE MIC TO START",
+                text = if (listening) "Listening…" else "Jarvis is off — tap the mic to start",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold
             )
@@ -142,22 +152,39 @@ private fun WeatherCard() {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(18.dp),
+                .padding(JarvisDimens.spaceXl),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = Icons.Filled.Cloud,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(40.dp)
-            )
-            Spacer(modifier = Modifier.size(14.dp))
+            Surface(
+                shape = RoundedCornerShape(JarvisDimens.radiusField),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(56.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Filled.Cloud,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.size(JarvisDimens.spaceLg))
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "26°C  Overcast",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(
+                        text = "26°",
+                        style = MaterialTheme.typography.displaySmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.width(JarvisDimens.spaceSm))
+                    Text(
+                        text = "Overcast",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(bottom = 3.dp)
+                    )
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = Icons.Filled.LocationOn,
@@ -204,16 +231,24 @@ private fun QuickTile(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 16.dp),
+                .padding(vertical = JarvisDimens.spaceLg),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(26.dp)
-            )
-            Spacer(modifier = Modifier.height(6.dp))
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(48.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = label,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(JarvisDimens.spaceSm))
             Text(text = label, style = MaterialTheme.typography.labelLarge)
         }
     }
