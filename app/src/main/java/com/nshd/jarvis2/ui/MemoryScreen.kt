@@ -4,6 +4,7 @@ import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -243,6 +244,9 @@ fun MemoryScreen(onBack: () -> Unit) {
                     .weight(1f)
                     .fillMaxWidth()
                     .padding(horizontal = JarvisDimens.spaceLg),
+                // Bottom content padding so the last fact never hides
+                // behind the bottom bar / FAB (F2).
+                contentPadding = PaddingValues(bottom = 120.dp),
                 verticalArrangement = Arrangement.spacedBy(JarvisDimens.spaceMd)
             ) {
                 items(facts, key = { it.id }) { fact ->

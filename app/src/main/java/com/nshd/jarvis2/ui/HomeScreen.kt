@@ -121,7 +121,8 @@ fun HomeScreen(
                 modifier = Modifier.weight(1f)
             ) { onOpenSettings() }
         }
-        Spacer(modifier = Modifier.height(JarvisDimens.space3xl))
+        // Bottom clearance so content never ends behind the bottom bar (F2).
+        Spacer(modifier = Modifier.height(120.dp))
     }
 }
 

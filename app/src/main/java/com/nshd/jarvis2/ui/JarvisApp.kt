@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
@@ -49,6 +50,9 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.nshd.jarvis2.JarvisSettings
+import com.nshd.jarvis2.voice.VoiceSessionManager
+import com.nshd.jarvis2.voice.VoiceStatus
+import com.nshd.jarvis2.voice.VoiceUiState
 
 private enum class Tab { HOME, CHAT, SETTINGS, UPDATES }
 
@@ -66,6 +70,9 @@ fun JarvisApp(
     JarvisTheme(theme = settings.theme, customBgHex = settings.customBgHex) {
         var tab by remember { mutableStateOf(Tab.HOME) }
         var subScreen by remember { mutableStateOf(SubScreen.NONE) }
+        // The center FAB reflects the live voice session (F2): it must
+        // not sit there red + MicOff during normal operation.
+        val voiceState by VoiceSessionManager.uiState.collectAsState()
 
         // Overlay bubble tap (and other external requests) land here.
         val voiceRequested by AppNavRequests.voiceRequested.collectAsState()
@@ -79,7 +86,8 @@ fun JarvisApp(
             bottomBar = {
                 JarvisBottomBar(
                     tab = tab,
-                    listening = subScreen == SubScreen.VOICE,
+                    onVoiceScreen = subScreen == SubScreen.VOICE,
+                    voiceState = voiceState,
                     onTab = {
                         tab = it
                         subScreen = SubScreen.NONE
@@ -133,6 +141,8 @@ fun JarvisApp(
                             onBack = { subScreen = SubScreen.NONE }
                         )
                         SubScreen.API -> ApiConnectionScreen(
+                            settings = settings,
+                            onSettingsChange = onSettingsChange,
                             onBack = { subScreen = SubScreen.NONE }
                         )
                         SubScreen.MEMORY -> MemoryScreen(
@@ -195,10 +205,18 @@ fun JarvisApp(
 @Composable
 private fun JarvisBottomBar(
     tab: Tab,
-    listening: Boolean,
+    onVoiceScreen: Boolean,
+    voiceState: VoiceUiState,
     onTab: (Tab) -> Unit,
     onMic: () -> Unit
 ) {
+    // FAB state language (F2): primary + Mic while a session runs
+    // (GraphicEq while Jarvis is speaking); the error treatment —
+    // error container + MicOff — appears ONLY on a real ERROR state.
+    // Red during normal listening made the app look broken/muted.
+    val sessionActive = onVoiceScreen || voiceState.status != VoiceStatus.IDLE
+    val isError = voiceState.status == VoiceStatus.ERROR
+    val isSpeaking = voiceState.status == VoiceStatus.SPEAKING
     Box(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier
@@ -233,16 +251,16 @@ private fun JarvisBottomBar(
         }
         // Subtle scale-up while a voice session is live (D2 motion).
         val fabScale by animateFloatAsState(
-            targetValue = if (listening) 1.08f else 1f,
+            targetValue = if (sessionActive && !isError) 1.08f else 1f,
             animationSpec = JarvisMotion.tweenMed(),
             label = "fabScale"
         )
         FloatingActionButton(
             onClick = onMic,
             shape = CircleShape,
-            containerColor = if (listening) MaterialTheme.colorScheme.error
+            containerColor = if (isError) MaterialTheme.colorScheme.error
             else MaterialTheme.colorScheme.primary,
-            contentColor = if (listening) MaterialTheme.colorScheme.onError
+            contentColor = if (isError) MaterialTheme.colorScheme.onError
             else MaterialTheme.colorScheme.onPrimary,
             elevation = FloatingActionButtonDefaults.elevation(
                 defaultElevation = JarvisDimens.fabElevation,
@@ -254,8 +272,16 @@ private fun JarvisBottomBar(
                 .scale(fabScale)
         ) {
             Icon(
-                imageVector = if (listening) Icons.Filled.MicOff else Icons.Filled.Mic,
-                contentDescription = if (listening) "Stop listening" else "Start listening"
+                imageVector = when {
+                    isError -> Icons.Filled.MicOff
+                    isSpeaking -> Icons.Filled.GraphicEq
+                    else -> Icons.Filled.Mic
+                },
+                contentDescription = when {
+                    isError -> "Voice session error"
+                    sessionActive -> "Voice session active"
+                    else -> "Start listening"
+                }
             )
         }
         Spacer(modifier = Modifier.height(4.dp))

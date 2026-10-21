@@ -76,7 +76,7 @@ class FailoverRouter(
         systemAndHistory: List<ChatMsg>,
         maxSteps: Int = 10,
         preferReasoningModel: Boolean = false,
-        onEvent: (String) -> Unit = {},
+        onEvent: (ToolEvent) -> Unit = {},
         onAssistantDelta: (String) -> Unit = {}
     ): String {
         val configured = configsInOrder.filter { it.isConfigured }
@@ -117,7 +117,7 @@ class FailoverRouter(
                     )
 
                     for (call in reply.toolCalls) {
-                        onEvent("🔧 ${call.name}")
+                        onEvent(ToolEvent(ToolEventKind.STARTED, call.name))
                         val args = try {
                             JSONObject(call.argumentsJson.ifBlank { "{}" })
                         } catch (e: Exception) {
@@ -132,8 +132,17 @@ class FailoverRouter(
                             )
                         }
                         executedAnyTool = true
-                        val firstLine = result.message.lineSequence().firstOrNull().orEmpty()
-                        onEvent("${if (result.success) "✅" else "❌"} ${call.name}: $firstLine")
+                        onEvent(
+                            ToolEvent(
+                                kind = if (result.success) {
+                                    ToolEventKind.SUCCESS
+                                } else {
+                                    ToolEventKind.FAILURE
+                                },
+                                toolName = call.name,
+                                message = result.message
+                            )
+                        )
                         conversation += ChatMsg(
                             role = "tool",
                             content = result.message,
@@ -153,7 +162,13 @@ class FailoverRouter(
                     step++
                 }
 
-                onEvent("⚠️ Tool step limit reached — asking ${config.label} for a summary")
+                onEvent(
+                    ToolEvent(
+                        ToolEventKind.INFO,
+                        "",
+                        "Tool step limit reached — asking ${config.label} for a summary"
+                    )
+                )
                 val summary = provider.chatStream(
                     conversation + ChatMsg(
                         "user",

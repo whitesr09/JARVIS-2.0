@@ -33,6 +33,13 @@ data class JarvisSettings(
     val customVoiceName: String = "",
     /** Gemini Live model, WITHOUT the "models/" prefix (the client adds it). */
     val liveModel: String = "gemini-2.5-flash-native-audio-preview-12-2025",
+    /**
+     * Voice engine selection (F2): "AUTO" (Native Live when the model
+     * supports it, otherwise Universal), "NATIVE" (Gemini Live only,
+     * with Universal fallback on failure), "UNIVERSAL" (SpeechRecognizer
+     * → chat model → TTS; works with any provider/model).
+     */
+    val voiceEngine: String = "AUTO",
     /** Floating-overlay companion (see AvatarCatalog); default "droid". */
     val avatarId: String = "droid",
     /** Voice biometrics enrollment (Level 6): samples recorded on-device. */
@@ -49,6 +56,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // F2: track app foreground so the floating overlay bubble hides
+        // while Jarvis's own screens are up.
+        com.nshd.jarvis2.service.AppForeground.register(application)
         handleNavIntent(intent)
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         settings = loadSettings()
@@ -129,6 +139,7 @@ class MainActivity : ComponentActivity() {
             liveModel = prefs.getString(
                 KEY_LIVE_MODEL, "gemini-2.5-flash-native-audio-preview-12-2025"
             ) ?: "gemini-2.5-flash-native-audio-preview-12-2025",
+            voiceEngine = prefs.getString(KEY_VOICE_ENGINE, "AUTO") ?: "AUTO",
             avatarId = prefs.getString(KEY_AVATAR_ID, "droid") ?: "droid",
             biometricsEnrolled = prefs.getBoolean(KEY_BIO_ENROLLED, false),
             biometricsSampleCount = prefs.getInt(KEY_BIO_COUNT, 0),
@@ -149,6 +160,7 @@ class MainActivity : ComponentActivity() {
             .putString(KEY_VOICE_NAME, s.voiceName)
             .putString(KEY_CUSTOM_VOICE, s.customVoiceName)
             .putString(KEY_LIVE_MODEL, s.liveModel)
+            .putString(KEY_VOICE_ENGINE, s.voiceEngine)
             .putString(KEY_AVATAR_ID, s.avatarId)
             .putBoolean(KEY_BIO_ENROLLED, s.biometricsEnrolled)
             .putInt(KEY_BIO_COUNT, s.biometricsSampleCount)
@@ -172,6 +184,7 @@ class MainActivity : ComponentActivity() {
         private const val KEY_VOICE_NAME = "voice_name"
         private const val KEY_CUSTOM_VOICE = "custom_voice_name"
         private const val KEY_LIVE_MODEL = "live_model"
+        private const val KEY_VOICE_ENGINE = "voice_engine"
         private const val KEY_AVATAR_ID = "avatar_id"
         private const val KEY_BIO_ENROLLED = "biometrics_enrolled"
         private const val KEY_BIO_COUNT = "biometrics_sample_count"

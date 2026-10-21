@@ -267,7 +267,8 @@ fun PermissionsScreen(onBack: () -> Unit) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Spacer(modifier = Modifier.height(16.dp))
+        // Bottom clearance so the last rows never hide behind the bottom bar (F2).
+        Spacer(modifier = Modifier.height(120.dp))
     }
 }
 

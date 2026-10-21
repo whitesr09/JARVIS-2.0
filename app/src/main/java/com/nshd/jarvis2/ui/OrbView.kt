@@ -100,12 +100,15 @@ fun ParticleOrb(
 
         // Soft radial glow disc behind everything (D3) — primary at 12%
         // fading to transparent; thinking/error tint it with their state.
+        // In ERROR the glow is heavily reduced (F2): a big red halo reads
+        // as an alarm, a faint one reads as a status.
         if (showGlow) {
+            val glowBase = if (error) 0.05f else 0.12f
             val glowRadius = baseR * 1.3f * breathe * ampSwell
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
-                        tint.copy(alpha = 0.12f + amp * 0.06f),
+                        tint.copy(alpha = glowBase + amp * 0.03f),
                         Color.Transparent
                     ),
                     center = Offset(cx, cy),

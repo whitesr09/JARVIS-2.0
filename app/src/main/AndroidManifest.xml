@@ -21,12 +21,24 @@
     <!-- Level 6: wake word service holds a partial wake lock briefly on wake -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- Apps Jarvis can query and launch -->
+    <!-- Apps Jarvis can query and launch. The MAIN/LAUNCHER intent is
+         what makes every launcher app visible to open_app's label search
+         on Android 11+ (package visibility) — without it the query
+         returns almost nothing and "open Spotify" fails even when
+         Spotify is installed (F2). -->
     <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
         <package android:name="com.whatsapp" />
         <package android:name="com.google.android.youtube" />
         <package android:name="com.instagram.android" />
         <package android:name="com.android.chrome" />
+        <package android:name="com.spotify.music" />
+        <package android:name="org.telegram.messenger" />
+        <package android:name="com.google.android.gm" />
+        <package android:name="com.google.android.apps.maps" />
     </queries>
 
     <application

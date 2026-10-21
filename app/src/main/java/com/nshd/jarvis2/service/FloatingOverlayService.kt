@@ -80,6 +80,19 @@ class FloatingOverlayService : Service() {
     @Volatile
     private var wasTaskActive = false
 
+    /**
+     * F2: the bubble (and HUD) hide while Jarvis's own app is in the
+     * foreground — floating over itself looks broken. [AppForeground]
+     * notifies on activity start/stop edges.
+     */
+    private val foregroundListener: (Boolean) -> Unit = { foreground ->
+        mainHandler.post { applyForegroundVisibility(foreground) }
+    }
+
+    private fun applyForegroundVisibility(appInForeground: Boolean) {
+        rootView?.visibility = if (appInForeground) View.GONE else View.VISIBLE
+    }
+
     // ── Drag / tap bookkeeping ─────────────────────────────────────────
     private var downRawX = 0f
     private var downRawY = 0f
@@ -97,6 +110,8 @@ class FloatingOverlayService : Service() {
         createNotificationChannel()
         startForegroundCompat(buildNotificationText())
         showOverlayIfPermitted()
+        applyForegroundVisibility(AppForeground.isForeground())
+        AppForeground.addListener(foregroundListener)
         observeState()
     }
 
@@ -114,6 +129,7 @@ class FloatingOverlayService : Service() {
 
     override fun onDestroy() {
         running = false
+        AppForeground.removeListener(foregroundListener)
         scope.cancel()
         stopPulse()
         pendingSingleTap?.let { mainHandler.removeCallbacks(it) }

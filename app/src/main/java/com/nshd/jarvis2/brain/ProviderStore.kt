@@ -72,6 +72,29 @@ class ProviderStore(context: Context) {
             .apply()
     }
 
+    /**
+     * Last model list fetched from this provider (F2 discovery cache),
+     * so the picker dialog reopens instantly. Stored as a JSON array of
+     * ids; kinds are re-derived from the ids on read.
+     */
+    fun cachedModelIds(id: String): List<String> {
+        val raw = prefs.getString(key(id, "models"), null) ?: return emptyList()
+        return try {
+            val array = org.json.JSONArray(raw)
+            (0 until array.length()).mapNotNull { i ->
+                array.optString(i).takeIf { it.isNotBlank() }
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun saveModelIds(id: String, ids: List<String>) {
+        val array = org.json.JSONArray()
+        ids.forEach { array.put(it) }
+        prefs.edit().putString(key(id, "models"), array.toString()).apply()
+    }
+
     fun activeProviderId(): String =
         prefs.getString(KEY_ACTIVE, ProviderPresets.GEMINI.id) ?: ProviderPresets.GEMINI.id
 

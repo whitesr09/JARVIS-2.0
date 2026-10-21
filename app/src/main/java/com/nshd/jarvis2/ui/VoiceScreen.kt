@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,7 +22,9 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material3.Button
@@ -32,7 +35,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -50,9 +55,12 @@ import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.ProviderStore
 import com.nshd.jarvis2.memory.MemoryDb
+import com.nshd.jarvis2.voice.CaptionKind
+import com.nshd.jarvis2.voice.VoiceCaption
 import com.nshd.jarvis2.voice.VoiceMode
 import com.nshd.jarvis2.voice.VoiceSessionManager
 import com.nshd.jarvis2.voice.VoiceStatus
+import com.nshd.jarvis2.voice.VoiceUiState
 
 /**
  * Level 3 voice screen: the particle orb driven by the live session's
@@ -132,7 +140,7 @@ fun VoiceScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            ModeBadge(mode = uiState.mode, voiceName = uiState.voiceName)
+            ModeBadge(uiState = uiState)
         }
 
         if (!hasPermission) {
@@ -173,7 +181,7 @@ private fun VoiceSessionBody(
     // ── Orb (tap toggles the mic) ──────────────────────────────────────
     ParticleOrb(
         listening = uiState.status == VoiceStatus.LISTENING ||
-            uiState.status == VoiceStatus.FALLBACK_ACTIVE,
+            uiState.status == VoiceStatus.UNIVERSAL_ACTIVE,
         speaking = uiState.status == VoiceStatus.SPEAKING,
         thinking = uiState.status == VoiceStatus.THINKING ||
             uiState.status == VoiceStatus.CONNECTING,
@@ -205,54 +213,42 @@ private fun VoiceSessionBody(
 
     Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
 
-    // ── Captions (flat surface card) ───────────────────────────────────
+    // ── Captions (flat surface card) — hidden entirely while empty,
+    // so an error before the first turn doesn't leave a blank white
+    // box floating on the screen (F2). ────────────────────────────────
     val listState = rememberLazyListState()
     LaunchedEffect(captions) {
         if (captions.isNotEmpty()) {
             listState.animateScrollToItem(captions.lastIndex)
         }
     }
-    Card(
-        shape = RoundedCornerShape(JarvisDimens.radiusCard),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
-        modifier = Modifier
-            .weight(1f)
-            .fillMaxWidth()
-    ) {
-        LazyColumn(
-            state = listState,
+    if (captions.isNotEmpty()) {
+        Card(
+            shape = RoundedCornerShape(JarvisDimens.radiusCard),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
             modifier = Modifier
-                .fillMaxSize()
-                .padding(JarvisDimens.cardPadding),
-            verticalArrangement = Arrangement.spacedBy(JarvisDimens.spaceSm)
+                .weight(1f)
+                .fillMaxWidth()
         ) {
-            items(captions) { caption ->
-                AppearOnEntry {
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = if (caption.fromUser) {
-                            Alignment.End
-                        } else {
-                            Alignment.Start
-                        }
-                    ) {
-                        Text(
-                            text = if (caption.fromUser) "You" else settings.assistantName,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = caption.text,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(JarvisDimens.cardPadding),
+                verticalArrangement = Arrangement.spacedBy(JarvisDimens.spaceSm)
+            ) {
+                items(captions) { caption ->
+                    AppearOnEntry {
+                        CaptionRow(caption = caption, assistantName = settings.assistantName)
                     }
                 }
             }
         }
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
+    } else {
+        Spacer(modifier = Modifier.weight(1f))
     }
-
-    Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
 
     // ── Screen share (LIVE sessions): frames stream to Gemini Live ────
     if (uiState.mode == VoiceMode.LIVE) {
@@ -282,6 +278,10 @@ private fun VoiceSessionBody(
 
     // ── Controls / error actions ───────────────────────────────────────
     if (uiState.status == VoiceStatus.ERROR) {
+        // Friendly headline first; the raw provider string lives behind
+        // a small "Details" expander, never as the primary UI (F2).
+        val mapped = FriendlyErrors.map(uiState.errorMessage)
+        var showDetails by remember { mutableStateOf(false) }
         Card(
             shape = RoundedCornerShape(JarvisDimens.radiusCard),
             colors = CardDefaults.cardColors(
@@ -289,12 +289,28 @@ private fun VoiceSessionBody(
             ),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text(
-                text = uiState.errorMessage ?: "The voice session hit a problem.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onErrorContainer,
-                modifier = Modifier.padding(14.dp)
-            )
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(
+                    text = mapped.headline,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+                if (mapped.rawDetail != null) {
+                    TextButton(
+                        onClick = { showDetails = !showDetails },
+                        modifier = Modifier.padding(top = 2.dp)
+                    ) {
+                        Text(if (showDetails) "Hide details" else "Details")
+                    }
+                    if (showDetails) {
+                        Text(
+                            text = mapped.rawDetail,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
         }
         Spacer(modifier = Modifier.height(12.dp))
         Row(
@@ -355,13 +371,88 @@ private fun VoiceSessionBody(
 }
 
 @Composable
-private fun ModeBadge(mode: VoiceMode, voiceName: String) {
-    // Shared pill language: LIVE reads as a success state, the on-device
-    // fallback and the idle badge stay neutral.
-    when (mode) {
-        VoiceMode.LIVE -> JarvisPill(text = "LIVE • $voiceName", tone = PillTone.SUCCESS)
-        VoiceMode.FALLBACK -> JarvisPill(text = "FALLBACK", tone = PillTone.NEUTRAL)
-        VoiceMode.NONE -> JarvisPill(text = "VOICE", tone = PillTone.NEUTRAL)
+private fun ModeBadge(uiState: VoiceUiState) {
+    // The badge names the ENGINE (F2): "LIVE • Kore" for native audio,
+    // "UNIVERSAL • <chat model>" for the any-model engine. LIVE reads
+    // as a success state, Universal stays neutral.
+    val label = uiState.engineLabel.ifBlank {
+        when (uiState.mode) {
+            VoiceMode.LIVE -> "LIVE • ${uiState.voiceName}"
+            VoiceMode.UNIVERSAL -> "UNIVERSAL"
+            VoiceMode.NONE -> "VOICE"
+        }
+    }
+    JarvisPill(
+        text = label,
+        tone = if (uiState.mode == VoiceMode.LIVE) PillTone.SUCCESS else PillTone.NEUTRAL
+    )
+}
+
+/** One caption line: user/assistant text, or a centered status chip for tool/system events. */
+@Composable
+private fun CaptionRow(caption: VoiceCaption, assistantName: String) {
+    when (caption.kind) {
+        CaptionKind.TOOL, CaptionKind.SYSTEM -> {
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (caption.kind == CaptionKind.SYSTEM) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (caption.kind == CaptionKind.SYSTEM) {
+                                Icons.Filled.Info
+                            } else {
+                                Icons.Filled.Build
+                            },
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = caption.text,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+        CaptionKind.USER, CaptionKind.ASSISTANT -> {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = if (caption.fromUser) {
+                    Alignment.End
+                } else {
+                    Alignment.Start
+                }
+            ) {
+                Text(
+                    text = if (caption.fromUser) "You" else assistantName,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = caption.text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    // Partial (still-streaming) text renders dimmed.
+                    color = MaterialTheme.colorScheme.onSurface.copy(
+                        alpha = if (caption.partial) 0.55f else 1f
+                    )
+                )
+            }
+        }
     }
 }
 
@@ -410,6 +501,6 @@ private fun statusText(status: VoiceStatus, assistantName: String, micMuted: Boo
         VoiceStatus.LISTENING -> if (micMuted) "Microphone muted — tap the mic to resume" else "Listening…"
         VoiceStatus.SPEAKING -> "$assistantName is speaking…"
         VoiceStatus.THINKING -> "$assistantName is thinking…"
-        VoiceStatus.FALLBACK_ACTIVE -> "Listening (on-device)…"
+        VoiceStatus.UNIVERSAL_ACTIVE -> "Listening…"
         VoiceStatus.ERROR -> "Something went wrong"
     }

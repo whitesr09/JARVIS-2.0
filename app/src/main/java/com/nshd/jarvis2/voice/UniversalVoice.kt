@@ -3,54 +3,66 @@ package com.nshd.jarvis2.voice
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Fallback voice path for when no Gemini key is configured (or for
- * devices where Live is unreachable): Android's on-device / system
- * SpeechRecognizer for one-shot listening + TextToSpeech for replies.
- * The manager loops listen → route (FailoverRouter) → speak → listen
- * until the user ends the session.
+ * UNIVERSAL voice engine (F2): microphone → text → the user's chat
+ * model (via AgentPipeline) → spoken reply. It works with ANY provider
+ * and ANY chat model — no native-audio model required.
  *
- * MUST be created and driven from the main thread (SpeechRecognizer
- * requirement) — VoiceSessionManager's scope is Main, which covers this.
+ * This class owns only the device mechanics:
+ *  - SpeechRecognizer passes with partial results (the manager renders
+ *    them as a live-typing user caption) in the app's STT locale.
+ *  - Sentence-queued TextToSpeech: the manager feeds completed
+ *    sentences while the reply is still streaming, so the first audio
+ *    starts at the first sentence boundary. [Listener.onTtsQueueDrained]
+ *    fires (on the main thread) when everything queued has been spoken.
+ *
+ * Recognizer and TTS calls that must run on the main thread are the
+ * caller's responsibility for startListening (VoiceSessionManager's
+ * scope is Main); TTS listener callbacks are re-posted to Main here.
  */
-class FallbackVoice(
+class UniversalVoice(
     context: Context,
     private val languageName: String,
     private val listener: Listener
 ) {
     interface Listener {
-        /** Final recognized text from one listen pass. */
-        fun onResult(text: String)
-
         /** Partial transcription while the user is still speaking. */
-        fun onPartial(text: String)
+        fun onPartialResult(text: String)
+
+        /** Final recognized text from one listen pass. */
+        fun onFinalResult(text: String)
 
         /** Recognizer RMS changed (dB) — for the orb. */
         fun onRms(rmsDb: Float)
 
         /**
-         * Recognizer error. [recoverable] = true for no-match / silence
-         * timeouts where simply listening again is the right move.
+         * Recognizer error. [fatal] is true only for
+         * ERROR_INSUFFICIENT_PERMISSIONS; everything else is a
+         * pause-and-listen-again situation.
          */
-        fun onError(message: String, recoverable: Boolean)
+        fun onError(message: String, fatal: Boolean)
 
-        /** TTS finished (or failed) speaking one reply. */
-        fun onSpeakDone()
+        /** Every queued utterance finished (or speaking was stopped). */
+        fun onTtsQueueDrained()
 
-        /** TTS engine missing/unusable — caller should continue text-only. */
+        /** TTS engine missing/unusable — replies are text-only. */
         fun onTtsUnavailable()
     }
 
     private val appContext = context.applicationContext
     private val languageTag: String = sttLanguageTag(languageName)
     private val locale: Locale = Locale.forLanguageTag(languageTag)
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var recognizer: SpeechRecognizer? = null
 
@@ -62,6 +74,13 @@ class FallbackVoice(
 
     @Volatile
     private var destroyed = false
+
+    private val pendingUtterances = AtomicInteger(0)
+    private val utteranceSeq = AtomicInteger(0)
+
+    init {
+        ensureTts()
+    }
 
     fun isRecognitionAvailable(): Boolean =
         SpeechRecognizer.isRecognitionAvailable(appContext)
@@ -80,19 +99,22 @@ class FallbackVoice(
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
             override fun onPartialResults(partialResults: Bundle?) {
-                firstResult(partialResults)?.let { listener.onPartial(it) }
+                firstResult(partialResults)?.let { listener.onPartialResult(it) }
             }
             override fun onEvent(eventType: Int, params: Bundle?) {}
             override fun onResults(results: Bundle?) {
                 val text = firstResult(results)
                 if (text.isNullOrBlank()) {
-                    listener.onError("Didn't catch that", recoverable = true)
+                    listener.onError("Didn't catch that", fatal = false)
                 } else {
-                    listener.onResult(text)
+                    listener.onFinalResult(text)
                 }
             }
             override fun onError(error: Int) {
-                listener.onError(describeError(error), isRecoverableError(error))
+                listener.onError(
+                    describeError(error),
+                    fatal = error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS
+                )
             }
         })
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -105,11 +127,14 @@ class FallbackVoice(
             putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            // Online recognition preferred: the on-device pack mishears
+            // names ("Hey Jarvis" → "Hey, James") far more often.
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
         }
         try {
             rec.startListening(intent)
         } catch (e: Exception) {
-            listener.onError("Speech recognition failed to start", recoverable = false)
+            listener.onError("Speech recognition failed to start", fatal = false)
         }
     }
 
@@ -128,14 +153,6 @@ class FallbackVoice(
             ?.trim()
             ?.takeIf { it.isNotBlank() }
 
-    private fun isRecoverableError(error: Int): Boolean = when (error) {
-        SpeechRecognizer.ERROR_NO_MATCH,
-        SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
-        SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
-        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> true
-        else -> false
-    }
-
     private fun describeError(error: Int): String = when (error) {
         SpeechRecognizer.ERROR_NO_MATCH -> "Didn't catch that"
         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Didn't hear anything"
@@ -150,49 +167,69 @@ class FallbackVoice(
         else -> "Speech recognition error ($error)"
     }
 
-    // ── Text-to-speech ─────────────────────────────────────────────────
+    // ── Text-to-speech (sentence queue) ────────────────────────────────
 
-    /** Lazily creates the TTS engine. Safe to call before every speak. */
     private fun ensureTts() {
         if (tts != null || destroyed) return
         tts = TextToSpeech(appContext) { status ->
+            if (destroyed) return@TextToSpeech
             if (status == TextToSpeech.SUCCESS) {
                 runCatching { tts?.setLanguage(locale) }
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {}
-                    override fun onDone(utteranceId: String?) = listener.onSpeakDone()
+                    override fun onDone(utteranceId: String?) = utteranceFinished()
                     @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String?) = listener.onSpeakDone()
+                    override fun onError(utteranceId: String?) = utteranceFinished()
                     override fun onError(utteranceId: String?, errorCode: Int) =
-                        listener.onSpeakDone()
+                        utteranceFinished()
                 })
                 ttsReady = true
             } else {
                 ttsReady = false
-                listener.onTtsUnavailable()
+                mainHandler.post { if (!destroyed) listener.onTtsUnavailable() }
             }
         }
     }
 
-    /**
-     * Speak [text]; [Listener.onSpeakDone] fires when finished. If the
-     * engine never becomes ready, onTtsUnavailable fires instead.
-     */
-    fun speak(text: String) {
-        ensureTts()
-        val engine = tts
-        if (engine == null || !ttsReady) {
-            // Engine still initializing (first call) or failed: treat this
-            // reply as text-only rather than stalling the loop forever.
-            if (engine == null) listener.onTtsUnavailable() else listener.onSpeakDone()
-            return
+    private fun utteranceFinished() {
+        val remaining = pendingUtterances.decrementAndGet()
+        if (remaining <= 0) {
+            pendingUtterances.set(0)
+            mainHandler.post { if (!destroyed) listener.onTtsQueueDrained() }
         }
-        val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
-        if (result == TextToSpeech.ERROR) listener.onSpeakDone()
     }
 
+    /**
+     * Queue one completed sentence (QUEUE_ADD) — speech starts at the
+     * first sentence boundary while the rest of the reply still streams.
+     * If TTS is unusable the sentence is skipped and the drained signal
+     * fires so the conversation loop never stalls.
+     */
+    fun speakSentence(sentence: String) {
+        val text = sentence.trim()
+        if (text.isBlank() || destroyed) return
+        ensureTts()
+        val engine = tts
+        if (engine == null) {
+            mainHandler.post { if (!destroyed) listener.onTtsUnavailable() }
+            return
+        }
+        if (!ttsReady) {
+            // Still initialising: don't stall the loop on this sentence.
+            mainHandler.post { if (!destroyed) listener.onTtsQueueDrained() }
+            return
+        }
+        val id = "universal-${utteranceSeq.incrementAndGet()}"
+        pendingUtterances.incrementAndGet()
+        val result = engine.speak(text, TextToSpeech.QUEUE_ADD, null, id)
+        if (result == TextToSpeech.ERROR) utteranceFinished()
+    }
+
+    /** Barge-in: stop speaking now and report the queue as drained. */
     fun stopSpeaking() {
         runCatching { tts?.stop() }
+        pendingUtterances.set(0)
+        mainHandler.post { if (!destroyed) listener.onTtsQueueDrained() }
     }
 
     fun shutdown() {
@@ -201,6 +238,7 @@ class FallbackVoice(
         val engine = tts
         tts = null
         ttsReady = false
+        pendingUtterances.set(0)
         if (engine != null) {
             runCatching { engine.stop() }
             runCatching { engine.shutdown() }
@@ -208,15 +246,12 @@ class FallbackVoice(
     }
 
     companion object {
-        private const val UTTERANCE_ID = "jarvis-fallback-reply"
-
         /**
-         * Maps the app's 12 language names (Settings) to BCP-47 tags for
-         * speech recognition. India variants are the default — the user's
-         * accent and names are Indian, and recognising en-US against them
-         * was a top cause of misheard commands. Bhojpuri has no widely
-         * deployed recognizer, so Hindi (its closest) is used; "Auto"
-         * also lands on en-IN.
+         * App language name → BCP-47 tag for speech recognition. India
+         * variants are the default — the user's accent and names are
+         * Indian, and recognising en-US against them was a top cause of
+         * misheard commands. Bhojpuri has no widely deployed recognizer,
+         * so Hindi (its closest) is used; "Auto" also lands on en-IN.
          */
         fun sttLanguageTag(language: String): String = when (language) {
             "Hindi", "Hinglish", "Bhojpuri" -> "hi-IN"
@@ -233,9 +268,17 @@ class FallbackVoice(
         /**
          * Language code for the Gemini Live speech_config, or null when
          * the selection shouldn't pin one ("Auto", "Hinglish").
+         *
+         * F2 fix: English maps to "en-US" — the native-audio Live models
+         * reject "en-IN" outright ("Unsupported language code 'en-IN'
+         * for model models/gemini-2.5-flash-native-audio-preview-…"),
+         * which killed the session in the user's QA. The Indian locales
+         * below are the ones those models accept.
          */
         fun liveLanguageCode(language: String): String? = when (language) {
             "Auto", "Hinglish" -> null
+            "English" -> "en-US"
+            "Hindi", "Bhojpuri" -> "hi-IN"
             else -> sttLanguageTag(language)
         }
     }

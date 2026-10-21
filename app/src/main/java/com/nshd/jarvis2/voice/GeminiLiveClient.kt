@@ -43,7 +43,7 @@ class GeminiLiveClient(
     private val resumptionHandle: String?,
     private val toolDeclarations: JSONArray? = null,
     /** BCP-47 code for speech_config.language_code; null = let Live decide. */
-    private val languageCode: String? = null,
+    languageCode: String? = null,
     private val listener: Listener
 ) {
     interface Listener {
@@ -103,6 +103,22 @@ class GeminiLiveClient(
     @Volatile
     private var closedByUser = false
 
+    /**
+     * The language code actually sent in the setup. The native-audio
+     * models reject some locales outright ("Unsupported language code
+     * 'en-IN'…") — when that happens the client retries ONCE with the
+     * code omitted (see [retryWithoutLanguage]) before giving up.
+     */
+    @Volatile
+    private var currentLanguageCode: String? = languageCode
+
+    @Volatile
+    private var languageRetried = false
+
+    /** Incremented per connect(); stale sockets' callbacks are ignored. */
+    @Volatile
+    private var connectionGeneration = 0
+
     fun connect() {
         if (apiKey.isBlank()) {
             listener.onFailure("Gemini API key is missing. Please configure it in Settings.")
@@ -110,9 +126,28 @@ class GeminiLiveClient(
         }
         closedByUser = false
         setupComplete = false
+        val gen = ++connectionGeneration
         val request = Request.Builder().url("$WS_BASE_URL?key=$apiKey").build()
-        webSocket = httpClient.newWebSocket(request, SocketListener())
+        webSocket = httpClient.newWebSocket(request, SocketListener(gen))
     }
+
+    /**
+     * Reconnect with NO language_code in the setup. The old socket is
+     * closed quietly — its callbacks carry a stale generation and are
+     * dropped by [SocketListener].
+     */
+    private fun retryWithoutLanguage() {
+        if (languageRetried || currentLanguageCode == null) return
+        languageRetried = true
+        currentLanguageCode = null
+        val old = webSocket
+        webSocket = null
+        runCatching { old?.close(1000, "Retrying without language code") }
+        connect()
+    }
+
+    private fun isLanguageError(text: String?): Boolean =
+        !text.isNullOrBlank() && text.contains("language", ignoreCase = true)
 
     /** Stream one mic chunk (16 kHz mono PCM16). No-ops until setup completes. */
     fun sendAudioChunk(pcm: ByteArray) {
@@ -194,8 +229,8 @@ class GeminiLiveClient(
         // unpinned Live sessions drift to US English and mishear Indian
         // names/accents. Accepted by the Live API; ignored harmlessly
         // by revisions that don't support it.
-        if (!languageCode.isNullOrBlank()) {
-            speechConfig.put("language_code", languageCode)
+        if (!currentLanguageCode.isNullOrBlank()) {
+            speechConfig.put("language_code", currentLanguageCode)
         }
         val generationConfig = JSONObject()
             .put("response_modalities", JSONArray().put("AUDIO"))
@@ -268,7 +303,19 @@ class GeminiLiveClient(
 
         root.optJSONObject("error")?.let { error ->
             val message = error.optString("message")
-            if (message.isNotBlank()) listener.onError(message)
+            if (message.isNotBlank()) {
+                // Unsupported-language setup rejection: retry once with
+                // the language code omitted instead of surfacing a dead
+                // session (F2). Only pre-setup — a mid-session language
+                // error is reported normally.
+                if (!setupComplete && isLanguageError(message) &&
+                    currentLanguageCode != null && !languageRetried
+                ) {
+                    retryWithoutLanguage()
+                    return
+                }
+                listener.onError(message)
+            }
         }
 
         dispatchToolCalls(root.optJSONObject("toolCall"))
@@ -346,23 +393,36 @@ class GeminiLiveClient(
         }
     }
 
-    private inner class SocketListener : WebSocketListener() {
+    private inner class SocketListener(private val gen: Int) : WebSocketListener() {
+        private val stale: Boolean get() = gen != connectionGeneration
+
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            if (stale) return
             webSocket.send(buildSetupJson())
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            if (stale) return
             handleMessage(text)
         }
 
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            if (stale) return
             // The Live API speaks JSON text frames; tolerate binary-wrapped JSON too.
             handleMessage(bytes.utf8())
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            if (closedByUser) return
+            if (closedByUser || stale) return
             val detail = t.message ?: response?.let { "HTTP ${it.code}" } ?: "unknown error"
+            // Some revisions deliver the language rejection as a socket
+            // failure instead of an error object — same one-time retry.
+            if (!setupComplete && isLanguageError(detail) &&
+                currentLanguageCode != null && !languageRetried
+            ) {
+                retryWithoutLanguage()
+                return
+            }
             listener.onFailure("Live connection failed: $detail")
         }
 
@@ -371,7 +431,13 @@ class GeminiLiveClient(
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            if (closedByUser) return
+            if (closedByUser || stale) return
+            if (!setupComplete && isLanguageError(reason) &&
+                currentLanguageCode != null && !languageRetried
+            ) {
+                retryWithoutLanguage()
+                return
+            }
             listener.onClosed(reason.ifBlank { "Session closed (code $code)" })
         }
     }

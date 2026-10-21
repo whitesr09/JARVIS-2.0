@@ -21,9 +21,11 @@ import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -36,6 +38,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +53,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.nshd.jarvis2.JarvisSettings
+import com.nshd.jarvis2.brain.ModelDiscovery
 import com.nshd.jarvis2.brain.ProviderConfig
 import com.nshd.jarvis2.brain.ProviderPresets
 import com.nshd.jarvis2.brain.ProviderStore
@@ -62,9 +67,17 @@ import kotlinx.coroutines.withContext
  * Level 2: real API & Connection screen. Per-provider base URL / key /
  * models, persisted encrypted; an active provider (tried first) with
  * automatic failover to the next configured provider.
+ *
+ * F2 adds live model discovery: "Fetch available models" lists what the
+ * provider actually offers (native-audio models badged LIVE AUDIO) so
+ * chat/Live models can be picked instead of typed from memory.
  */
 @Composable
-fun ApiConnectionScreen(onBack: () -> Unit) {
+fun ApiConnectionScreen(
+    settings: JarvisSettings? = null,
+    onSettingsChange: (JarvisSettings) -> Unit = {},
+    onBack: () -> Unit
+) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val store = remember { ProviderStore(context) }
@@ -78,6 +91,34 @@ fun ApiConnectionScreen(onBack: () -> Unit) {
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<TestResult?>(null) }
     var refreshTick by remember { mutableStateOf(0) } // re-read "key set" dots after save
+
+    // ── Model discovery (F2) ───────────────────────────────────────────
+    var fetchingModels by remember { mutableStateOf(false) }
+    var modelsError by remember { mutableStateOf<String?>(null) }
+    var modelsDialog by remember { mutableStateOf<List<ModelDiscovery.ModelInfo>?>(null) }
+
+    fun fetchModels(openDialogWhenDone: Boolean) {
+        if (fetchingModels) return
+        fetchingModels = true
+        modelsError = null
+        val toFetch = config
+        val targetId = editId
+        scope.launch {
+            val result = ModelDiscovery.fetchModels(toFetch)
+            fetchingModels = false
+            result.fold(
+                onSuccess = { models ->
+                    store.saveModelIds(targetId, models.map { it.id })
+                    refreshTick++
+                    if (openDialogWhenDone) modelsDialog = models
+                },
+                onFailure = { error ->
+                    modelsError = "Couldn't fetch models — check key/connection. " +
+                        (error.message ?: "")
+                }
+            )
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
@@ -254,6 +295,47 @@ fun ApiConnectionScreen(onBack: () -> Unit) {
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    // Model discovery: list what this provider actually
+                    // offers instead of typing model ids from memory.
+                    // A cached list opens the picker instantly while a
+                    // fresh fetch runs in the background.
+                    val cachedModels = remember(editId, refreshTick) {
+                        store.cachedModelIds(editId).map { ModelDiscovery.info(it) }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (cachedModels.isNotEmpty()) {
+                                modelsDialog = cachedModels
+                                fetchModels(openDialogWhenDone = false)
+                            } else {
+                                fetchModels(openDialogWhenDone = true)
+                            }
+                        },
+                        enabled = !fetchingModels,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (fetchingModels) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+                        Text(
+                            when {
+                                fetchingModels -> "Fetching models…"
+                                cachedModels.isNotEmpty() ->
+                                    "Available models (${cachedModels.size})"
+                                else -> "Fetch available models"
+                            }
+                        )
+                    }
+                    if (modelsError != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = modelsError!!,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                     Spacer(modifier = Modifier.height(14.dp))
                     Row {
                         Button(
@@ -331,9 +413,73 @@ fun ApiConnectionScreen(onBack: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(120.dp))
         }
 
         SnackbarHost(hostState = snackbar, modifier = Modifier.padding(12.dp))
+    }
+
+    // ── Model picker dialog ────────────────────────────────────────────
+    val dialogModels = modelsDialog
+    if (dialogModels != null) {
+        AlertDialog(
+            onDismissRequest = { modelsDialog = null },
+            title = { Text("Available models — ${ProviderPresets.byId(editId).label}") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = "Tap a model to use it as the chat model. " +
+                            "LIVE AUDIO models can also power Native Live voice.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    dialogModels.forEach { model ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val isNative = model.kind ==
+                                        ModelDiscovery.Kind.NATIVE_AUDIO
+                                    config = config.copy(chatModel = model.id)
+                                    var note = "Chat model: ${model.id} — tap Save"
+                                    if (isNative && editId == ProviderPresets.GEMINI.id &&
+                                        settings != null
+                                    ) {
+                                        onSettingsChange(settings.copy(liveModel = model.id))
+                                        note = "Chat + Live model set: ${model.id}"
+                                    }
+                                    modelsDialog = null
+                                    scope.launch { snackbar.showSnackbar(note) }
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = model.id,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (model.kind == ModelDiscovery.Kind.NATIVE_AUDIO) {
+                                JarvisPill(text = "LIVE AUDIO", tone = PillTone.PRIMARY)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { modelsDialog = null }) { Text("Close") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { fetchModels(openDialogWhenDone = true) },
+                    enabled = !fetchingModels
+                ) { Text(if (fetchingModels) "Fetching…" else "Re-fetch") }
+            }
+        )
     }
 }

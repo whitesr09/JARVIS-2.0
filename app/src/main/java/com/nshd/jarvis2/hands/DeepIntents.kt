@@ -197,34 +197,87 @@ class DeepIntents(context: Context) {
         return openAppByLabel(name)
     }
 
+    /**
+     * Launcher-label search with layered matching (F2 — on Android 11+
+     * this only sees launcher apps because the manifest declares the
+     * MAIN/LAUNCHER <queries> intent):
+     *
+     *   exact label → package contains → label contains → token overlap
+     *
+     * Exactly one strong candidate launches. A tie at the top score
+     * returns the candidate names so the agent can ask which one —
+     * guessing between two real apps is how the wrong app opens.
+     */
     private fun openAppByLabel(name: String): ActionResult {
         val wanted = normalizeAppName(name)
+        if (wanted.isBlank()) return ActionResult(false, "No installed app matched \"$name\".")
         val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val activities = try {
             appContext.packageManager.queryIntentActivities(launcherIntent, 0)
         } catch (e: Exception) {
             emptyList()
         }
-        val matches = activities.mapNotNull { info ->
+        val wantedTokens = tokenize(name)
+        data class Candidate(val score: Int, val label: String, val packageName: String, val activity: String)
+
+        val candidates = activities.mapNotNull { info ->
+            val activityInfo = info.activityInfo ?: return@mapNotNull null
             val label = info.loadLabel(appContext.packageManager)?.toString().orEmpty()
-            val normalized = normalizeAppName(label)
+            val normalizedLabel = normalizeAppName(label)
+            val normalizedPackage = normalizeAppName(activityInfo.packageName)
+            val labelTokens = tokenize(label)
+            val overlap = if (wantedTokens.isEmpty() || labelTokens.isEmpty()) {
+                0
+            } else {
+                val shared = wantedTokens.count { token -> labelTokens.any { it == token } }
+                shared * 50 / maxOf(wantedTokens.size, labelTokens.size)
+            }
             val score = when {
-                normalized == wanted -> 100
-                normalized.startsWith(wanted) -> 80
-                normalized.contains(wanted) -> 60
+                normalizedLabel == wanted -> 100
+                normalizedPackage.contains(wanted) -> 90
+                normalizedLabel.startsWith(wanted) -> 80
+                normalizedLabel.contains(wanted) -> 70
+                wanted.contains(normalizedLabel) && normalizedLabel.length >= 3 -> 60
+                overlap >= 25 -> overlap
                 else -> -1
             }
-            if (score >= 0) Triple(score, label, info.activityInfo) else null
-        }.sortedByDescending { it.first }
-        val best = matches.firstOrNull()
+            if (score >= 0) {
+                Candidate(score, label, activityInfo.packageName, activityInfo.name)
+            } else {
+                null
+            }
+        }
+            // One candidate per package: launcher aliases of the same
+            // app must not fake a "tie".
+            .groupBy { it.packageName }
+            .values
+            .map { group -> group.maxByOrNull { it.score }!! }
+            .sortedByDescending { it.score }
+
+        val best = candidates.firstOrNull()
             ?: return ActionResult(false, "No installed app matched \"$name\".")
-        val component = ComponentName(best.third.packageName, best.third.name)
+        val tied = candidates.filter { it.score == best.score }
+        if (tied.size > 1) {
+            val names = tied.take(4).joinToString(", ") { it.label }
+            return ActionResult(
+                false,
+                "Several installed apps match \"$name\": $names. Ask the user which one to open."
+            )
+        }
+        val component = ComponentName(best.packageName, best.activity)
         val intent = Intent(Intent.ACTION_MAIN)
             .addCategory(Intent.CATEGORY_LAUNCHER)
             .setComponent(component)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        return resultForLaunch(intent, best.second)
+        return resultForLaunch(intent, best.label)
     }
+
+    /** Splits a display name into lowercase alphanumeric word tokens. */
+    private fun tokenize(text: String): Set<String> =
+        text.lowercase()
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.length >= 2 }
+            .toSet()
 
     // ── Calling ────────────────────────────────────────────────────────
 

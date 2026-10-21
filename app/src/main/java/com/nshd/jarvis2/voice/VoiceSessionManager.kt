@@ -6,6 +6,8 @@ import com.nshd.jarvis2.brain.AgentPipeline
 import com.nshd.jarvis2.brain.PersonaPrompts
 import com.nshd.jarvis2.brain.ProviderPresets
 import com.nshd.jarvis2.brain.ProviderStore
+import com.nshd.jarvis2.brain.ToolEvent
+import com.nshd.jarvis2.brain.ToolEventKind
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
@@ -24,41 +26,61 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class VoiceMode { NONE, LIVE, FALLBACK }
+enum class VoiceMode { NONE, LIVE, UNIVERSAL }
 
 enum class VoiceStatus {
-    IDLE, CONNECTING, LISTENING, SPEAKING, THINKING, FALLBACK_ACTIVE, ERROR
+    IDLE, CONNECTING, LISTENING, SPEAKING, THINKING, UNIVERSAL_ACTIVE, ERROR
 }
 
-data class VoiceCaption(val fromUser: Boolean, val text: String)
+/** Which engine the user's Voice Engine setting asks for (F2). */
+enum class VoiceEngine { AUTO, NATIVE, UNIVERSAL }
+
+enum class CaptionKind { USER, ASSISTANT, TOOL, SYSTEM }
+
+data class VoiceCaption(
+    val fromUser: Boolean,
+    val text: String,
+    val kind: CaptionKind = if (fromUser) CaptionKind.USER else CaptionKind.ASSISTANT,
+    /** Still streaming in (partial STT / growing reply) — rendered dimmed. */
+    val partial: Boolean = false
+)
 
 data class VoiceUiState(
     val status: VoiceStatus = VoiceStatus.IDLE,
     val mode: VoiceMode = VoiceMode.NONE,
     val voiceName: String = "",
     val liveModel: String = "",
+    /** Mode-badge text: "LIVE • Kore" / "UNIVERSAL • <chat model>". */
+    val engineLabel: String = "",
     val micMuted: Boolean = false,
     val notice: String? = null,
     val errorMessage: String? = null
 )
 
 /**
- * App-level voice session owner for Level 3. Two paths:
+ * App-level voice session owner. Two engines (F2):
  *
- *  - LIVE (Gemini key configured): GeminiLiveClient WebSocket + 16 kHz
- *    capture uplink + 24 kHz playback, server VAD turn-taking, barge-in
- *    flush, session-resumption handles persisted across the ~10 min
- *    server limit (goAway → reconnect with handle).
- *  - FALLBACK (no Gemini key): SpeechRecognizer → AgentPipeline (the
- *    same local/quick-command/tool pipeline as Chat) → TextToSpeech,
- *    looped until the user ends the session.
+ *  - NATIVE LIVE (Gemini key + a native-audio Live model):
+ *    GeminiLiveClient WebSocket + 16 kHz capture uplink + 24 kHz
+ *    playback, server VAD turn-taking, barge-in flush, session
+ *    resumption across the ~10 min server limit. If setup/connection
+ *    fails, the session auto-switches to Universal in the same tap —
+ *    the user never lands on a dead error screen while Universal runs.
+ *  - UNIVERSAL (works with ANY provider/model): SpeechRecognizer with
+ *    partial results → AgentPipeline (the Chat pipeline) with streamed
+ *    deltas → sentence-buffered TTS, so the first audio starts at the
+ *    first sentence boundary. Listen → think → speak → listen until
+ *    the user ends the session.
  *
- * Finished turns on both paths are persisted into MemoryDb chat history,
- * so voice conversations show up in the Chat tab. In Silent Execution
- * mode nothing is spoken — a subtle chime marks each finished turn.
+ * Engine choice: JarvisSettings.voiceEngine — AUTO picks Native Live
+ * only when the active provider is Gemini, the configured Live model
+ * looks native-audio capable, and a Gemini key is set; NATIVE forces
+ * Live (with the Universal safety net); UNIVERSAL forces Universal.
  *
- * All state is exposed as StateFlows; safe to touch from the OkHttp WS
- * thread, the recognizer callbacks and the UI alike.
+ * Finished turns on both paths are persisted into MemoryDb chat
+ * history. Tool activity renders as status chips (CaptionKind.TOOL),
+ * never as raw result text. In Silent Execution mode nothing is
+ * spoken — a subtle chime marks each finished turn.
  */
 object VoiceSessionManager {
 
@@ -85,10 +107,10 @@ object VoiceSessionManager {
     private var client: GeminiLiveClient? = null
     private var capture: AudioCapture? = null
     private var player: AudioPlayer? = null
-    private var fallback: FallbackVoice? = null
+    private var universal: UniversalVoice? = null
     private var chime: ChimePlayer? = null
 
-    // Live turn accumulation (transcripts arrive incrementally).
+    // Turn accumulation (transcripts / streamed replies arrive incrementally).
     private val userTurn = StringBuilder()
     private val assistantTurn = StringBuilder()
     private var userCaptionIndex = -1
@@ -99,6 +121,21 @@ object VoiceSessionManager {
 
     @Volatile
     private var reconnecting = false
+
+    /** Set once a failed Live attempt has fallen back to Universal. */
+    @Volatile
+    private var liveSwitchedToUniversal = false
+
+    // Universal-turn bookkeeping: listening resumes only when BOTH the
+    // pipeline has returned AND the TTS queue has drained.
+    @Volatile
+    private var pipelineRunning = false
+
+    @Volatile
+    private var pipelineDone = true
+
+    @Volatile
+    private var ttsSpeaking = false
 
     private var pulseJob: Job? = null
 
@@ -123,17 +160,33 @@ object VoiceSessionManager {
         this.chime = ChimePlayer()
         active = true
         reconnectAttempts = 0
+        liveSwitchedToUniversal = false
+        pipelineRunning = false
+        pipelineDone = true
+        ttsSpeaking = false
         _captions.value = emptyList()
         // Mic arbitration (Level 6): the wake-word service releases the
         // microphone while a voice session owns it, and resumes after.
         runCatching { WakeWordControl.setSessionActive(true) }
 
         val gemini = providerStore.loadConfig(ProviderPresets.GEMINI.id)
-        if (gemini.apiKey.isNotBlank()) {
-            startLive()
-        } else {
-            startFallback()
+        val liveModelLooksNative = settings.liveModel.contains("live", ignoreCase = true) ||
+            settings.liveModel.contains("native-audio", ignoreCase = true)
+        when (parseEngine(settings.voiceEngine)) {
+            VoiceEngine.UNIVERSAL -> startUniversal()
+            VoiceEngine.NATIVE -> startLive()
+            VoiceEngine.AUTO -> {
+                val nativeOk = providerStore.activeProviderId() == ProviderPresets.GEMINI.id &&
+                    gemini.apiKey.isNotBlank() && liveModelLooksNative
+                if (nativeOk) startLive() else startUniversal()
+            }
         }
+    }
+
+    private fun parseEngine(raw: String): VoiceEngine = try {
+        VoiceEngine.valueOf(raw.uppercase())
+    } catch (e: IllegalArgumentException) {
+        VoiceEngine.AUTO
     }
 
     /** Rebuild the session with the same inputs (error-screen retry). */
@@ -153,10 +206,17 @@ object VoiceSessionManager {
     fun setMicMuted(muted: Boolean) {
         _uiState.value = _uiState.value.copy(micMuted = muted)
         if (muted) _amplitude.value = 0f
-        val fb = fallback
-        if (fb != null) {
-            // The recognizer IS the mic on the fallback path.
-            if (muted) fb.stopListening() else if (active) fb.startListening()
+        val uv = universal
+        if (uv != null) {
+            // On the Universal path the recognizer IS the mic, and the
+            // mic button doubles as TTS barge-in: muting stops both
+            // listening and speaking.
+            if (muted) {
+                uv.stopListening()
+                uv.stopSpeaking()
+            } else if (active) {
+                maybeResumeUniversalListening()
+            }
         }
     }
 
@@ -164,16 +224,11 @@ object VoiceSessionManager {
         active = false
         pulseJob?.cancel()
         pulseJob = null
-        shareJob?.cancel()
-        shareJob = null
-        capture?.stop()
-        capture = null
-        client?.close()
-        client = null
-        player?.stop()
-        player = null
-        fallback?.shutdown()
-        fallback = null
+        teardownLive()
+        universal?.shutdown()
+        universal = null
+        pipelineRunning = false
+        ttsSpeaking = false
         userTurn.setLength(0)
         assistantTurn.setLength(0)
         userCaptionIndex = -1
@@ -182,12 +237,8 @@ object VoiceSessionManager {
         if (resetUi) _uiState.value = VoiceUiState()
     }
 
-    private fun setStatus(status: VoiceStatus) {
-        _uiState.value = _uiState.value.copy(status = status)
-    }
-
-    private fun fail(message: String) {
-        pulseJob?.cancel()
+    /** Stops only the Live pieces (used by stop and by the Universal switch). */
+    private fun teardownLive() {
         shareJob?.cancel()
         shareJob = null
         capture?.stop()
@@ -196,8 +247,17 @@ object VoiceSessionManager {
         client = null
         player?.stop()
         player = null
-        fallback?.shutdown()
-        fallback = null
+    }
+
+    private fun setStatus(status: VoiceStatus) {
+        _uiState.value = _uiState.value.copy(status = status)
+    }
+
+    private fun fail(message: String) {
+        pulseJob?.cancel()
+        teardownLive()
+        universal?.shutdown()
+        universal = null
         active = false
         runCatching { WakeWordControl.setSessionActive(false) }
         _amplitude.value = 0f
@@ -222,6 +282,7 @@ object VoiceSessionManager {
             mode = VoiceMode.LIVE,
             voiceName = voice,
             liveModel = s.liveModel,
+            engineLabel = "LIVE • $voice",
             micMuted = _uiState.value.micMuted
         )
 
@@ -249,12 +310,15 @@ object VoiceSessionManager {
                 systemPrompt = prompt,
                 resumptionHandle = handle,
                 toolDeclarations = ToolRegistry.liveFunctionDeclarations(),
-                languageCode = FallbackVoice.liveLanguageCode(s.language),
+                languageCode = UniversalVoice.liveLanguageCode(s.language),
                 listener = LiveListener()
             )
             client = liveClient
             liveClient.connect()
-            startShareForwarder()
+            // connect() can fail synchronously (blank key) and switch
+            // the session to Universal — only forward frames if the
+            // session is still on the Live engine.
+            if (_uiState.value.mode == VoiceMode.LIVE) startShareForwarder()
         }
     }
 
@@ -280,6 +344,33 @@ object VoiceSessionManager {
                 }
                 delay(1000)
             }
+        }
+    }
+
+    /**
+     * Native Live died (setup rejected, socket failure, dead close).
+     * First time: tear the Live pieces down and continue the SAME
+     * session on the Universal engine with a system note — never a dead
+     * error screen. Second failure (or Universal itself failing) is a
+     * real error.
+     */
+    private fun handleLiveFailure(message: String) {
+        if (!active || reconnecting) return
+        if (!liveSwitchedToUniversal && settings != null) {
+            liveSwitchedToUniversal = true
+            teardownLive()
+            pulseJob?.cancel()
+            _amplitude.value = 0f
+            addCaption(
+                VoiceCaption(
+                    fromUser = false,
+                    text = "Native Live unavailable — switched to Universal (works with any model)",
+                    kind = CaptionKind.SYSTEM
+                )
+            )
+            startUniversal()
+        } else {
+            fail(message)
         }
     }
 
@@ -312,13 +403,13 @@ object VoiceSessionManager {
         override fun onUserTranscript(text: String) {
             if (!active) return
             synchronized(userTurn) { userTurn.append(text) }
-            setTurnCaption(fromUser = true, text = userTurn.toString())
+            setTurnCaption(fromUser = true, text = userTurn.toString(), partial = true)
         }
 
         override fun onAssistantTranscript(text: String) {
             if (!active) return
             synchronized(assistantTurn) { assistantTurn.append(text) }
-            setTurnCaption(fromUser = false, text = assistantTurn.toString())
+            setTurnCaption(fromUser = false, text = assistantTurn.toString(), partial = true)
             setStatus(VoiceStatus.SPEAKING)
         }
 
@@ -378,12 +469,12 @@ object VoiceSessionManager {
 
         override fun onFailure(message: String) {
             if (!active || reconnecting) return
-            fail(message)
+            handleLiveFailure(message)
         }
 
         override fun onClosed(reason: String) {
             if (!active || reconnecting) return
-            fail(reason)
+            handleLiveFailure(reason)
         }
 
         override fun onToolCall(id: String, name: String, args: JSONObject) {
@@ -400,11 +491,18 @@ object VoiceSessionManager {
                     )
                 }
                 if (active) {
+                    // Status chip only — the raw result goes back to the
+                    // model, never into the caption text (F2).
+                    val event = ToolEvent(
+                        kind = if (result.success) ToolEventKind.SUCCESS else ToolEventKind.FAILURE,
+                        toolName = name,
+                        message = result.message
+                    )
                     addCaption(
                         VoiceCaption(
                             fromUser = false,
-                            text = "${if (result.success) "✅" else "❌"} $name: " +
-                                result.message.lineSequence().firstOrNull().orEmpty()
+                            text = event.chipText,
+                            kind = CaptionKind.TOOL
                         )
                     )
                     val response = JSONObject()
@@ -417,6 +515,7 @@ object VoiceSessionManager {
     }
 
     private fun finalizeLiveTurn() {
+        markTurnCaptionsFinal()
         val userText = synchronized(userTurn) { userTurn.toString().trim() }
         val assistantText = synchronized(assistantTurn) { assistantTurn.toString().trim() }
         synchronized(userTurn) { userTurn.setLength(0) }
@@ -431,44 +530,60 @@ object VoiceSessionManager {
         }
     }
 
-    // ── FALLBACK path ──────────────────────────────────────────────────
+    // ── UNIVERSAL path ─────────────────────────────────────────────────
 
-    private fun startFallback() {
+    private fun startUniversal() {
         val s = settings ?: return
+        val store = providerStore ?: return
+        teardownLive()
+        val activeConfig = store.orderedConfigs().firstOrNull()
+        val modelShort = shortModelName(
+            activeConfig?.chatModel?.takeIf { it.isNotBlank() }
+                ?: activeConfig?.reasoningModel
+                ?: ""
+        )
         _uiState.value = VoiceUiState(
             status = VoiceStatus.CONNECTING,
-            mode = VoiceMode.FALLBACK,
-            voiceName = "Device TTS",
+            mode = VoiceMode.UNIVERSAL,
+            voiceName = modelShort,
             liveModel = "",
+            engineLabel = "UNIVERSAL • $modelShort",
             micMuted = _uiState.value.micMuted
         )
-        val fb = FallbackVoice(appContext ?: return, s.language, FallbackListener())
-        fallback = fb
-        if (!fb.isRecognitionAvailable()) {
+        val uv = UniversalVoice(appContext ?: return, s.language, UniversalListener())
+        universal = uv
+        if (!uv.isRecognitionAvailable()) {
             fail(
-                "Speech recognition is not available on this device, and no " +
-                    "Gemini API key is configured for Live voice. Add a Gemini " +
-                    "key in Settings → API & Connection, or use text chat."
+                "Speech recognition is not available on this device. " +
+                    "Use text chat, or add a Gemini API key in Settings → " +
+                    "API & Connection for Native Live voice."
             )
             return
         }
-        setStatus(VoiceStatus.FALLBACK_ACTIVE)
-        fb.startListening()
+        pipelineDone = true
+        pipelineRunning = false
+        setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
+        if (!_uiState.value.micMuted) uv.startListening()
     }
 
-    private class FallbackListener : FallbackVoice.Listener {
-        override fun onResult(text: String) {
+    private fun shortModelName(model: String): String {
+        val short = model.substringAfterLast('/').trim()
+        if (short.isBlank()) return "chat model"
+        return if (short.length > 26) short.take(25) + "…" else short
+    }
+
+    private class UniversalListener : UniversalVoice.Listener {
+        override fun onPartialResult(text: String) {
             if (!active) return
-            // Finalize the (possibly partial) live caption, then close the turn.
-            setTurnCaption(fromUser = true, text = text)
-            userCaptionIndex = -1
-            setStatus(VoiceStatus.THINKING)
-            routeFallbackTurn(text)
+            setTurnCaption(fromUser = true, text = text, partial = true)
         }
 
-        override fun onPartial(text: String) {
+        override fun onFinalResult(text: String) {
             if (!active) return
-            setTurnCaption(fromUser = true, text = text)
+            setTurnCaption(fromUser = true, text = text, partial = false)
+            userCaptionIndex = -1
+            setStatus(VoiceStatus.THINKING)
+            routeUniversalTurn(text)
         }
 
         override fun onRms(rmsDb: Float) {
@@ -477,33 +592,32 @@ object VoiceSessionManager {
             _amplitude.value = ((rmsDb + 2f) / 12f).coerceIn(0f, 1f)
         }
 
-        override fun onError(message: String, recoverable: Boolean) {
+        override fun onError(message: String, fatal: Boolean) {
             if (!active) return
-            if (recoverable) {
-                _uiState.value = _uiState.value.copy(notice = message)
-                // One-shot recognizer ended (silence / no match) — the
-                // loop simply listens again after a short beat.
-                scope.launch {
-                    delay(450)
-                    if (active && _uiState.value.mode == VoiceMode.FALLBACK &&
-                        !_uiState.value.micMuted
-                    ) {
-                        setStatus(VoiceStatus.FALLBACK_ACTIVE)
-                        fallback?.startListening()
-                    }
-                }
-            } else {
+            if (fatal) {
                 fail(message)
+                return
+            }
+            _uiState.value = _uiState.value.copy(notice = message)
+            // One-shot recognizer ended (silence / no match / transient
+            // service error) — brief pause, then the loop listens again.
+            scope.launch {
+                delay(300)
+                if (active && _uiState.value.mode == VoiceMode.UNIVERSAL &&
+                    !_uiState.value.micMuted && !pipelineRunning
+                ) {
+                    setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
+                    universal?.startListening()
+                }
             }
         }
 
-        override fun onSpeakDone() {
+        override fun onTtsQueueDrained() {
             if (!active) return
+            ttsSpeaking = false
             pulseJob?.cancel()
             _amplitude.value = 0f
-            if (_uiState.value.micMuted) return
-            setStatus(VoiceStatus.FALLBACK_ACTIVE)
-            fallback?.startListening()
+            maybeResumeUniversalListening()
         }
 
         override fun onTtsUnavailable() {
@@ -512,19 +626,26 @@ object VoiceSessionManager {
                 notice = "Text-to-speech is unavailable on this device — replies are text-only."
             )
             // Behave like a finished speak so the loop continues.
-            onSpeakDone()
+            onTtsQueueDrained()
         }
     }
 
-    private fun routeFallbackTurn(userText: String) {
+    private fun routeUniversalTurn(userText: String) {
         val store = providerStore ?: return
         val s = settings ?: return
         val db = memoryDb ?: return
         val ctx = appContext ?: return
+        pipelineRunning = true
+        pipelineDone = false
+        ttsSpeaking = false
+        val silent = isSilent
+        val sentenceBuffer = StringBuilder()
+        var sawDelta = false
         scope.launch {
-            // Fallback voice now uses exactly the same pipeline as text
+            // Universal voice uses exactly the same pipeline as text
             // chat: local memory commands, deterministic quick commands
-            // (which work with no API key), then the tool agent loop.
+            // (which work with no API key), then the tool agent loop —
+            // now with streamed deltas for live captions + early TTS.
             val reply = try {
                 AgentPipeline.handleUserText(
                     context = ctx,
@@ -534,46 +655,148 @@ object VoiceSessionManager {
                     providerStore = store,
                     codeMode = false,
                     onEvent = { event ->
-                        addCaption(VoiceCaption(fromUser = false, text = event))
+                        addCaption(
+                            VoiceCaption(
+                                fromUser = false,
+                                text = event.chipText,
+                                kind = CaptionKind.TOOL
+                            )
+                        )
+                    },
+                    onAssistantDelta = { delta ->
+                        if (!active) return@handleUserText
+                        sawDelta = true
+                        synchronized(assistantTurn) { assistantTurn.append(delta) }
+                        setTurnCaption(
+                            fromUser = false,
+                            text = assistantTurn.toString(),
+                            partial = true
+                        )
+                        if (!silent) {
+                            // Deltas arrive on the streaming thread; the
+                            // buffer is only touched under its lock.
+                            val ready = synchronized(sentenceBuffer) {
+                                extractSentences(sentenceBuffer, delta)
+                            }
+                            ready.forEach { sentence -> speakUniversalSentence(sentence) }
+                        }
                     }
                 )
             } catch (e: Exception) {
                 "I hit a problem handling that: ${e.message ?: "unexpected error"}"
             }
+            pipelineRunning = false
+            pipelineDone = true
             if (!active) return@launch
             withContext(Dispatchers.IO) {
                 db.addMessage("user", userText)
                 db.addMessage("assistant", reply)
             }
-            addCaption(VoiceCaption(fromUser = false, text = reply))
-            if (reply.startsWith("I couldn't reach any provider") ||
-                reply.startsWith("I hit a problem")
-            ) {
-                chime?.playError()
-                resumeFallbackListening()
-            } else {
-                speakOrChime(reply)
+            // Finalize the assistant caption with the complete reply.
+            synchronized(assistantTurn) {
+                assistantTurn.setLength(0)
+                assistantTurn.append(reply)
+            }
+            setTurnCaption(fromUser = false, text = reply, partial = false)
+            assistantCaptionIndex = -1
+            synchronized(assistantTurn) { assistantTurn.setLength(0) }
+
+            val failed = reply.startsWith("I couldn't reach any provider") ||
+                reply.startsWith("I hit a problem") ||
+                reply.startsWith("Please configure your API Key")
+            when {
+                silent -> {
+                    if (failed) chime?.playError() else chime?.playSuccess()
+                    maybeResumeUniversalListening()
+                }
+                failed -> {
+                    chime?.playError()
+                    sentenceBuffer.setLength(0)
+                    maybeResumeUniversalListening()
+                }
+                else -> {
+                    // Non-streamed replies (quick commands, memory
+                    // commands) never produced deltas — run the full
+                    // reply through the sentence extractor now so it is
+                    // still spoken.
+                    if (!sawDelta) {
+                        extractSentences(sentenceBuffer, reply).forEach { sentence ->
+                            speakUniversalSentence(sentence)
+                        }
+                    }
+                    // Speak whatever partial sentence is left over, then
+                    // let the TTS-drain callback resume listening. If no
+                    // sentence was ever queued, resume right away.
+                    val rest = sentenceBuffer.toString().trim()
+                    sentenceBuffer.setLength(0)
+                    if (rest.isNotBlank()) speakUniversalSentence(rest)
+                    if (!ttsSpeaking) maybeResumeUniversalListening()
+                }
             }
         }
     }
 
-    private fun speakOrChime(reply: String) {
+    private fun speakUniversalSentence(sentence: String) {
         if (!active) return
-        if (isSilent) {
-            chime?.playSuccess()
-            resumeFallbackListening()
-        } else {
+        if (!ttsSpeaking) {
+            ttsSpeaking = true
             setStatus(VoiceStatus.SPEAKING)
             startSpeakingPulse()
-            fallback?.speak(reply)
         }
+        universal?.speakSentence(sentence)
     }
 
-    private fun resumeFallbackListening() {
+    /**
+     * Listening resumes only when the pipeline has finished AND the
+     * TTS queue has drained. Called from the drain callback and from
+     * turn-end/unmute paths where nothing was (or is still) spoken;
+     * while speech is in flight the drain callback owns the resume.
+     */
+    private fun maybeResumeUniversalListening() {
         if (!active) return
+        if (_uiState.value.mode != VoiceMode.UNIVERSAL) return
         if (_uiState.value.micMuted) return
-        setStatus(VoiceStatus.FALLBACK_ACTIVE)
-        fallback?.startListening()
+        if (pipelineRunning || !pipelineDone) return
+        if (ttsSpeaking) return // drain callback resumes when speech ends
+        setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
+        universal?.startListening()
+    }
+
+    /**
+     * Appends [delta] to [buffer] and cuts out every completed
+     * sentence, leaving the trailing partial sentence in the buffer.
+     * A sentence counts as complete at [.!?…] followed by whitespace;
+     * an over-long fragment is cut at a word boundary so one giant
+     * utterance never stalls the speech.
+     */
+    private fun extractSentences(buffer: StringBuilder, delta: String): List<String> {
+        buffer.append(delta)
+        val sentences = mutableListOf<String>()
+        while (true) {
+            val text = buffer.toString()
+            var cut = -1
+            var i = 0
+            while (i < text.length) {
+                val c = text[i]
+                if (c == '.' || c == '!' || c == '?' || c == '…') {
+                    if (i + 1 >= text.length) break // ender at buffer edge: wait for more
+                    if (text[i + 1] == ' ' || text[i + 1] == '\n') {
+                        cut = i + 1
+                        break
+                    }
+                }
+                i++
+            }
+            if (cut < 0 && text.length > 240) {
+                val space = text.lastIndexOf(' ', 240)
+                if (space > 40) cut = space
+            }
+            if (cut < 0) break
+            val sentence = text.substring(0, cut).trim()
+            buffer.delete(0, cut)
+            if (sentence.isNotBlank()) sentences += sentence
+        }
+        return sentences
     }
 
     /** TTS has no real amplitude — synthesize a gentle pulse for the orb. */
@@ -596,20 +819,39 @@ object VoiceSessionManager {
     }
 
     /**
-     * Live turns update their caption in place while transcripts stream;
-     * once a turn finalizes, the next caption starts a fresh entry.
+     * Live turns update their caption in place while transcripts/replies
+     * stream ([partial] = true); once a turn finalizes, the next caption
+     * starts a fresh entry.
      */
-    private fun setTurnCaption(fromUser: Boolean, text: String) {
+    private fun setTurnCaption(
+        fromUser: Boolean,
+        text: String,
+        partial: Boolean = false
+    ) {
         if (text.isBlank()) return
+        val kind = if (fromUser) CaptionKind.USER else CaptionKind.ASSISTANT
         val list = _captions.value.toMutableList()
         val index = if (fromUser) userCaptionIndex else assistantCaptionIndex
         if (index in list.indices && list[index].fromUser == fromUser) {
-            list[index] = VoiceCaption(fromUser, text)
+            list[index] = VoiceCaption(fromUser, text, kind, partial)
         } else {
-            list.add(VoiceCaption(fromUser, text))
+            list.add(VoiceCaption(fromUser, text, kind, partial))
             if (fromUser) userCaptionIndex = list.lastIndex else assistantCaptionIndex = list.lastIndex
         }
         _captions.value = list
+    }
+
+    /** Streaming is over for the current turn — clear the dimmed style. */
+    private fun markTurnCaptionsFinal() {
+        val list = _captions.value.toMutableList()
+        var changed = false
+        for (index in listOf(userCaptionIndex, assistantCaptionIndex)) {
+            if (index in list.indices && list[index].partial) {
+                list[index] = list[index].copy(partial = false)
+                changed = true
+            }
+        }
+        if (changed) _captions.value = list
     }
 
     private fun removeTurnCaption(fromUser: Boolean) {

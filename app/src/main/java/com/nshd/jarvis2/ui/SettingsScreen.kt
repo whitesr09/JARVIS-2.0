@@ -32,17 +32,18 @@ import androidx.compose.material.icons.filled.Api
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Email
-import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Hearing
-import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material3.AlertDialog
@@ -119,6 +120,7 @@ fun SettingsScreen(
     var info by remember { mutableStateOf<InfoDialog?>(null) }
     var showPersona by remember { mutableStateOf(false) }
     var showLanguage by remember { mutableStateOf(false) }
+    var showVoiceEngine by remember { mutableStateOf(false) }
     var showTheme by remember { mutableStateOf(false) }
     var showVoice by remember { mutableStateOf(false) }
     var screenPreview by remember { mutableStateOf<String?>(null) }
@@ -240,13 +242,27 @@ fun SettingsScreen(
         SectionTitle("Voice & Neural Intelligence")
         GroupCard {
             SettingsRow(
-                Icons.Filled.Favorite, "AI Persona & Voice", settings.persona,
+                Icons.Filled.Face, "AI Persona & Voice", settings.persona,
                 showDivider = true
             ) {
                 showPersona = true
             }
-            SettingsRow(Icons.Filled.Language, "Conversation Language", settings.language) {
+            SettingsRow(
+                Icons.Filled.Translate, "Conversation Language", settings.language,
+                showDivider = true
+            ) {
                 showLanguage = true
+            }
+            SettingsRow(
+                Icons.Filled.GraphicEq, "Voice Engine",
+                when (settings.voiceEngine) {
+                    "NATIVE" -> "Native Live"
+                    "UNIVERSAL" -> "Universal"
+                    else -> "Auto"
+                },
+                showDivider = true
+            ) {
+                showVoiceEngine = true
             }
             WakeWordControls(
                 settings = settings,
@@ -608,7 +624,13 @@ fun SettingsScreen(
             )
             Spacer(modifier = Modifier.height(12.dp))
             // Icon links ONLY — no addresses, numbers or URLs displayed.
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            // SpaceBetween across the full width at 44dp (F2): six 48dp
+            // buttons + gaps overflowed narrow screens and clipped the
+            // Call button off the right edge.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
                 DeveloperBrandButton(R.drawable.brand_instagram, "Instagram") {
                     openUrl("https://www.instagram.com/__nshd.__")
                 }
@@ -632,12 +654,14 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(18.dp))
         Text(
-            text = "JARVIS • v1.0.0",
+            text = "JARVIS • v1.1.0",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)
         )
-        Spacer(modifier = Modifier.height(12.dp))
+        // ≥120dp clearance so the footer never hides behind the bottom
+        // bar / raised mic FAB when scrolled to the end (F2).
+        Spacer(modifier = Modifier.height(120.dp))
     }
 
     // ── Dialogs ────────────────────────────────────────────────────────
@@ -725,6 +749,41 @@ fun SettingsScreen(
                 }
             },
             confirmButton = { TextButton(onClick = { showLanguage = false }) { Text("Done") } }
+        )
+    }
+
+    if (showVoiceEngine) {
+        AlertDialog(
+            onDismissRequest = { showVoiceEngine = false },
+            title = { Text("Voice Engine") },
+            text = {
+                Column {
+                    PersonaOption(
+                        name = "Auto",
+                        desc = "Native Live when the model supports it, otherwise Universal.",
+                        selected = settings.voiceEngine == "AUTO"
+                    ) { onSettingsChange(settings.copy(voiceEngine = "AUTO")) }
+                    PersonaOption(
+                        name = "Native Live",
+                        desc = "Gemini real-time audio models only.",
+                        selected = settings.voiceEngine == "NATIVE"
+                    ) { onSettingsChange(settings.copy(voiceEngine = "NATIVE")) }
+                    PersonaOption(
+                        name = "Universal",
+                        desc = "Mic → text → your chat model → voice. Works with any model.",
+                        selected = settings.voiceEngine == "UNIVERSAL"
+                    ) { onSettingsChange(settings.copy(voiceEngine = "UNIVERSAL")) }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "If Native Live fails to connect, the session " +
+                            "switches to Universal automatically — you're never " +
+                            "left on a dead error screen.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = { showVoiceEngine = false }) { Text("Done") } }
         )
     }
 
@@ -904,37 +963,62 @@ private fun WakeWordControls(
     }
 
     Column {
+        // Layout (F2): title row, then the status on its OWN full-width
+        // line, then a full-width segmented mode selector. The old
+        // single row squeezed the status text under the Tap/Always-on
+        // buttons, where it wrapped into "Always-on • Not running /
+        // yet" fragments.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 10.dp),
+                .padding(top = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(Icons.Filled.Hearing, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             Spacer(modifier = Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Wake Word", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    text = when {
-                        !settings.wakeAlwaysOn -> "Tap the mic / orb to talk"
-                        wakeStatus.listening -> "Always-on • Listening for \"Hey Jarvis\""
-                        wakeStatus.enabled -> "Always-on • ${wakeStatus.detail}"
-                        else -> "Always-on • Not running yet"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            TextButton(onClick = {
+            Text("Wake Word", style = MaterialTheme.typography.bodyLarge)
+        }
+        Text(
+            text = when {
+                !settings.wakeAlwaysOn -> "Tap the mic / orb to talk"
+                wakeStatus.listening -> "Always-on • Listening for \"Hey Jarvis\""
+                wakeStatus.enabled -> "Always-on • ${wakeStatus.detail}"
+                else -> "Always-on • Not running yet"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 38.dp, top = 2.dp)
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            val selectTap: () -> Unit = {
                 onSettingsChange(settings.copy(wakeAlwaysOn = false))
                 WakeWordControl.stop(context)
-            }) { Text("Tap") }
-            TextButton(onClick = {
+            }
+            val selectAlwaysOn: () -> Unit = {
                 onSettingsChange(settings.copy(wakeAlwaysOn = true))
                 if (modelReady && micGranted) {
                     runCatching { WakeWordControl.start(context) }
                 }
-            }) { Text("Always-on") }
+            }
+            if (settings.wakeAlwaysOn) {
+                OutlinedButton(onClick = selectTap, modifier = Modifier.weight(1f)) {
+                    Text("Tap")
+                }
+                Button(onClick = selectAlwaysOn, modifier = Modifier.weight(1f)) {
+                    Text("Always-on")
+                }
+            } else {
+                Button(onClick = selectTap, modifier = Modifier.weight(1f)) {
+                    Text("Tap")
+                }
+                OutlinedButton(onClick = selectAlwaysOn, modifier = Modifier.weight(1f)) {
+                    Text("Always-on")
+                }
+            }
         }
 
         if (settings.wakeAlwaysOn) {
@@ -955,7 +1039,7 @@ private fun WakeWordControls(
                     Text(
                         text = when (val state = downloadState) {
                             is VoskModelManager.DownloadState.Downloading ->
-                                "Downloading… ${state.percent}%"
+                                "Downloading…"
                             is VoskModelManager.DownloadState.Extracting -> "Extracting…"
                             is VoskModelManager.DownloadState.Error ->
                                 "Download failed: ${state.message}"
@@ -979,12 +1063,27 @@ private fun WakeWordControls(
                 }
             }
             if (downloadState is VoskModelManager.DownloadState.Downloading) {
-                LinearProgressIndicator(
-                    progress = {
-                        (downloadState as VoskModelManager.DownloadState.Downloading).percent / 100f
-                    },
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                )
+                // Clean determinate bar + right-aligned percent (F2) —
+                // at 1% the old full-width track read as a row of dots.
+                val percent =
+                    (downloadState as VoskModelManager.DownloadState.Downloading).percent
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    LinearProgressIndicator(
+                        progress = { percent / 100f },
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "$percent%",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             // ── Microphone permission ──────────────────────────────────
@@ -1274,7 +1373,7 @@ private fun DeveloperBrandButton(
         shape = CircleShape,
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier
-            .size(48.dp)
+            .size(44.dp)
             .clickable(onClick = onClick)
     ) {
         Box(contentAlignment = Alignment.Center) {
@@ -1282,7 +1381,7 @@ private fun DeveloperBrandButton(
                 painter = painterResource(drawableRes),
                 contentDescription = contentDescription,
                 tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(24.dp)
+                modifier = Modifier.size(22.dp)
             )
         }
     }
@@ -1299,7 +1398,7 @@ private fun DeveloperIconButton(
         shape = CircleShape,
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier
-            .size(48.dp)
+            .size(44.dp)
             .clickable(onClick = onClick)
     ) {
         Box(contentAlignment = Alignment.Center) {
@@ -1307,7 +1406,7 @@ private fun DeveloperIconButton(
                 imageVector = icon,
                 contentDescription = contentDescription,
                 tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(24.dp)
+                modifier = Modifier.size(22.dp)
             )
         }
     }

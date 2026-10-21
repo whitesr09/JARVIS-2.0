@@ -19,9 +19,9 @@ import org.json.JSONObject
  *   local memory commands → deterministic quick commands → tool agent loop
  *
  * The pipeline returns the final assistant text. Callers own presentation
- * and persistence of the user/assistant turns; intermediate tool lines are
- * delivered through [onEvent] so each UI can render and persist them in its
- * own way.
+ * and persistence of the user/assistant turns; intermediate tool activity
+ * is delivered as structured [ToolEvent]s through [onEvent] so each UI
+ * can render it as a status chip (raw tool output is never message text).
  */
 object AgentPipeline {
 
@@ -32,7 +32,7 @@ object AgentPipeline {
         memoryDb: MemoryDb,
         providerStore: ProviderStore,
         codeMode: Boolean = false,
-        onEvent: (String) -> Unit = {},
+        onEvent: (ToolEvent) -> Unit = {},
         onAssistantDelta: (String) -> Unit = {}
     ): String {
         // Feed the floating overlay's Task HUD (Level 5): begin with the
@@ -43,8 +43,8 @@ object AgentPipeline {
                 ?: kotlinx.coroutines.Job(),
             maxSteps = 10
         )
-        val hudEvent: (String) -> Unit = { event ->
-            TaskState.step(event)
+        val hudEvent: (ToolEvent) -> Unit = { event ->
+            TaskState.step(event.hudText)
             onEvent(event)
         }
         return try {
@@ -75,7 +75,7 @@ object AgentPipeline {
         memoryDb: MemoryDb,
         providerStore: ProviderStore,
         codeMode: Boolean = false,
-        onEvent: (String) -> Unit = {},
+        onEvent: (ToolEvent) -> Unit = {},
         onAssistantDelta: (String) -> Unit = {}
     ): String = withContext(Dispatchers.IO) {
         val clean = text.trim()
@@ -107,14 +107,19 @@ object AgentPipeline {
         // ── Deterministic quick commands (work with no API key) ────────
         quickCommand(context, clean)?.let { quick ->
             val executor = ToolExecutor(context, memoryDb)
-            onEvent("🔧 ${quick.toolName}")
+            onEvent(ToolEvent(ToolEventKind.STARTED, quick.toolName))
             val result = executor.execute(
                 quick.toolName,
                 quick.args,
                 includeScreenSummary = false
             )
-            onEvent("${if (result.success) "✅" else "❌"} ${quick.toolName}: " +
-                result.message.lineSequence().firstOrNull().orEmpty())
+            onEvent(
+                ToolEvent(
+                    kind = if (result.success) ToolEventKind.SUCCESS else ToolEventKind.FAILURE,
+                    toolName = quick.toolName,
+                    message = result.message
+                )
+            )
             return@withContext result.message
         }
 

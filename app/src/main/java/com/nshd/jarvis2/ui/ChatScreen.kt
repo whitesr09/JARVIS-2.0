@@ -44,6 +44,8 @@ import androidx.compose.ui.unit.dp
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.AgentPipeline
 import com.nshd.jarvis2.brain.ProviderStore
+import com.nshd.jarvis2.brain.ToolEvent
+import com.nshd.jarvis2.brain.ToolEventKind
 import com.nshd.jarvis2.memory.MemoryDb
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -61,7 +63,9 @@ private enum class ChatMode { JARVIS, CODE }
 /**
  * Chat uses the shared [AgentPipeline]: local memory commands and
  * deterministic phone commands first, then the Level 4 tool-calling agent
- * loop. Tool activity is persisted as role="tool" history.
+ * loop. Tool activity renders as small status chips (F2) and is NOT
+ * persisted — raw tool output never becomes history text. (Pre-F2
+ * role="tool" rows still load, cleaned into chip text.)
  */
 @Composable
 fun ChatScreen(settings: JarvisSettings, onOpenSettings: () -> Unit = {}) {
@@ -116,7 +120,11 @@ fun ChatScreen(settings: JarvisSettings, onOpenSettings: () -> Unit = {}) {
                 messages.add(
                     UiMessage(
                         fromUser = stored.role == "user",
-                        text = stored.content,
+                        text = if (stored.role == "tool") {
+                            cleanLegacyToolLine(stored.content)
+                        } else {
+                            stored.content
+                        },
                         isTool = stored.role == "tool"
                     )
                 )
@@ -144,12 +152,12 @@ fun ChatScreen(settings: JarvisSettings, onOpenSettings: () -> Unit = {}) {
         }
     }
 
-    fun appendToolEvent(event: String) {
+    fun appendToolEvent(event: ToolEvent) {
         // A new tool turn starts: the previous turn's streamed narration
         // is superseded by the tool activity + the upcoming final reply.
-        if (event.startsWith("🔧")) resetStream()
-        messages.add(UiMessage(fromUser = false, text = event, isTool = true))
-        scope.launch(Dispatchers.IO) { db.addMessage("tool", event) }
+        // Chips are session-only UI — never written to chat history.
+        if (event.kind == ToolEventKind.STARTED) resetStream()
+        messages.add(UiMessage(fromUser = false, text = event.chipText, isTool = true))
     }
 
     fun send() {
@@ -344,22 +352,37 @@ fun ChatScreen(settings: JarvisSettings, onOpenSettings: () -> Unit = {}) {
     }
 }
 
+/**
+ * Pre-F2 history stored raw tool lines ("❌ open_app: No installed app
+ * matched…"). Strip the emoji/tool plumbing for chip display.
+ */
+private fun cleanLegacyToolLine(raw: String): String {
+    var text = raw.trim()
+    for (prefix in listOf("🔧 ", "✅ ", "❌ ", "⚠️ ")) {
+        if (text.startsWith(prefix)) {
+            text = text.removePrefix(prefix)
+            break
+        }
+    }
+    return if (text.length <= 90) text else text.take(87).trimEnd() + "…"
+}
+
 @Composable
 private fun MessageBubble(msg: UiMessage) {
     if (msg.isTool) {
-        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
-            Card(
-                shape = RoundedCornerShape(JarvisDimens.radiusField),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                ),
+        // Tool activity = one small CENTERED status pill (F2), visually
+        // distinct from conversation bubbles.
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            androidx.compose.material3.Surface(
+                shape = RoundedCornerShape(50),
+                color = MaterialTheme.colorScheme.surfaceVariant,
                 modifier = Modifier.widthIn(max = 340.dp)
             ) {
                 Text(
                     text = msg.text,
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                 )
             }
         }

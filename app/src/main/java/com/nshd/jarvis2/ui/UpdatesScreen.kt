@@ -32,7 +32,9 @@ fun UpdatesScreen() {
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(20.dp)
+            // 120dp bottom clearance so the last card never hides
+            // behind the bottom bar (F2).
+            .padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 120.dp)
     ) {
         Text(
             text = "Updates & Architecture",
@@ -42,6 +44,22 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         RoadmapCard()
+        InfoCard(
+            title = "v1.1.0 — Universal Voice Engine + F2 fixes",
+            body = "Voice no longer depends on one Gemini native-audio model. " +
+                "The new Universal engine runs mic → text → your chat model → " +
+                "voice, so it works with ANY model from ANY provider you configure; " +
+                "Native Live stays for Gemini real-time audio models, and a failed " +
+                "Live connection now switches to Universal instead of dying. " +
+                "Settings → API & Connection can fetch the model list straight from " +
+                "your API (LIVE AUDIO models are badged). Also in this round: the " +
+                "Gemini Live language-code rejection is fixed (with an automatic " +
+                "no-language retry), open_app finds installed apps reliably, the mic " +
+                "button no longer glows red during normal sessions, tool results " +
+                "render as small status chips instead of raw text, errors are " +
+                "explained in plain words, the floating bubble hides over Jarvis " +
+                "itself, and the Developer icons + Wake Word layout are repaired."
+        )
         InfoCard(
             title = "Design refresh — D3 (orb + HUD polish)",
             body = "Done: the final design pass. The orb now breathes instead " +
@@ -197,7 +215,14 @@ private val ROADMAP = listOf(
     RoadmapEntry(
         "D3 Orb + HUD polish",
         "Orb state palettes and amplitude curve, theme-following floating " +
-            "HUD, final accessibility + code-review QA pass. This build.",
+            "HUD, final accessibility + code-review QA pass.",
+        RoadmapStatus.DONE
+    ),
+    RoadmapEntry(
+        "F2 Universal Voice",
+        "Universal Voice Engine (any model, any provider), live model " +
+            "discovery, Gemini Live language fix, and the on-device QA " +
+            "fix round. This build.",
         RoadmapStatus.CURRENT
     )
 )
@@ -268,8 +293,8 @@ private fun RoadmapCard() {
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
-                text = "v1.0.0 — design complete: Warm Minimal · Purple across " +
-                    "every screen, the orb, and the floating HUD.",
+                text = "v1.1.0 — Universal Voice Engine: voice now works with " +
+                    "any model on any provider (design refresh completed at v1.0.0).",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
