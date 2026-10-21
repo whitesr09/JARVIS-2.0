@@ -1,0 +1,88 @@
+package com.nshd.jarvis2
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import com.nshd.jarvis2.ui.AppTheme
+import com.nshd.jarvis2.ui.JarvisApp
+
+/** Persisted user settings (Level 1: plain SharedPreferences; encrypted store arrives with keys in L2). */
+data class JarvisSettings(
+    val assistantName: String = "Jarvis",
+    val callsign: String = "Nishad",
+    val theme: AppTheme = AppTheme.SUNSET,
+    val customBgHex: String? = null,
+    val language: String = "Auto",
+    val persona: String = "Jarvis Pro",
+    val wakeAlwaysOn: Boolean = false,
+    val silentExecution: Boolean = false
+)
+
+class MainActivity : ComponentActivity() {
+
+    private lateinit var prefs: SharedPreferences
+    private var settings by mutableStateOf(JarvisSettings())
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        settings = loadSettings()
+        setContent {
+            JarvisApp(
+                settings = settings,
+                onSettingsChange = { updated ->
+                    settings = updated
+                    saveSettings(updated)
+                }
+            )
+        }
+    }
+
+    private fun loadSettings(): JarvisSettings {
+        val theme = try {
+            AppTheme.valueOf(prefs.getString(KEY_THEME, AppTheme.SUNSET.name) ?: AppTheme.SUNSET.name)
+        } catch (e: IllegalArgumentException) {
+            AppTheme.SUNSET
+        }
+        return JarvisSettings(
+            assistantName = prefs.getString(KEY_ASSISTANT_NAME, "Jarvis") ?: "Jarvis",
+            callsign = prefs.getString(KEY_CALLSIGN, "Nishad") ?: "Nishad",
+            theme = theme,
+            customBgHex = prefs.getString(KEY_CUSTOM_BG, null),
+            language = prefs.getString(KEY_LANGUAGE, "Auto") ?: "Auto",
+            persona = prefs.getString(KEY_PERSONA, "Jarvis Pro") ?: "Jarvis Pro",
+            wakeAlwaysOn = prefs.getBoolean(KEY_WAKE_ALWAYS_ON, false),
+            silentExecution = prefs.getBoolean(KEY_SILENT, false)
+        )
+    }
+
+    private fun saveSettings(s: JarvisSettings) {
+        prefs.edit()
+            .putString(KEY_ASSISTANT_NAME, s.assistantName)
+            .putString(KEY_CALLSIGN, s.callsign)
+            .putString(KEY_THEME, s.theme.name)
+            .putString(KEY_CUSTOM_BG, s.customBgHex)
+            .putString(KEY_LANGUAGE, s.language)
+            .putString(KEY_PERSONA, s.persona)
+            .putBoolean(KEY_WAKE_ALWAYS_ON, s.wakeAlwaysOn)
+            .putBoolean(KEY_SILENT, s.silentExecution)
+            .apply()
+    }
+
+    companion object {
+        private const val PREFS_NAME = "jarvis_settings"
+        private const val KEY_ASSISTANT_NAME = "assistant_name"
+        private const val KEY_CALLSIGN = "callsign"
+        private const val KEY_THEME = "theme"
+        private const val KEY_CUSTOM_BG = "custom_bg"
+        private const val KEY_LANGUAGE = "language"
+        private const val KEY_PERSONA = "persona"
+        private const val KEY_WAKE_ALWAYS_ON = "wake_always_on"
+        private const val KEY_SILENT = "silent_execution"
+    }
+}

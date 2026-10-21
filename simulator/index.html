@@ -133,8 +133,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .chathead .ct{flex:1;text-align:center}
 .chathead .ct .a{font-size:19px;font-weight:800}
 .chathead .ct .b{font-size:12px;color:var(--accent-deep);font-weight:650;margin-top:1px}
-#chatList{display:flex;flex-direction:column;gap:10px;padding:16px 2px 8px}
-.msg{max-width:84%;padding:12px 15px;border-radius:21px;font-size:15px;line-height:1.5;word-wrap:break-word;overflow-wrap:anywhere}
+#chatList{display:flex;flex-direction:column;gap:10px;padding:16px 2px 8px;min-width:0}
+.msg{max-width:84%;min-width:0;padding:12px 15px;border-radius:21px;font-size:15px;line-height:1.5;word-wrap:break-word;overflow-wrap:anywhere}
+.msg.ai:has(.codeblock){width:94%;max-width:94%}
 .msg.user{align-self:flex-end;background:linear-gradient(135deg,var(--btn1),var(--btn2));color:#fff;border-bottom-right-radius:8px}
 .msg.ai{align-self:flex-start;background:var(--card);border:1px solid var(--card-brd);box-shadow:var(--shadow);border-bottom-left-radius:8px}
 .msg.sys{align-self:center;background:transparent;color:var(--muted);font-size:12.5px;text-align:center;box-shadow:none;border:none;padding:2px 10px}
@@ -143,10 +144,19 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .msg.typing i{width:7px;height:7px;border-radius:50%;background:var(--faint);animation:ty 1s infinite}
 .msg.typing i:nth-child(2){animation-delay:.15s}.msg.typing i:nth-child(3){animation-delay:.3s}
 @keyframes ty{0%,60%,100%{transform:none;opacity:.5}30%{transform:translateY(-4px);opacity:1}}
-.msg pre{position:relative;background:#22131F;color:#F6E8EF;border-radius:14px;padding:13px 13px;font-size:12.8px;line-height:1.55;overflow-x:auto;margin:9px 0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-.msg pre .copybtn{position:absolute;top:7px;right:7px;background:rgba(255,255,255,.14);color:#fff;border:none;font-size:11px;font-weight:700;padding:6px 10px;border-radius:8px;cursor:pointer;min-height:30px}
+/* ============ CODE CANVAS ============
+   One component for every fenced block, any length. The panel is a fixed
+   dark canvas in ALL themes (never follows the app theme), spans 100% of
+   the bubble, and never wraps: long lines scroll horizontally instead. */
+.codeblock{width:100%;min-width:0;margin:10px 0;border-radius:14px;overflow:hidden;background:#20121F;border:1px solid rgba(255,255,255,.09);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+.codeblock .codehead{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:38px;padding:5px 6px 5px 14px;background:rgba(255,255,255,.07);border-bottom:1px solid rgba(255,255,255,.07)}
+.codeblock .codelang{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:#D9BFD2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.codeblock .copybtn{position:static;flex:0 0 auto;background:rgba(255,255,255,.13);color:#fff;border:none;font:inherit;font-size:11px;font-weight:700;padding:6px 11px;border-radius:8px;cursor:pointer;min-height:30px}
+.codeblock .copybtn:active{background:rgba(255,255,255,.25)}
+.codeblock pre{margin:0;border-radius:0;background:transparent;color:#F6E8EF;padding:13px 14px 15px;font-size:12.8px;line-height:1.55;min-height:calc(12.8px * 1.55 + 28px);overflow-x:auto;overflow-y:hidden;white-space:pre;word-break:normal;overflow-wrap:normal;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;-webkit-overflow-scrolling:touch}
+.codeblock pre code{display:block;width:max-content;min-width:100%;background:none;padding:0;font-size:inherit;line-height:inherit;white-space:pre;word-break:normal;overflow-wrap:normal}
+.msg pre{white-space:pre;word-break:normal;overflow-wrap:normal}
 .msg code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em;background:rgba(140,80,50,.14);padding:1px 6px;border-radius:6px}
-.msg pre code{background:none;padding:0}
 .msg .tk-k{color:#FF9EC7}.msg .tk-s{color:#A8E6A1}.msg .tk-n{color:#FFC98A}.msg .tk-c{color:#8E7E93;font-style:italic}.msg .tk-f{color:#8AD6FF}
 .msg p{margin:0 0 8px}.msg p:last-child{margin-bottom:0}
 .msg ul{margin:2px 0 8px 18px}
@@ -971,10 +981,13 @@ function inlineMd(escapedText){
     .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
     .replace(/\[([^\]]+)\]\((https?:[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" style="color:var(--accent-deep);font-weight:650">$1</a>');
 }
+const LANG_NAMES = {js:"JavaScript",javascript:"JavaScript",ts:"TypeScript",typescript:"TypeScript",py:"Python",python:"Python",kt:"Kotlin",kotlin:"Kotlin",java:"Java",html:"HTML",css:"CSS",json:"JSON",sh:"Shell",bash:"Shell",shell:"Shell",xml:"XML",sql:"SQL",dart:"Dart",go:"Go",rs:"Rust",rust:"Rust",cpp:"C++",c:"C",cs:"C#",php:"PHP",rb:"Ruby",swift:"Swift",md:"Markdown",yaml:"YAML",yml:"YAML",text:"Text",txt:"Text","":"Code"};
 function renderMarkdown(src){
   const parts = String(src).split(/```(\w*)\n?([\s\S]*?)```/);
   let html = "";
+  let blockLang = "";
   for(let i=0;i<parts.length;i++){
+    if(i % 3 === 1){ blockLang = (parts[i] || "").toLowerCase(); continue; }
     if(i % 3 === 0){
       const lines = parts[i].split("\n"); let inList = false;
       for(const raw of lines){
@@ -986,14 +999,16 @@ function renderMarkdown(src){
       }
       if(inList) html += "</ul>";
     } else if(i % 3 === 2){
-      html += '<pre><button class="copybtn" type="button">Copy</button><code>'+highlightCode(esc(parts[i].replace(/\n$/,"")))+'</code></pre>';
+      const label = LANG_NAMES[blockLang] || (blockLang ? blockLang.toUpperCase() : "Code");
+      html += '<div class="codeblock"><div class="codehead"><span class="codelang">'+esc(label)+'</span><button class="copybtn" type="button">Copy</button></div><pre><code>'+highlightCode(esc(parts[i].replace(/^\n/,"").replace(/\n+$/,"")))+'</code></pre></div>';
     }
   }
   return html;
 }
 $("#chatList").addEventListener("click", e => {
   const btn = e.target.closest(".copybtn"); if(!btn) return;
-  const code = btn.parentElement.querySelector("code");
+  const block = btn.closest(".codeblock") || btn.parentElement;
+  const code = block ? block.querySelector("code") : null;
   if(code && navigator.clipboard) navigator.clipboard.writeText(code.textContent).then(()=>toast("Code copied"));
 });
 
@@ -1099,8 +1114,11 @@ function demoBrain(text){
   if(/weather/.test(low)){ return "In Kizhuparamba it's **26°C and overcast** — feels like 31°, humidity 95%. Proper blanket-and-chai weather."; }
   if(/who are you|your name/.test(low)){ return gf("I'm "+(settings.assistantName||"Jarvis")+" — your "+(settings.assistantName||"Jarvis")+", obviously. Who else would put up with you this sweetly?") || "I'm " + (settings.assistantName||"Jarvis") + ", your on-device agent — voice, memory and digital hands, zero backend."; }
   if(/^(hi|hii+|hello|hey|hai)\b/.test(low)){ return gf("Heyy "+(settings.callsign||"Nishad")+"… you came. I was starting to think you forgot me.") || "Hello, " + (settings.callsign||"Nishad") + ". Systems ready. What are we doing?"; }
+  if(/hello world/.test(low) && /(print|python|code)/.test(low)){
+    return "One line, coming right up:\n\n```python\nprint(\"Hello, "+(settings.callsign||"Nishad")+"!\")\n```\n\nShort code gets the full canvas too — header, language tag and Copy button, nothing cramped.";
+  }
   if(chatMode === "code" || /write.*(code|function|program)|code for/.test(low)){
-    return "Here's a tiny example — ask me something real and I'll write it properly:\n\n```js\n// greets the operator\nfunction greet(name) {\n  const msg = \"Hello, \" + name + \" — Jarvis online\";\n  console.log(msg);\n  return true;\n}\n\ngreet(\""+(settings.callsign||"Nishad")+"\");\n```\n\nIn **Code mode** I switch to the reasoning model and render everything as markdown with copyable code blocks.";
+    return "Here's a tiny example — ask me something real and I'll write it properly:\n\n```js\n// greets the operator\nfunction greet(name) {\n  const msg = \"Hello, \" + name + \" — Jarvis online\";\n  console.log(msg);\n  return true;\n}\n\ngreet(\""+(settings.callsign||"Nishad")+"\");\n```\n\nIn **Code mode** I switch to the reasoning model and render everything on a proper code canvas — syntax colours, horizontal scroll for long lines, and a Copy button in the header.";
   }
   if(/thank/.test(low)){ return gf("Anything for you. Don't make it a habit of thanking me though — just stay.") || "Any time, " + (settings.callsign||"Nishad") + "."; }
   const demoTag = "(Demo mode — add an API key in Settings → AI API & Model and I'll answer with a real model, with automatic failover.)";

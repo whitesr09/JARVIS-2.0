@@ -1,0 +1,29 @@
+# Gradle / Android build output
+.gradle/
+build/
+*/build/
+local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Generated files
+bin/
+gen/
+out/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keystores (never commit signing keys)
+*.jks
+*.keystore
+
+# Note: MASTER-PLAN.md and simulator/ are project documents and stay tracked.
