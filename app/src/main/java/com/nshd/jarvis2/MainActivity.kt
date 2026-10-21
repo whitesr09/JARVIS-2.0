@@ -20,7 +20,13 @@ data class JarvisSettings(
     val language: String = "Auto",
     val persona: String = "Jarvis Pro",
     val wakeAlwaysOn: Boolean = false,
-    val silentExecution: Boolean = false
+    val silentExecution: Boolean = false,
+    /** Gemini Live voice name (one of the 5 picker voices). */
+    val voiceName: String = "Kore",
+    /** Free-text custom voice name — overrides [voiceName] when non-blank. */
+    val customVoiceName: String = "",
+    /** Gemini Live model, WITHOUT the "models/" prefix (the client adds it). */
+    val liveModel: String = "gemini-2.5-flash-native-audio-preview-12-2025"
 )
 
 class MainActivity : ComponentActivity() {
@@ -57,7 +63,12 @@ class MainActivity : ComponentActivity() {
             language = prefs.getString(KEY_LANGUAGE, "Auto") ?: "Auto",
             persona = prefs.getString(KEY_PERSONA, "Jarvis Pro") ?: "Jarvis Pro",
             wakeAlwaysOn = prefs.getBoolean(KEY_WAKE_ALWAYS_ON, false),
-            silentExecution = prefs.getBoolean(KEY_SILENT, false)
+            silentExecution = prefs.getBoolean(KEY_SILENT, false),
+            voiceName = prefs.getString(KEY_VOICE_NAME, "Kore") ?: "Kore",
+            customVoiceName = prefs.getString(KEY_CUSTOM_VOICE, "") ?: "",
+            liveModel = prefs.getString(
+                KEY_LIVE_MODEL, "gemini-2.5-flash-native-audio-preview-12-2025"
+            ) ?: "gemini-2.5-flash-native-audio-preview-12-2025"
         )
     }
 
@@ -71,6 +82,9 @@ class MainActivity : ComponentActivity() {
             .putString(KEY_PERSONA, s.persona)
             .putBoolean(KEY_WAKE_ALWAYS_ON, s.wakeAlwaysOn)
             .putBoolean(KEY_SILENT, s.silentExecution)
+            .putString(KEY_VOICE_NAME, s.voiceName)
+            .putString(KEY_CUSTOM_VOICE, s.customVoiceName)
+            .putString(KEY_LIVE_MODEL, s.liveModel)
             .apply()
     }
 
@@ -84,5 +98,8 @@ class MainActivity : ComponentActivity() {
         private const val KEY_PERSONA = "persona"
         private const val KEY_WAKE_ALWAYS_ON = "wake_always_on"
         private const val KEY_SILENT = "silent_execution"
+        private const val KEY_VOICE_NAME = "voice_name"
+        private const val KEY_CUSTOM_VOICE = "custom_voice_name"
+        private const val KEY_LIVE_MODEL = "live_model"
     }
 }

@@ -37,8 +37,8 @@ import com.nshd.jarvis2.JarvisSettings
 
 private enum class Tab { HOME, CHAT, SETTINGS, UPDATES }
 
-/** Full-screen destinations layered over the tabs (Level 2 adds API + Memory). */
-private enum class SubScreen { NONE, PERMISSIONS, API, MEMORY }
+/** Full-screen destinations layered over the tabs (L2: API + Memory, L3: Voice). */
+private enum class SubScreen { NONE, PERMISSIONS, API, MEMORY, VOICE }
 
 @Composable
 fun JarvisApp(
@@ -47,19 +47,18 @@ fun JarvisApp(
 ) {
     JarvisTheme(theme = settings.theme, customBgHex = settings.customBgHex) {
         var tab by remember { mutableStateOf(Tab.HOME) }
-        var listening by remember { mutableStateOf(false) }
         var subScreen by remember { mutableStateOf(SubScreen.NONE) }
 
         Scaffold(
             bottomBar = {
                 JarvisBottomBar(
                     tab = tab,
-                    listening = listening,
+                    listening = subScreen == SubScreen.VOICE,
                     onTab = {
                         tab = it
                         subScreen = SubScreen.NONE
                     },
-                    onMic = { listening = !listening }
+                    onMic = { subScreen = SubScreen.VOICE }
                 )
             }
         ) { padding ->
@@ -78,13 +77,26 @@ fun JarvisApp(
                     SubScreen.MEMORY -> MemoryScreen(
                         onBack = { subScreen = SubScreen.NONE }
                     )
+                    SubScreen.VOICE -> VoiceScreen(
+                        settings = settings,
+                        onBack = { subScreen = SubScreen.NONE },
+                        onOpenChat = {
+                            subScreen = SubScreen.NONE
+                            tab = Tab.CHAT
+                        },
+                        onOpenSettings = {
+                            subScreen = SubScreen.NONE
+                            tab = Tab.SETTINGS
+                        }
+                    )
                     SubScreen.NONE -> when (tab) {
                         Tab.HOME -> HomeScreen(
                             settings = settings,
-                            listening = listening,
+                            listening = false,
                             onOpenPermissions = { subScreen = SubScreen.PERMISSIONS },
                             onOpenMemory = { subScreen = SubScreen.MEMORY },
-                            onOpenSettings = { tab = Tab.SETTINGS }
+                            onOpenSettings = { tab = Tab.SETTINGS },
+                            onOpenVoice = { subScreen = SubScreen.VOICE }
                         )
                         Tab.CHAT -> ChatScreen(settings = settings)
                         Tab.SETTINGS -> SettingsScreen(

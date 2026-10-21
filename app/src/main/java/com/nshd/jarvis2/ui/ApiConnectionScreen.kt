@@ -304,8 +304,8 @@ fun ApiConnectionScreen(onBack: () -> Unit) {
             Spacer(modifier = Modifier.height(16.dp))
             Text(
                 text = "Keys stay on this device (encrypted). Failover: if the active " +
-                    "provider fails, Jarvis tries the next configured one. Gemini Live " +
-                    "voice arrives in Level 3 — this screen powers REST chat.",
+                    "provider fails, Jarvis tries the next configured one. The Gemini " +
+                    "key also powers Gemini Live voice (Level 3) — no separate key needed.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

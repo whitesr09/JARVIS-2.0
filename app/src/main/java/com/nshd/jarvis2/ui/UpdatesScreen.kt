@@ -37,9 +37,12 @@ fun UpdatesScreen() {
             title = "Level roadmap",
             body = "L1 Foundation — done: scaffold, theme engine, orb, " +
                 "permissions dashboard.\n" +
-                "L2 Brain — current build: provider layer + failover, encrypted API keys, " +
+                "L2 Brain — done: provider layer + failover, encrypted API keys, " +
                 "real chat + Code mode, Memory Core, permanent signing.\n" +
-                "L3 Voice — Gemini Live loop, tap-to-talk, personas + 12 languages, silent execution + chime.\n" +
+                "L3 Voice — current build: Gemini Live WebSocket loop (tap-to-talk orb, " +
+                "barge-in, session resumption), fallback speech recognition + TTS via " +
+                "the L2 brain, 5 Gemini voices + custom voice, silent execution + finish " +
+                "chime, personas + 12 languages in the prompt.\n" +
                 "L4 Digital Hands — accessibility automation, deep intents, hardware controls, contact-aware calling & messaging.\n" +
                 "L5 Vision + Overlay — MediaProjection targeting, floating avatar + 4-step Task HUD.\n" +
                 "L6 Always-on — Vosk wake word, voice biometrics, battery-aware modes."

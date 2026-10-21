@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.VolumeOff
@@ -60,6 +61,9 @@ val JARVIS_LANGUAGES = listOf(
     "Malayalam", "Bengali", "Marathi", "Gujarati", "Bhojpuri"
 )
 
+/** The 5 Gemini Live voices (locked set). A custom voice name overrides these. */
+val GEMINI_VOICES = listOf("Aoede", "Kore", "Fenrir", "Puck", "Charon")
+
 private data class InfoDialog(val title: String, val body: String)
 
 @Composable
@@ -75,6 +79,7 @@ fun SettingsScreen(
     var showPersona by remember { mutableStateOf(false) }
     var showLanguage by remember { mutableStateOf(false) }
     var showTheme by remember { mutableStateOf(false) }
+    var showVoice by remember { mutableStateOf(false) }
 
     fun openUrl(url: String) {
         runCatching {
@@ -179,7 +184,7 @@ fun SettingsScreen(
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Silent Execution Mode", style = MaterialTheme.typography.bodyLarge)
                     Text(
-                        text = "Mute task narration; a chime still plays when a task finishes (Level 3)",
+                        text = "Mute voice narration; a subtle chime still plays when each turn finishes",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -189,6 +194,37 @@ fun SettingsScreen(
                     onCheckedChange = { onSettingsChange(settings.copy(silentExecution = it)) }
                 )
             }
+        }
+
+        SectionTitle("Voice")
+        GroupCard {
+            SettingsRow(
+                Icons.Filled.RecordVoiceOver, "Gemini Live Voice",
+                settings.customVoiceName.ifBlank { settings.voiceName } +
+                    if (settings.customVoiceName.isNotBlank()) " (custom)" else ""
+            ) { showVoice = true }
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = settings.customVoiceName,
+                onValueChange = { onSettingsChange(settings.copy(customVoiceName = it)) },
+                label = { Text("Custom voice name (optional)") },
+                supportingText = {
+                    Text("Overrides the picker above — any voice name the Live model accepts.")
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            OutlinedTextField(
+                value = settings.liveModel,
+                onValueChange = { onSettingsChange(settings.copy(liveModel = it)) },
+                label = { Text("Gemini Live model") },
+                supportingText = {
+                    Text("Editable — use a live-capable model your key can access.")
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
 
         SectionTitle("System & Data Engine")
@@ -263,7 +299,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(18.dp))
         Text(
-            text = "JARVIS • v0.2.0-L2",
+            text = "JARVIS • v0.3.0-L3",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)
@@ -299,9 +335,9 @@ fun SettingsScreen(
                     ) { onSettingsChange(settings.copy(persona = "Jarvis Pro")) }
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Persona prompts are live in Chat from Level 2. The 5 " +
-                            "Gemini voices (+ custom voice) arrive with the voice loop " +
-                            "in Level 3.",
+                        text = "Persona prompts drive both Chat and the Gemini Live " +
+                            "voice sessions (Level 3). Pick the voice itself in the " +
+                            "Voice section of this screen.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -337,6 +373,43 @@ fun SettingsScreen(
                 }
             },
             confirmButton = { TextButton(onClick = { showLanguage = false }) { Text("Done") } }
+        )
+    }
+
+    if (showVoice) {
+        AlertDialog(
+            onDismissRequest = { showVoice = false },
+            title = { Text("Gemini Live Voice") },
+            text = {
+                Column {
+                    GEMINI_VOICES.forEach { voice ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onSettingsChange(settings.copy(voiceName = voice))
+                                }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = settings.voiceName == voice,
+                                onClick = { onSettingsChange(settings.copy(voiceName = voice)) }
+                            )
+                            Text(voice, style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "These are Gemini Live voices. If you type a custom " +
+                            "voice name in the Voice section, it overrides this picker. " +
+                            "Voice changes apply to the next voice session.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = { showVoice = false }) { Text("Done") } }
         )
     }
 
