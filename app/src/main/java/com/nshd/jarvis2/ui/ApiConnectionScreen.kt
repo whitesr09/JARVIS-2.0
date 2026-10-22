@@ -172,8 +172,18 @@ fun ApiConnectionScreen(
                     if (openDialogWhenDone) modelsDialog = models
                 },
                 onFailure = { error ->
-                    modelsError = "Couldn't fetch models — check key/connection. " +
-                        (error.message ?: "")
+                    // F6 audit: the raw exception text used to be
+                    // appended to this user-visible error verbatim —
+                    // route it to AppLog and show the friendly reason.
+                    com.nshd.jarvis2.core.AppLog.e(
+                        "API",
+                        "fetch models failed: ${error.message ?: "unknown"}",
+                        error
+                    )
+                    modelsError = "Couldn't fetch models — check the key " +
+                        "and connection. (" +
+                        com.nshd.jarvis2.ui.FriendlyErrors.shortReason(error.message) +
+                        ")"
                 }
             )
         }

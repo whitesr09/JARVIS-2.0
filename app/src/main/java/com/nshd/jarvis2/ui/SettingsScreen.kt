@@ -1036,7 +1036,7 @@ fun SettingsScreen(
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "JARVIS • v1.4.1",
+                text = "JARVIS • v1.5.0",
                 style = MaterialTheme.typography.labelMedium.copy(
                     letterSpacing = 1.2.sp
                 ),
@@ -1568,7 +1568,9 @@ private fun WakeWordControls(
                                 "Downloading…"
                             is VoskModelManager.DownloadState.Extracting -> "Extracting…"
                             is VoskModelManager.DownloadState.Error ->
-                                "Download failed: ${state.message}"
+                                // F6: the state message is now a complete
+                                // friendly sentence (see VoskModelManager).
+                                state.message
                             else -> if (modelReady) "Ready on this device" else "Needed for offline listening"
                         },
                         style = MaterialTheme.typography.bodySmall,

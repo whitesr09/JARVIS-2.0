@@ -492,8 +492,20 @@ class FloatingOverlayService : Service() {
                 }
             }
         }
-        // Current task's last 3 steps (TaskState), small text.
-        val steps = TaskState.steps.value.takeLast(MAX_HUD_STEPS)
+        // Current task's last 3 steps (TaskState), small text. F6:
+        // when TaskState has no step lines (e.g. a Live voice tool
+        // turn, which registers in TaskQueue without the pipeline's
+        // event feed), fall back to the RUNNING queue item's live
+        // step text so the panel never looks idle mid-task.
+        val stateSteps = TaskState.steps.value.takeLast(MAX_HUD_STEPS)
+        val steps = if (stateSteps.isNotEmpty()) {
+            stateSteps
+        } else {
+            queue.firstOrNull { it.status.name == "RUNNING" }
+                ?.step?.takeIf { it.isNotBlank() }
+                ?.let { listOf(it) }
+                ?: emptyList()
+        }
         hudStepViews.forEachIndexed { index, view ->
             val step = steps.getOrNull(index)
             view.text = step.orEmpty()

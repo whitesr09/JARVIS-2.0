@@ -44,7 +44,7 @@ object ToolRegistry {
         ),
         ToolSpec(
             "type_text",
-            "Type text into the currently focused editable field, or the first editable field on screen. Entry is verified by reading the field back.",
+            "Type text into the currently focused editable field, or the first editable field on screen. Dictation semantics: the text is INSERTED at the cursor (appended at the end when no cursor is known) — it does not erase what is already there; search boxes are the exception and are replaced. Entry is verified by reading the field back. To delete text instead, use edit_text.",
             schema(
                 properties = JSONObject().put("text", stringProperty("Exact text to enter")),
                 required = listOf("text")
@@ -104,6 +104,41 @@ object ToolRegistry {
             )
         ),
         ToolSpec(
+            "spotify_play",
+            "Open Spotify, search and play the first song result for the query — one fast programmatic step (open → search → tap the song). Prefer this over manually tapping through Spotify.",
+            schema(
+                properties = JSONObject().put("query", stringProperty("Spotify search query — a song/track name, optionally with the artist")),
+                required = listOf("query")
+            )
+        ),
+        ToolSpec(
+            "edit_text",
+            "Edit the text in the CURRENTLY FOCUSED text field (e.g. the QuickEdit editor): delete text on command. Actions: clear_all (delete everything), delete_last_line, delete_last_word, delete_last_chars (needs count), delete_selection (only the selected range). Use this when he dictates into an editor and says delete / remove / erase / clear.",
+            schema(
+                properties = JSONObject()
+                    .put(
+                        "action",
+                        stringProperty(
+                            "Edit action",
+                            listOf(
+                                "clear_all", "delete_last_line", "delete_last_word",
+                                "delete_last_chars", "delete_selection"
+                            )
+                        )
+                    )
+                    .put("count", integerProperty("Character count — only for delete_last_chars")),
+                required = listOf("action")
+            )
+        ),
+        ToolSpec(
+            "insert_code",
+            "Insert COMPLETE code into the focused text editor (QuickEdit). Pass the raw code only — no markdown fences, no prose — in ONE call; it is inserted at the cursor (appended at the end if no cursor is known), never splitting it across calls. If no editor is focused, QuickEdit is opened automatically. Afterwards confirm with the line count from the result.",
+            schema(
+                properties = JSONObject().put("code", stringProperty("The complete code text to insert, raw — no markdown fences")),
+                required = listOf("code")
+            )
+        ),
+        ToolSpec(
             "set_volume",
             "Set media volume as a percentage from 0 to 100.",
             schema(
@@ -159,10 +194,10 @@ object ToolRegistry {
      * in a loop). These are the registry's actual media/open tools;
      * there are no play_media/play_song tools in this build.
      */
-    val TERMINAL_TOOLS: Set<String> = setOf("youtube_play", "open_app")
+    val TERMINAL_TOOLS: Set<String> = setOf("youtube_play", "spotify_play", "open_app")
 
     /** Media-play tools (F3): a success blocks voice auto-listen resume. */
-    val MEDIA_PLAY_TOOLS: Set<String> = setOf("youtube_play")
+    val MEDIA_PLAY_TOOLS: Set<String> = setOf("youtube_play", "spotify_play")
 
     /** OpenAI-compatible `tools` array. */
     fun openAiTools(): JSONArray {

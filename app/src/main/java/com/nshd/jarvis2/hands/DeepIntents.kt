@@ -112,10 +112,12 @@ class DeepIntents(context: Context) {
                 setPackage("com.google.android.youtube")
             }
         }
+        com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Opening YouTube…")
         if (!launch(intent)) return ActionResult(false, "YouTube could not be opened.")
 
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(true, "Opened YouTube search results for \"$cleanQuery\". Enable Accessibility to auto-play the first result.")
+        com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Searching '$cleanQuery'…")
 
         val reader = service.screenReader()
         val metrics = appContext.resources.displayMetrics
@@ -132,7 +134,9 @@ class DeepIntents(context: Context) {
             if (attempt == 0) {
                 HandsActions.waitForSettle(YOUTUBE_FIRST_SETTLE_MS)
             } else {
-                delay(YOUTUBE_RETRY_SETTLE_MS)
+                // F6: signature-settle wait (early exit) instead of
+                // the old blind 850 ms sleep between snapshots.
+                HandsActions.waitForSettle(YOUTUBE_RETRY_SETTLE_MS)
             }
             val snapshot = reader.snapshot()
             lastSnapshotSize = snapshot.size
@@ -154,6 +158,7 @@ class DeepIntents(context: Context) {
                     "loading, or YouTube is showing a different layout."
             )
         }
+        com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Playing…")
         val click = HandsActions.clickElement(chosen.element.index)
         if (!click.success) {
             return ActionResult(
@@ -171,6 +176,225 @@ class DeepIntents(context: Context) {
                 else -> "Playing the first video result on YouTube."
             }
         )
+    }
+
+    // ── Spotify (F6) ───────────────────────────────────────────────────
+
+    /**
+     * Fast media path for Spotify, mirroring [youtubePlay]: ONE
+     * programmatic intent (open → Search tab → type the query → tap
+     * the first song row) replaces ~6 generic agent-loop steps, each
+     * of which used to cost a full model round trip plus settle
+     * waits. All waiting is Part C polling (early-exit the moment the
+     * expected window/element appears) — no fixed long sleeps.
+     *
+     * Tapping a song row in Spotify search starts playback. When a
+     * track/album page opens instead, its Play button is tapped.
+     * Playback is verified heuristically: a "Pause" affordance in the
+     * mini-player / now-playing UI. The result text is honest about
+     * whether playback was confirmed.
+     */
+    suspend fun spotifyPlay(query: String): ActionResult {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return ActionResult(false, "The Spotify search query is blank.")
+        com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Opening Spotify…")
+        val opened = openApp("Spotify")
+        if (!opened.success) return opened
+
+        val service = JarvisAccessibilityService.instance
+            ?: return ActionResult(
+                true,
+                "Opened Spotify. Enable Accessibility to let Jarvis search and play automatically."
+            )
+        val reader = service.screenReader()
+        val metrics = appContext.resources.displayMetrics
+        val screenHeight = metrics.heightPixels
+        val screenWidth = metrics.widthPixels
+
+        HandsActions.waitForPackage(SPOTIFY_PACKAGE, APP_WINDOW_WAIT_MS)
+
+        // 1) Search tab (bottom nav) — poll until it shows up.
+        val withTab = HandsActions.waitForSnapshot(SEARCH_TAB_WAIT_MS) { snapshot ->
+            snapshot.any { isSpotifySearchTab(it, screenHeight) }
+        } ?: return ActionResult(
+            false,
+            "Spotify opened, but its Search tab never appeared — Spotify " +
+                "may still be loading or showing a prompt."
+        )
+        val tab = withTab.first { isSpotifySearchTab(it, screenHeight) }
+        val tabClick = HandsActions.clickElement(tab.index)
+        if (!tabClick.success) {
+            return ActionResult(false, "Spotify opened, but the Search tab could not be tapped: ${tabClick.message}")
+        }
+
+        // 2) Search input: tap the search bar if the field isn't
+        // already focused/editable, then type the query (SET_TEXT —
+        // search fields use replace semantics).
+        com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Searching '$cleanQuery'…")
+        val inputReady = HandsActions.waitForSnapshot(SEARCH_INPUT_WAIT_MS) { snapshot ->
+            snapshot.any { it.editable } ||
+                snapshot.any { isSpotifySearchBar(it) }
+        } ?: return ActionResult(
+            false,
+            "Spotify's search screen opened, but no search field appeared."
+        )
+        val directField = inputReady.firstOrNull { it.editable }
+        if (directField == null) {
+            val bar = inputReady.firstOrNull { isSpotifySearchBar(it) }
+                ?: return ActionResult(false, "Spotify's search field could not be found.")
+            val barClick = HandsActions.clickElement(bar.index)
+            if (!barClick.success) {
+                return ActionResult(false, "Spotify's search bar could not be tapped: ${barClick.message}")
+            }
+            if (!HandsActions.waitForEditable(SEARCH_INPUT_WAIT_MS)) {
+                return ActionResult(false, "Spotify's search field never became editable.")
+            }
+        } else {
+            // Focus the field so SET_TEXT lands in it.
+            HandsActions.clickElement(directField.index)
+        }
+        val typed = HandsActions.setTextOnFocused(cleanQuery)
+        if (!typed.success) {
+            return ActionResult(false, "Spotify search opened, but the query could not be typed: ${typed.message}")
+        }
+
+        // 3) First song row — poll results until a pick exists.
+        var pick: SpotifyPick? = null
+        val results = HandsActions.waitForSnapshot(RESULTS_WAIT_MS) { snapshot ->
+            pick = pickSpotifyResult(snapshot, screenWidth, screenHeight)
+            pick != null
+        }
+        val chosen = pick ?: run {
+            AppLog.w(
+                "Hands",
+                "spotify_play: no song row after waiting. Screen: ${reader.serialize(25)}"
+            )
+            return ActionResult(
+                false,
+                "Spotify searched for \"$cleanQuery\", but no playable song " +
+                    "result appeared — results may still be loading, or " +
+                    "Spotify is showing a different layout."
+            )
+        }
+        com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Playing…")
+        val rowClick = HandsActions.clickElement(chosen.element.index)
+        if (!rowClick.success) {
+            return ActionResult(
+                false,
+                "Spotify results were shown, but the song could not be tapped: ${rowClick.message}"
+            )
+        }
+
+        // 4) Verify playback: a Pause affordance means audio is
+        // playing. If a track/album page opened instead of playing,
+        // tap its Play button and verify again.
+        if (awaitPauseAffordance(PAUSE_VERIFY_MS)) {
+            return ActionResult(true, "Playing '${chosen.title}' on Spotify.")
+        }
+        val pageSnapshot = reader.snapshot()
+        val playButton = pageSnapshot.firstOrNull { element ->
+            element.clickable &&
+                (element.desc.equals("Play", ignoreCase = true) ||
+                    element.text.equals("Play", ignoreCase = true))
+        }
+        if (playButton != null) {
+            HandsActions.clickElement(playButton.index)
+            if (awaitPauseAffordance(PAUSE_VERIFY_MS)) {
+                return ActionResult(true, "Playing '${chosen.title}' on Spotify.")
+            }
+        }
+        return ActionResult(
+            true,
+            "Started '${chosen.title}' on Spotify (the player state " +
+                "couldn't be confirmed on screen)."
+        )
+    }
+
+    /** Poll briefly for a "Pause" affordance (playback evidence). */
+    private suspend fun awaitPauseAffordance(timeoutMs: Long): Boolean =
+        HandsActions.waitForSnapshot(timeoutMs) { snapshot ->
+            snapshot.any { element ->
+                element.desc.equals("Pause", ignoreCase = true) ||
+                    element.text.equals("Pause", ignoreCase = true)
+            }
+        } != null
+
+    private fun isSpotifySearchTab(element: UiElement, screenHeight: Int): Boolean =
+        element.clickable &&
+            element.bounds.centerY() > screenHeight * 3 / 5 &&
+            (element.text.equals("Search", ignoreCase = true) ||
+                element.desc.equals("Search", ignoreCase = true))
+
+    private fun isSpotifySearchBar(element: UiElement): Boolean =
+        element.viewId.contains("search", ignoreCase = true) ||
+            element.label.contains("What do you want to listen to", ignoreCase = true) ||
+            element.label.contains("Search, ", ignoreCase = true)
+
+    /** One chosen Spotify song row. */
+    private data class SpotifyPick(val element: UiElement, val title: String)
+
+    /**
+     * First song row in Spotify search results. Candidates are
+     * clickable, non-editable rows between the search header and the
+     * mini-player; ads are skipped, and when a "Songs" section header
+     * exists only rows below it compete (the top hit above it can be
+     * an artist/album card). Topmost wins.
+     */
+    private fun pickSpotifyResult(
+        snapshot: List<UiElement>,
+        screenWidth: Int,
+        screenHeight: Int
+    ): SpotifyPick? {
+        val regionTop = screenHeight / 8
+        val regionBottom = screenHeight * 7 / 8
+        val songsHeader = snapshot.firstOrNull { element ->
+            element.text.trim().equals("Songs", ignoreCase = true) &&
+                element.bounds.centerY() in regionTop..regionBottom
+        }
+        val minTop = songsHeader?.bounds?.bottom ?: regionTop
+        val candidates = snapshot.filter { element ->
+            element.clickable && !element.editable &&
+                element.bounds.centerY() in regionTop..regionBottom &&
+                element.bounds.top >= minTop - 4 &&
+                element.bounds.width() > screenWidth / 3 &&
+                element.bounds.height() > 0
+        }
+        var skippedAds = 0
+        val rows = candidates.filter { element ->
+            val label = element.label.trim()
+            when {
+                label.length <= 2 -> false
+                isAdLabel(label) -> {
+                    skippedAds++
+                    false
+                }
+                // Section headers and bottom-nav chrome are not songs.
+                label.length <= CHROME_LABEL_MAX &&
+                    SPOTIFY_CHROME_WORDS.any { label.equals(it, ignoreCase = true) } -> false
+                else -> true
+            }
+        }
+        val primary = rows.minByOrNull { it.bounds.top }
+        if (primary == null) {
+            AppLog.d(
+                "Hands",
+                "spotify_play pick: none (${candidates.size} candidates, ads skipped=$skippedAds)"
+            )
+            return null
+        }
+        AppLog.d(
+            "Hands",
+            "spotify_play pick: ${rows.size} rows considered (ads skipped=$skippedAds), " +
+                "tapped index=${primary.index} label='${primary.label.take(60)}'"
+        )
+        return SpotifyPick(primary, spotifyTitle(primary.label))
+    }
+
+    /** "Song Name • Artist Name" → "Song Name" (rows merge descendant text). */
+    private fun spotifyTitle(label: String): String {
+        val first = label.substringBefore(" • ").substringBefore(" - ").trim()
+        val title = if (first.length >= 2) first else label.trim()
+        return title.take(90).ifBlank { "the song" }
     }
 
     /** One chosen YouTube result card (F5.1). */
@@ -548,8 +772,25 @@ class DeepIntents(context: Context) {
 
         private const val CHROME_LABEL_MAX = 24
         private const val YOUTUBE_SNAPSHOT_ATTEMPTS = 3
-        private const val YOUTUBE_FIRST_SETTLE_MS = 1_800L
-        private const val YOUTUBE_RETRY_SETTLE_MS = 850L
+        // F6: settle caps aligned with the Part C speed pass —
+        // waitForSettle early-exits the moment the tree is stable, so
+        // these are worst-case caps, not sleeps.
+        private const val YOUTUBE_FIRST_SETTLE_MS = 1_500L
+        private const val YOUTUBE_RETRY_SETTLE_MS = 600L
+
+        // F6 Spotify fast-path waits (all polling with early exit).
+        private const val SPOTIFY_PACKAGE = "com.spotify.music"
+        private const val APP_WINDOW_WAIT_MS = 2_500L
+        private const val SEARCH_TAB_WAIT_MS = 2_500L
+        private const val SEARCH_INPUT_WAIT_MS = 2_000L
+        private const val RESULTS_WAIT_MS = 2_500L
+        private const val PAUSE_VERIFY_MS = 1_800L
+
+        /** Spotify bottom-nav / section chrome — never a song row. */
+        private val SPOTIFY_CHROME_WORDS = listOf(
+            "home", "search", "your library", "create", "premium",
+            "songs", "artists", "albums", "playlists", "podcasts", "recently played"
+        )
 
         private val PACKAGE_MAP = mapOf(
             "whatsapp" to "com.whatsapp",
@@ -565,7 +806,11 @@ class DeepIntents(context: Context) {
             "googleplay" to "com.android.vending",
             "googleplaystore" to "com.android.vending",
             "clock" to "com.google.android.deskclock",
-            "calculator" to "com.google.android.calculator2"
+            "calculator" to "com.google.android.calculator2",
+            // F6: QuickEdit (his code editor) — direct package launch
+            // for the insert_code auto-open convenience. (Key is the
+            // normalizeAppName form: "quick edit" → "quickedit".)
+            "quickedit" to "com.rhmsoft.edit"
         )
     }
 }

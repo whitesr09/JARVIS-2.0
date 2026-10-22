@@ -119,6 +119,12 @@ class FailoverRouter(
             try {
                 var step = 0
                 while (step < maxSteps.coerceAtLeast(1)) {
+                    // F6: keep the step prompt lean — tool results
+                    // older than the last 6 steps collapse to their
+                    // first line (the model rarely re-reads an old
+                    // screen dump, but pays tokens for it every step).
+                    compactOldToolResults(conversation, keepSteps = 6)
+                    val modelStartedAt = System.currentTimeMillis()
                     val reply = chatStreamRetrying(
                         provider = provider,
                         messages = conversation,
@@ -128,7 +134,12 @@ class FailoverRouter(
                         toolsExecuted = { executedAnyTool },
                         onDelta = onAssistantDelta
                     )
+                    val modelMs = System.currentTimeMillis() - modelStartedAt
                     if (reply.toolCalls.isEmpty()) {
+                        AppLog.d(
+                            "Agent",
+                            "step ${step + 1} model=${modelMs}ms action=0ms tool=none"
+                        )
                         return reply.content.ifBlank {
                             "Done."
                         }
@@ -140,6 +151,8 @@ class FailoverRouter(
                         toolCallsJson = serializeToolCalls(reply.toolCalls)
                     )
 
+                    var actionMs = 0L
+                    var terminalReply: String? = null
                     for (call in reply.toolCalls) {
                         onEvent(ToolEvent(ToolEventKind.STARTED, call.name))
                         val args = try {
@@ -156,10 +169,12 @@ class FailoverRouter(
                                 "Tool ${call.name} failed safely: ${e.message ?: "unexpected error"}"
                             )
                         }
+                        val toolMs = System.currentTimeMillis() - toolStartedAt
+                        actionMs += toolMs
                         AppLog.d(
                             "Agent",
                             "tool ${call.name} ${if (result.success) "ok" else "FAILED"} " +
-                                "in ${System.currentTimeMillis() - toolStartedAt}ms"
+                                "in ${toolMs}ms"
                         )
                         executedAnyTool = true
                         lastToolOutcome = result.message.lineSequence()
@@ -182,14 +197,15 @@ class FailoverRouter(
                             toolCallId = call.id
                         )
                         // F3 terminal media/open rule: a successful
-                        // youtube_play / open_app ENDS the turn right
-                        // here — the tool result's first line is the
-                        // final summary. No more model round trips
-                        // (extra trips were replaying the request).
+                        // youtube_play / spotify_play / open_app ENDS
+                        // the turn right here — the tool result's first
+                        // line is the final summary. No more model round
+                        // trips (extra trips were replaying the request).
                         if (result.success && call.name in ToolRegistry.TERMINAL_TOOLS) {
-                            return result.message.lineSequence()
+                            terminalReply = result.message.lineSequence()
                                 .firstOrNull()?.trim().orEmpty()
                                 .ifBlank { "Done." }
+                            break
                         }
                         // Vision tools (see_screen) attach a screenshot:
                         // deliver it as a following user message with image
@@ -202,6 +218,15 @@ class FailoverRouter(
                             )
                         }
                     }
+                    // F6: per-step timing split (model vs hands) — the
+                    // "Agent" log now proves where a slow task spends
+                    // its time instead of guessing.
+                    AppLog.d(
+                        "Agent",
+                        "step ${step + 1} model=${modelMs}ms action=${actionMs}ms " +
+                            "tool=${reply.toolCalls.joinToString(",") { it.name }}"
+                    )
+                    terminalReply?.let { return it }
                     step++
                 }
 
@@ -312,6 +337,28 @@ class FailoverRouter(
         }
     }
 
+    /**
+     * F6: collapse tool results older than the last [keepSteps] tool
+     * messages to their first line (+ marker). Keeps the recent
+     * context exact while stopping long tasks from re-sending every
+     * earlier screen dump on every step. Idempotent: an already
+     * compacted message ends with the marker and is left alone.
+     */
+    private fun compactOldToolResults(conversation: MutableList<ChatMsg>, keepSteps: Int) {
+        val toolIndices = conversation.indices.filter { conversation[it].role == "tool" }
+        if (toolIndices.size <= keepSteps) return
+        val compactable = toolIndices.dropLast(keepSteps)
+        for (index in compactable) {
+            val message = conversation[index]
+            val content = message.content
+            if (content.length <= 160 || content.endsWith(COMPACTED_MARKER)) continue
+            val firstLine = content.lineSequence().firstOrNull()?.trim().orEmpty()
+            conversation[index] = message.copy(
+                content = (firstLine.ifBlank { "(tool result)" }) + COMPACTED_MARKER
+            )
+        }
+    }
+
     /** F5.1: is this failure worth a same-provider retry? */
     private fun isTransientFailure(detail: String): Boolean {
         val lower = detail.lowercase()
@@ -398,6 +445,9 @@ class FailoverRouter(
     }
 
     companion object {
+        /** F6: suffix marking an already-compacted old tool result. */
+        private const val COMPACTED_MARKER = " […]"
+
         /** Substitution source (c): sane default text model per provider. */
         private val DEFAULT_TEXT_MODELS = mapOf(
             "gemini" to "gemini-2.5-flash",

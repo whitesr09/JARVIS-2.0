@@ -148,8 +148,17 @@ object VoskModelManager {
                 }
             } catch (e: Exception) {
                 runCatching { zipFile.delete() }
+                // F6 audit: the raw exception text (host names, SSL
+                // errors, zip internals) used to be stored here and
+                // displayed verbatim in Settings. Raw → AppLog; the
+                // state carries a complete friendly sentence.
+                com.nshd.jarvis2.core.AppLog.e(
+                    "Wake", "wake model download failed: ${e.message}", e
+                )
                 _downloadState.value = DownloadState.Error(
-                    e.message ?: "Model download failed"
+                    "Download failed — " +
+                        com.nshd.jarvis2.ui.FriendlyErrors.shortReason(e.message) +
+                        ". Check your connection and try again."
                 )
             }
         }

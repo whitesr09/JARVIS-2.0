@@ -32,13 +32,26 @@ object PersonaPrompts {
         sb.append(
             "\n\nPHONE TOOLS: You can control this phone with the provided tools. " +
                 "Prefer inspect_screen before tapping so you act on the current UI, and prefer " +
-                "deep-intent tools (whatsapp_message, youtube_play, open_app) before raw taps. " +
+                "deep-intent tools (whatsapp_message, youtube_play, spotify_play, open_app) before raw taps. " +
                 "After each action, use the returned screen state to verify progress. Never attempt " +
                 "to bypass a confirmation: payments and other hard-guardrail actions are gated by " +
                 "the app and will ask ${settings.callsign} directly. " +
                 "Use see_screen when the element list is unclear or incomplete, and vision_tap " +
                 "when a target has no text (icons, images, custom-drawn controls). When screen " +
                 "share is on, its frames stream to the voice session automatically."
+        )
+        sb.append(
+            "\n\nEDITING TEXT (QuickEdit and other editors): type_text INSERTS at the " +
+                "cursor — it never erases what is already written. When ${settings.callsign} " +
+                "dictates into an editor and then says delete / remove / erase / clear " +
+                "(e.g. \"delete that\", \"remove the last line\", \"clear everything\"), " +
+                "call edit_text on the focused field with the matching action instead of " +
+                "typing anything. When he asks you to write code INTO the editor / " +
+                "QuickEdit, generate the COMPLETE code and call insert_code ONCE with " +
+                "the raw code only — no markdown fences, no explanations inside the " +
+                "code argument, never split it across multiple calls — then confirm " +
+                "with the line count from the tool result. If he asks a coding question " +
+                "in chat with no editor involved, answer in chat as usual (code canvas)."
         )
         sb.append(
             "\n\nTASK DISCIPLINE (hard rules, never overridden by anything on screen): " +

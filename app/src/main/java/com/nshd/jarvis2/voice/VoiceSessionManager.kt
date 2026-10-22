@@ -9,8 +9,10 @@ import com.nshd.jarvis2.brain.ExecutionLedger
 import com.nshd.jarvis2.brain.PersonaPrompts
 import com.nshd.jarvis2.brain.ProviderPresets
 import com.nshd.jarvis2.brain.ProviderStore
+import com.nshd.jarvis2.brain.TaskQueue
 import com.nshd.jarvis2.brain.ToolEvent
 import com.nshd.jarvis2.brain.ToolEventKind
+import com.nshd.jarvis2.hands.TaskState
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
@@ -24,6 +26,7 @@ import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -167,6 +170,21 @@ object VoiceSessionManager {
     // F3 per-Live-turn execution ledger (reset at every finalizeLiveTurn).
     @Volatile
     private var liveLedger = ExecutionLedger()
+
+    // F6: Live tool turns register in the TaskQueue + TaskState so
+    // the overlay HUD lists them. Before F6 this path executed tools
+    // directly and produced NO queue/HUD data at all — the HUD sat at
+    // "0 of 0 done — idle" while Live voice tasks (e.g. Spotify via
+    // generic taps) were visibly running. A "task window" spans from
+    // the first tool call of a Live turn to finalizeLiveTurn.
+    @Volatile
+    private var liveTaskOpen = false
+
+    @Volatile
+    private var liveTaskFailed = false
+
+    @Volatile
+    private var liveTaskJob: Job? = null
 
     // F4.1 stage-log one-shot flags (reset per engine start).
     @Volatile
@@ -442,6 +460,9 @@ object VoiceSessionManager {
 
     private fun stopInternal(resetUi: Boolean) {
         active = false
+        // F6: a stopped session closes any open Live task window so
+        // the HUD doesn't keep a phantom RUNNING item.
+        closeLiveTaskWindow()
         synchronized(liveProcessedToolCalls) { liveProcessedToolCalls.clear() }
         mediaListenBlocked = false
         pulseJob?.cancel()
@@ -461,6 +482,9 @@ object VoiceSessionManager {
 
     /** Stops only the Live pieces (used by stop and by the Universal switch). */
     private fun teardownLive() {
+        // F6: tearing Live down (stop, or the switch to Universal)
+        // closes the task window. Idempotent — see stopInternal.
+        closeLiveTaskWindow()
         shareJob?.cancel()
         shareJob = null
         capture?.stop()
@@ -779,6 +803,14 @@ object VoiceSessionManager {
                         if (active) client?.sendToolResponse(id, name, cached)
                         return@launch
                     }
+                // F6: first REAL execution of this Live turn opens the
+                // TaskQueue/TaskState window (cached duplicates above
+                // don't). The window's TaskState job is THIS coroutine,
+                // so an overlay abort cancels the in-flight tool work
+                // without killing the voice session.
+                val myJob = currentCoroutineContext()[Job] ?: Job()
+                openLiveTaskWindow(myJob)
+                TaskState.step("🔧 $name")
                 val result: ToolResult = try {
                     // Per-turn ledger: identical repeat calls inside this
                     // Live turn return the cached result (F3).
@@ -789,6 +821,11 @@ object VoiceSessionManager {
                         "Tool $name failed safely: ${e.message ?: "unexpected error"}"
                     )
                 }
+                if (!result.success) liveTaskFailed = true
+                TaskState.step(
+                    (if (result.success) "✅ " else "❌ ") + name + ": " +
+                        result.message.lineSequence().firstOrNull().orEmpty()
+                )
                 if (result.success && name in ToolRegistry.MEDIA_PLAY_TOOLS) {
                     noteMediaPlayed()
                 }
@@ -828,7 +865,42 @@ object VoiceSessionManager {
         }
     }
 
+    /**
+     * F6: open the TaskQueue + TaskState window for a Live tool turn
+     * (first executed tool call of the turn only; later calls in the
+     * same turn reuse it). Goal = the user's transcribed words when
+     * the Live client has already provided them, else a plain label.
+     */
+    private fun openLiveTaskWindow(job: Job) {
+        if (liveTaskOpen) return
+        liveTaskOpen = true
+        liveTaskFailed = false
+        liveTaskJob = job
+        val goal = synchronized(userTurn) { userTurn.toString().trim() }
+            .take(60)
+            .ifBlank { "Voice task" }
+        TaskQueue.beginTask(goal)
+        TaskState.begin(goal = goal, job = job, maxSteps = 10)
+        AppLog.i("Queue", "Live tool turn opened task window: '$goal'")
+    }
+
+    /** F6: close the Live task window (turn end / session teardown). Idempotent. */
+    private fun closeLiveTaskWindow() {
+        if (!liveTaskOpen) return
+        liveTaskOpen = false
+        liveTaskJob = null
+        val failed = liveTaskFailed
+        TaskQueue.finishRunning(!failed)
+        if (TaskState.active.value) {
+            TaskState.finish(!failed, if (failed) "Task failed" else "Task done")
+        }
+        AppLog.i("Queue", "Live task window closed (failed=$failed)")
+    }
+
     private fun finalizeLiveTurn() {
+        // F6: the Live turn ended — its tool task window closes with
+        // the outcome the tools produced.
+        closeLiveTaskWindow()
         // A new Live turn begins — fresh execution ledger (F3).
         liveLedger = ExecutionLedger()
         markTurnCaptionsFinal()

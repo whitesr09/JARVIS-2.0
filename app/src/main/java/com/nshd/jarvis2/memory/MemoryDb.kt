@@ -128,7 +128,27 @@ class MemoryDb(context: Context) :
             put("content", content)
             put("created", System.currentTimeMillis())
         }
-        return writableDatabase.insert("chat_messages", null, values)
+        val id = writableDatabase.insert("chat_messages", null, values)
+        // F6 audit (data safety): this table previously grew without
+        // bound — every chat and voice turn appends rows forever and
+        // nothing ever deleted. Keep the newest MAX_HISTORY_MESSAGES
+        // rows; prune cheaply (one indexed delete every ~100 inserts).
+        // The pipeline only ever reads the last ≤16, so 1000 is a
+        // generous history window.
+        if (id > 0 && id % 100L == 0L) pruneHistory()
+        return id
+    }
+
+    private fun pruneHistory() {
+        try {
+            writableDatabase.execSQL(
+                "DELETE FROM chat_messages WHERE id NOT IN " +
+                    "(SELECT id FROM chat_messages ORDER BY id DESC " +
+                    "LIMIT $MAX_HISTORY_MESSAGES)"
+            )
+        } catch (e: Exception) {
+            // Pruning must never break message writes.
+        }
     }
 
     /** Most recent [limit] messages, in chronological order. */
@@ -157,5 +177,8 @@ class MemoryDb(context: Context) :
     companion object {
         private const val DB_NAME = "jarvis_memory.db"
         private const val DB_VERSION = 1
+
+        /** F6: chat history retention cap (see pruneHistory). */
+        private const val MAX_HISTORY_MESSAGES = 1000
     }
 }

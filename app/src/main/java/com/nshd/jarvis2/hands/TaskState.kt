@@ -73,6 +73,11 @@ object TaskState {
         this.job = job
     }
 
+    // F6 audit: producers now sit on two IO threads (the pipeline's
+    // dispatcher and the Live tool coroutine) — the read-modify-write
+    // of the steps list + counters is synchronized so a step line can
+    // never be lost to a race.
+    @Synchronized
     fun step(text: String) {
         if (!_active.value) return
         totalSteps++

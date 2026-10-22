@@ -22,6 +22,16 @@ import kotlin.math.abs
 
 data class ActionResult(val success: Boolean, val message: String)
 
+/** Resolved editable target + everything the edit/insert paths need (F6). */
+private class EditableTarget(
+    val node: AccessibilityNodeInfo,
+    val descriptor: UiElement,
+    val text: String,
+    val selectionStart: Int,
+    val selectionEnd: Int,
+    val isSearchField: Boolean
+)
+
 /**
  * The single mutation gate for accessibility actions.
  *
@@ -32,6 +42,20 @@ data class ActionResult(val success: Boolean, val message: String)
  */
 object HandsActions {
     private val mutex = Mutex()
+
+    // F6 speed pass constants: settle polling cadence and the short
+    // read-back pause after SET_TEXT (was 180 ms, now 100 ms — the
+    // read-back itself is the verification, the pause only lets the
+    // editor commit the change).
+    private const val SETTLE_POLL_MS = 100L
+    private const val VERIFY_DELAY_MS = 100L
+
+    // F6 insert_code chunking: above ~6000 inserted characters the
+    // code is applied in ~3000-character chunks (SET_TEXT on the
+    // growing content) to stay under OEM editor limits.
+    private const val CHUNK_THRESHOLD = 6_000
+    private const val CHUNK_SIZE = 3_000
+    private const val LENGTH_TOLERANCE = 4
 
     // SensitiveTapGuard (F3) constants.
     private const val OWN_PACKAGE = "com.nshd.jarvis2"
@@ -71,55 +95,383 @@ object HandsActions {
         clickResolved(service, element, "\"${element.label.ifBlank { text }}\"")
     }
 
+    /**
+     * F6 (Part D): dictation semantics. Before F6 this REPLACED the
+     * whole field (SET_TEXT with the chunk alone, verified by exact
+     * equality) — dictating into an editor destroyed what was already
+     * written, and there was no way to delete. Now the text is
+     * INSERTED at the selection end (appended at the end when no
+     * selection is known); SEARCH fields keep replace semantics (a
+     * new search should not concatenate with the old one). Entry is
+     * still verified by reading the field back. Deletion lives in
+     * [editTextOnFocused].
+     */
     suspend fun setTextOnFocused(text: String): ActionResult = serialized {
         val service = serviceOrNull() ?: return@serialized disabled()
         if (text.isBlank()) return@serialized ActionResult(false, "Text to type is blank.")
         val root = service.activeRoot()
             ?: return@serialized ActionResult(false, "No active window is available.")
-        val target = findEditable(root)
+        val target = resolveEditableTarget(root)
             ?: return@serialized ActionResult(false, "No editable text field was found on this screen.")
-        val descriptor = target.toDescriptor()
-        val existing = target.text?.toString().orEmpty()
-        if (existing == text) {
+        val existing = target.text
+        val replace = target.isSearchField || existing.isBlank()
+        val insertAt = when {
+            replace -> 0
+            target.selectionEnd in 0..existing.length -> target.selectionEnd
+            else -> existing.length
+        }
+        val newText = if (replace) {
+            text
+        } else {
+            existing.substring(0, insertAt) + text + existing.substring(insertAt)
+        }
+        if (existing == newText) {
             return@serialized ActionResult(
                 true,
                 "The field already contains the exact requested text; nothing was typed again."
             )
         }
 
-        fun freshTarget(): AccessibilityNodeInfo? {
-            val freshRoot = service.activeRoot() ?: return null
-            return resolveNode(freshRoot, descriptor) ?: findEditable(freshRoot)
-        }
-
         val arguments = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
         }
-        val accepted = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
-        delay(180)
-        var readBack = freshTarget()?.text?.toString().orEmpty()
-        if (accepted && readBack == text) {
-            return@serialized ActionResult(true, "Text entered and verified.")
+        val accepted = target.node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        delay(VERIFY_DELAY_MS)
+        var readBack = freshTarget(service, target.descriptor)?.text.orEmpty()
+        if (accepted && readBack == newText) {
+            return@serialized ActionResult(
+                true,
+                if (replace) "Text entered and verified." else "Text inserted and verified."
+            )
         }
 
-        // Verified paste fallback: only used after SET_TEXT failed to produce
-        // the exact value. Never append blindly.
+        // Verified paste fallback: only used after SET_TEXT failed to
+        // produce the exact value. Paste inserts at the cursor, which
+        // matches insert semantics directly; in replace mode the old
+        // content is selected first so the paste overwrites it.
         val clipboard = service.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             ?: return@serialized ActionResult(false, "Text entry could not be verified and clipboard is unavailable.")
         clipboard.setPrimaryClip(ClipData.newPlainText("JarvisInput", text))
-        val pasteTarget = freshTarget()
+        val pasteTarget = freshTarget(service, target.descriptor)
             ?: return@serialized ActionResult(false, "The text field disappeared before paste could be verified.")
-        val pasted = pasteTarget.performAction(AccessibilityNodeInfo.ACTION_PASTE)
-        delay(180)
-        readBack = freshTarget()?.text?.toString().orEmpty()
-        if (pasted && readBack == text) {
+        if (replace && pasteTarget.text.isNotEmpty()) {
+            pasteTarget.node.performAction(
+                AccessibilityNodeInfo.ACTION_SET_SELECTION,
+                selectionArguments(0, pasteTarget.text.length)
+            )
+        }
+        val pasted = pasteTarget.node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+        delay(VERIFY_DELAY_MS)
+        readBack = freshTarget(service, target.descriptor)?.text.orEmpty()
+        if (pasted && readBack == newText) {
             ActionResult(true, "Text entered with paste fallback and verified.")
         } else {
             ActionResult(
                 false,
-                "Text entry was not verified. The field contains \"$readBack\", not the requested text."
+                "Text entry was not verified. The field contains \"$readBack\", not the expected text."
             )
         }
+    }
+
+    /** True when any editable node is resolvable on the active window. */
+    fun focusedEditablePresent(): Boolean {
+        val service = serviceOrNull() ?: return false
+        val root = service.activeRoot() ?: return false
+        return findEditable(root) != null
+    }
+
+    /**
+     * F6 (Part D): delete text in the focused editable field on
+     * command — the edit_text tool's engine. Computes the new content,
+     * applies it with ACTION_SET_TEXT and verifies by reading back.
+     * [action]: clear_all / delete_last_line / delete_last_word /
+     * delete_last_chars ([count]) / delete_selection. Deliberately
+     * NOT routed through the SensitiveTapGuard: this is the user's
+     * own explicit delete command, not a UI tap.
+     */
+    suspend fun editTextOnFocused(action: String, count: Int): ActionResult = serialized {
+        val service = serviceOrNull() ?: return@serialized disabled()
+        val root = service.activeRoot()
+            ?: return@serialized ActionResult(false, "No active window is available.")
+        val target = resolveEditableTarget(root)
+            ?: return@serialized ActionResult(
+                false,
+                "No text field is focused — tap into the editor first."
+            )
+        val text = target.text
+        if (text.isEmpty()) {
+            return@serialized ActionResult(true, "The field is already empty — nothing to delete.")
+        }
+        val newText: String
+        val description: String
+        when (action) {
+            "clear_all" -> {
+                newText = ""
+                description = "Cleared all ${text.length} characters."
+            }
+            "delete_last_line" -> {
+                val body = text.removeSuffix("\n")
+                val idx = body.lastIndexOf('\n')
+                newText = if (idx >= 0) body.substring(0, idx + 1) else ""
+                val deleted = body.substring(if (idx >= 0) idx + 1 else 0)
+                description = "Deleted the last line: '${preview(deleted)}'."
+            }
+            "delete_last_word" -> {
+                val trimmed = text.trimEnd()
+                if (trimmed.isEmpty()) {
+                    return@serialized ActionResult(true, "Only whitespace was there — nothing to delete.")
+                }
+                val boundary = maxOf(
+                    trimmed.lastIndexOf(' '),
+                    trimmed.lastIndexOf('\n'),
+                    trimmed.lastIndexOf('\t')
+                )
+                val cut = if (boundary >= 0) boundary else 0
+                newText = trimmed.substring(0, cut)
+                val deleted = trimmed.substring(cut).trim()
+                description = "Deleted the last word: '${preview(deleted)}'."
+            }
+            "delete_last_chars" -> {
+                val n = count.coerceIn(1, text.length)
+                newText = text.dropLast(n)
+                description = "Deleted the last $n characters: '${preview(text.takeLast(n))}'."
+            }
+            "delete_selection" -> {
+                val start = target.selectionStart
+                val end = target.selectionEnd
+                if (start < 0 || end < 0 || start >= end || end > text.length) {
+                    return@serialized ActionResult(
+                        false,
+                        "No text is selected in the field, so there is no " +
+                            "selection to delete. Select the text first, or " +
+                            "use clear_all / delete_last_line instead."
+                    )
+                }
+                newText = text.removeRange(start, end)
+                description = "Deleted the selected text: '${preview(text.substring(start, end))}'."
+            }
+            else -> return@serialized ActionResult(false, "Unknown edit action: $action")
+        }
+        if (newText == text) {
+            return@serialized ActionResult(true, "Nothing changed — the field already matches.")
+        }
+        val accepted = target.node.performAction(
+            AccessibilityNodeInfo.ACTION_SET_TEXT,
+            Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    newText
+                )
+            }
+        )
+        delay(VERIFY_DELAY_MS)
+        var readBack = freshTarget(service, target.descriptor)?.text
+        if (accepted && readBack == newText) {
+            com.nshd.jarvis2.core.AppLog.d(
+                "Tools",
+                "edit_text $action: ${text.length} → ${newText.length} chars"
+            )
+            return@serialized ActionResult(true, description)
+        }
+        // clear_all fallback: SELECT_ALL + CUT for editors that shrug
+        // off SET_TEXT with an empty value.
+        if (action == "clear_all") {
+            val fresh = freshTarget(service, target.descriptor)
+            if (fresh != null && fresh.text.isNotEmpty()) {
+                fresh.node.performAction(
+                    AccessibilityNodeInfo.ACTION_SET_SELECTION,
+                    selectionArguments(0, fresh.text.length)
+                )
+                val cut = fresh.node.performAction(AccessibilityNodeInfo.ACTION_CUT)
+                delay(VERIFY_DELAY_MS)
+                readBack = freshTarget(service, target.descriptor)?.text
+                if (cut && readBack.isNullOrEmpty()) {
+                    com.nshd.jarvis2.core.AppLog.d(
+                        "Tools", "edit_text clear_all via CUT: ${text.length} chars removed"
+                    )
+                    return@serialized ActionResult(true, description)
+                }
+            }
+        }
+        ActionResult(
+            false,
+            "The edit could not be verified — the field still contains " +
+                "${readBack?.length ?: 0} characters."
+        )
+    }
+
+    /**
+     * F6 (Part D2): insert COMPLETE code into the focused editable
+     * field. Empty field → the code alone; otherwise the code goes at
+     * the selection end (a selection range is replaced), appending at
+     * the end when no selection is known, with a separating newline
+     * when the preceding character isn't one. Code longer than
+     * [CHUNK_THRESHOLD] is applied in ~[CHUNK_SIZE]-character chunks
+     * (SET_TEXT on the growing content) to stay under OEM editor
+     * limits. Verified by re-reading: success requires the exact
+     * expected content, or — for editors that normalize the tail —
+     * the content to end with the code's last non-blank line with the
+     * expected length growth. One chunked retry on mismatch.
+     */
+    suspend fun insertCodeIntoFocused(code: String): ActionResult = serializedLong {
+        val service = serviceOrNull() ?: return@serializedLong disabled()
+        if (code.isBlank()) return@serializedLong ActionResult(false, "The code to insert is blank.")
+        val root = service.activeRoot()
+            ?: return@serializedLong ActionResult(false, "No active window is available.")
+        val target = resolveEditableTarget(root)
+            ?: return@serializedLong ActionResult(
+                false,
+                "No editable text field was found on this screen — tap into the editing area first."
+            )
+        val existing = target.text
+        val selStart = target.selectionStart
+        val selEnd = target.selectionEnd
+        val hasRange = selStart >= 0 && selEnd > selStart && selEnd <= existing.length
+        val insertAt = when {
+            hasRange -> selStart
+            selEnd in 0..existing.length -> selEnd
+            else -> existing.length
+        }
+        val prefix = existing.substring(0, insertAt)
+        val suffix = if (hasRange) {
+            existing.substring(selEnd)
+        } else if (selEnd in 0..existing.length) {
+            existing.substring(selEnd)
+        } else {
+            ""
+        }
+        val separator = if (prefix.isNotEmpty() && !prefix.endsWith("\n")) "\n" else ""
+        val inserted = separator + code
+        val expected = prefix + inserted + suffix
+        val lineCount = code.lines().count()
+
+        suspend fun verify(readBack: String?): Boolean {
+            if (readBack == null) return false
+            if (readBack == expected) return true
+            // Editor tail normalization tolerance (trailing newline /
+            // spaces): the code must be there, ending the content.
+            val lastLine = code.lines().lastOrNull { it.isNotBlank() }?.trim().orEmpty()
+            if (lastLine.isEmpty()) return false
+            val grew = readBack.length >= existing.length + code.length - LENGTH_TOLERANCE
+            return grew && readBack.trimEnd().endsWith(lastLine) &&
+                readBack.startsWith(prefix.take(40))
+        }
+
+        suspend fun setWhole(value: String): String? {
+            val fresh = freshTarget(service, target.descriptor) ?: return null
+            fresh.node.performAction(
+                AccessibilityNodeInfo.ACTION_SET_TEXT,
+                Bundle().apply {
+                    putCharSequence(
+                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                        value
+                    )
+                }
+            )
+            delay(VERIFY_DELAY_MS)
+            return freshTarget(service, target.descriptor)?.text
+        }
+
+        suspend fun applyChunked(): String? {
+            // Grow the content chunk by chunk; each SET_TEXT carries
+            // the full (growing) text, sized to stay editor-friendly.
+            var current = prefix
+            var readBack: String? = null
+            for (chunk in chunkCode(inserted)) {
+                val next = current + chunk + suffix
+                readBack = setWhole(next) ?: break
+                // Build the next chunk on the intended value; the
+                // final verify judges the actual read-back.
+                current += chunk
+            }
+            return readBack
+        }
+
+        var readBack = if (inserted.length <= CHUNK_THRESHOLD) {
+            setWhole(expected)
+        } else {
+            applyChunked()
+        }
+        if (!verify(readBack)) {
+            // One retry, always via the chunked path.
+            readBack = applyChunked()
+        }
+        return@serializedLong if (verify(readBack)) {
+            com.nshd.jarvis2.core.AppLog.i(
+                "Tools",
+                "insert_code ok: $lineCount lines / ${code.length} chars " +
+                    "(field ${existing.length} → ${readBack?.length ?: -1} chars)"
+            )
+            ActionResult(
+                true,
+                "Inserted $lineCount lines of code into the editor."
+            )
+        } else {
+            ActionResult(
+                false,
+                "The code insert could not be verified — the editor now " +
+                    "holds ${readBack?.length ?: 0} characters; the code may " +
+                    "be incomplete. Nothing was retried further."
+            )
+        }
+    }
+
+    /** ~40-char single-line preview for result strings and logs. */
+    private fun preview(text: String): String {
+        val flat = text.replace('\n', ' ').trim()
+        return if (flat.length > 40) flat.take(39) + "…" else flat
+    }
+
+    private fun selectionArguments(start: Int, end: Int): Bundle = Bundle().apply {
+        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, start)
+        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, end)
+    }
+
+    /** Split [text] into ~[CHUNK_SIZE]-char chunks at line boundaries. */
+    private fun chunkCode(text: String): List<String> {
+        if (text.length <= CHUNK_SIZE) return listOf(text)
+        val chunks = mutableListOf<String>()
+        var rest = text
+        while (rest.length > CHUNK_SIZE) {
+            val cut = rest.lastIndexOf('\n', CHUNK_SIZE)
+            val at = if (cut > CHUNK_SIZE / 2) cut + 1 else CHUNK_SIZE
+            chunks += rest.substring(0, at)
+            rest = rest.substring(at)
+        }
+        if (rest.isNotEmpty()) chunks += rest
+        return chunks
+    }
+
+    private fun resolveEditableTarget(root: AccessibilityNodeInfo): EditableTarget? {
+        val node = findEditable(root) ?: return null
+        return describeTarget(node)
+    }
+
+    private fun describeTarget(node: AccessibilityNodeInfo): EditableTarget {
+        val viewId = node.viewIdResourceName.orEmpty()
+        val hint = runCatching { node.hintText?.toString() }.getOrNull().orEmpty()
+        val className = node.className?.toString().orEmpty()
+        val isSearch = viewId.contains("search", ignoreCase = true) ||
+            hint.contains("search", ignoreCase = true) ||
+            className.contains("Search", ignoreCase = true)
+        return EditableTarget(
+            node = node,
+            descriptor = node.toDescriptor(),
+            text = node.text?.toString().orEmpty(),
+            selectionStart = node.textSelectionStart,
+            selectionEnd = node.textSelectionEnd,
+            isSearchField = isSearch
+        )
+    }
+
+    /** Re-resolve a previously described target on the CURRENT tree. */
+    private fun freshTarget(
+        service: JarvisAccessibilityService,
+        descriptor: UiElement
+    ): EditableTarget? {
+        val root = service.activeRoot() ?: return null
+        val node = resolveNode(root, descriptor) ?: findEditable(root) ?: return null
+        return describeTarget(node)
     }
 
     suspend fun scroll(direction: String): ActionResult = serialized {
@@ -138,7 +490,10 @@ object HandsActions {
         }
         val dispatched = dispatchSwipe(service, startX, startY, endX, endY, durationMs = 600)
         if (!dispatched) return@serialized ActionResult(false, "The scroll gesture was not dispatched.")
-        delay(450)
+        // F6: 450 ms → 250 ms — the signature comparison right below
+        // is the real change detector; the pause only lets the fling
+        // animation start.
+        delay(250)
         val changed = reader.signature() != before
         ActionResult(
             changed,
@@ -208,6 +563,13 @@ object HandsActions {
             }
     }
 
+    /**
+     * Settle = the tree signature is unchanged across 2 consecutive
+     * polls. F6 speed pass: the poll interval dropped 150 ms → 100 ms
+     * (the minimum settle is now ~200 ms instead of ~450 ms), and
+     * callers pass context caps (≤ 900 ms after taps, ≤ 400 ms after
+     * typing) instead of the old generous defaults.
+     */
     suspend fun waitForSettle(timeoutMs: Long = 2_000): Boolean {
         val service = serviceOrNull() ?: return false
         val reader = service.screenReader()
@@ -215,7 +577,7 @@ object HandsActions {
         var previous = reader.signature()
         var stableSamples = 0
         while (System.currentTimeMillis() < deadline) {
-            delay(150)
+            delay(SETTLE_POLL_MS)
             val current = reader.signature()
             if (current == previous) {
                 stableSamples++
@@ -226,6 +588,50 @@ object HandsActions {
             }
         }
         return false
+    }
+
+    /**
+     * F6: poll until [packageName] owns the active window (app-launch
+     * wait), exiting the moment it appears — this replaces fixed
+     * post-launch sleeps on the deep-intent paths.
+     */
+    suspend fun waitForPackage(packageName: String, timeoutMs: Long = 2_500): Boolean {
+        val service = serviceOrNull() ?: return false
+        val reader = service.screenReader()
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(100, 10_000)
+        while (System.currentTimeMillis() < deadline) {
+            if (reader.currentPackage() == packageName) return true
+            delay(SETTLE_POLL_MS)
+        }
+        return reader.currentPackage() == packageName
+    }
+
+    /** F6: poll until any visible editable node exists on screen. */
+    suspend fun waitForEditable(timeoutMs: Long = 2_500): Boolean {
+        val service = serviceOrNull() ?: return false
+        val reader = service.screenReader()
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(100, 10_000)
+        while (System.currentTimeMillis() < deadline) {
+            if (reader.snapshot().any { it.editable }) return true
+            delay(SETTLE_POLL_MS)
+        }
+        return reader.snapshot().any { it.editable }
+    }
+
+    /** F6: poll until [predicate] accepts a fresh snapshot. */
+    suspend fun waitForSnapshot(
+        timeoutMs: Long,
+        predicate: (List<UiElement>) -> Boolean
+    ): List<UiElement>? {
+        val service = serviceOrNull() ?: return null
+        val reader = service.screenReader()
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(100, 10_000)
+        while (true) {
+            val snapshot = reader.snapshot()
+            if (predicate(snapshot)) return snapshot
+            if (System.currentTimeMillis() >= deadline) return null
+            delay(SETTLE_POLL_MS)
+        }
     }
 
     private suspend fun <T> serialized(block: suspend () -> T): T =

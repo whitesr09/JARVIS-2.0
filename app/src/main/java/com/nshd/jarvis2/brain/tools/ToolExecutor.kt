@@ -45,13 +45,23 @@ class ToolExecutor(
         args: JSONObject,
         includeScreenSummary: Boolean
     ): ToolResult {
+        // F6: the running queue item's live step line follows the
+        // tool (friendly label + argument gist — never typed content).
+        com.nshd.jarvis2.brain.TaskQueue.setStepForRunning(stepTextFor(name, args))
         // F3 execution ledger: an identical call that already succeeded
         // this turn returns its cached result instead of re-executing;
         // failures get at most ExecutionLedger.MAX_ATTEMPTS attempts.
         // Pure observation tools are exempt: inspect_screen / see_screen
         // must always read the CURRENT screen (the verify-after-act
         // loop depends on fresh state, and a read replays no action).
-        val activeLedger = ledger?.takeUnless { name in OBSERVATION_TOOLS }
+        // F6: edit_text is exempt too — it is repeatable BY DESIGN:
+        // identical arguments act on the CURRENT field state, so
+        // "delete_last_line" twice in one turn must delete two lines,
+        // not replay the first result. (insert_code stays ledgered:
+        // inserting the same code twice is never intended.)
+        val activeLedger = ledger?.takeUnless {
+            name in OBSERVATION_TOOLS || name in REPEATABLE_TOOLS
+        }
         activeLedger?.gate(name, args)?.let { cached ->
             // F5: ledger cache hits are exactly the "why didn't it run
             // again?" question the log exists to answer.
@@ -80,10 +90,15 @@ class ToolExecutor(
             // Give the target app a brief chance to finish its transition so
             // the summary attached below is the post-action screen, not the
             // frame that existed before the tap had any effect.
-            HandsActions.waitForSettle(1_200)
+            // F6: settle cap 1_200 ms → 900 ms (polling early-exits the
+            // moment the tree is stable), and the summary is the
+            // COMPACT serialization — the old 15 full-length labels
+            // (an editor's whole content could ride along) were pure
+            // prompt weight on every step.
+            HandsActions.waitForSettle(900)
         }
         return try {
-            val summary = service.screenReader().serialize(MAX_SUMMARY_ELEMENTS)
+            val summary = service.screenReader().serializeCompact()
             ToolResult(raw.success, raw.message + "\nScreen now:\n" + summary)
         } catch (e: Exception) {
             raw
@@ -121,6 +136,11 @@ class ToolExecutor(
             "youtube_play" -> args.requiredString("query")?.let {
                 intents.youtubePlay(it).toToolResult()
             } ?: missing("query")
+            "spotify_play" -> args.requiredString("query")?.let {
+                intents.spotifyPlay(it).toToolResult()
+            } ?: missing("query")
+            "edit_text" -> editText(args)
+            "insert_code" -> insertCode(args)
             "set_volume" -> if (args.has("percent")) {
                 intents.setVolume(args.optInt("percent")).toToolResult()
             } else missing("percent")
@@ -175,10 +195,10 @@ class ToolExecutor(
                 if (!tapped.success) {
                     ToolResult(false, "Vision found \"$description\" but the tap failed: ${tapped.message}")
                 } else {
-                    HandsActions.waitForSettle(1_200)
+                    HandsActions.waitForSettle(900)
                     val changed = service.screenReader().signature() != before
                     val summary = try {
-                        service.screenReader().serialize(MAX_SUMMARY_ELEMENTS)
+                        service.screenReader().serializeCompact()
                     } catch (e: Exception) {
                         ""
                     }
@@ -270,6 +290,135 @@ class ToolExecutor(
             if (!approved) return ToolResult(false, "Payment-related tap was not confirmed, so nothing was tapped.")
         }
         return HandsActions.tapPercent(args.optDouble("x", -1.0), args.optDouble("y", -1.0)).toToolResult()
+    }
+
+    /**
+     * F6 (Part D): delete text in the focused field on the user's
+     * explicit command. Deliberately NO ConfirmGate and no tap guard
+     * here: the command IS the instruction, and deletions in his own
+     * editor are the requested behaviour (all logged, tag "Tools").
+     */
+    private suspend fun editText(args: JSONObject): ToolResult {
+        val action = args.requiredString("action") ?: return missing("action")
+        val count = args.optInt("count", 0)
+        val result = HandsActions.editTextOnFocused(action, count)
+        com.nshd.jarvis2.core.AppLog.d(
+            "Tools",
+            "edit_text action=$action count=$count → success=${result.success}"
+        )
+        return result.toToolResult()
+    }
+
+    /**
+     * F6 (Part D2): insert complete code into the focused editor.
+     * The argument is defensively de-fenced first (models wrap code
+     * in ``` fences despite instructions). When no editable field is
+     * focused, QuickEdit is opened as a convenience (package
+     * com.rhmsoft.edit) and its largest editor area tapped once;
+     * if that still yields no editor, the failure tells him exactly
+     * what to do. NO length cap anywhere on this path — long code is
+     * chunked inside HandsActions.
+     */
+    private suspend fun insertCode(args: JSONObject): ToolResult {
+        val raw = args.optString("code")
+        if (raw.isBlank()) return missing("code")
+        val code = stripCodeFences(raw)
+        if (code.isBlank()) {
+            return ToolResult(false, "The code to insert was empty after cleanup.")
+        }
+        var autoOpened = false
+        if (!HandsActions.focusedEditablePresent()) {
+            com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Opening QuickEdit…")
+            val opened = intents.openApp("QuickEdit")
+            if (!opened.success) {
+                return ToolResult(
+                    false,
+                    "Open QuickEdit and tap into the editing area first, then ask me again."
+                )
+            }
+            autoOpened = true
+            HandsActions.waitForPackage(QUICKEDIT_PACKAGE, 2_500)
+            if (!HandsActions.waitForEditable(2_500)) {
+                return ToolResult(
+                    false,
+                    "QuickEdit opened, but its editor never appeared — tap into " +
+                        "the editing area, then ask me again."
+                )
+            }
+            val snapshot = JarvisAccessibilityService.instance
+                ?.screenReader()?.snapshot().orEmpty()
+            val largestEditor = snapshot
+                .filter { it.editable }
+                .maxByOrNull { it.bounds.width() * it.bounds.height() }
+            if (largestEditor != null) {
+                HandsActions.clickElement(largestEditor.index)
+            }
+            if (!HandsActions.focusedEditablePresent()) {
+                return ToolResult(
+                    false,
+                    "Open QuickEdit and tap into the editing area first, then ask me again."
+                )
+            }
+        }
+        val result = HandsActions.insertCodeIntoFocused(code)
+        val lineCount = code.trimEnd('\n').lines().size
+        com.nshd.jarvis2.core.AppLog.i(
+            "Tools",
+            "insert_code: $lineCount lines / ${code.length} chars, " +
+                "autoOpened=$autoOpened, success=${result.success}, " +
+                "preview='${code.replace('\n', ' ').take(40)}'"
+        )
+        if (!result.success) return ToolResult(false, result.message)
+        val note = if (autoOpened) " (QuickEdit was opened automatically.)" else ""
+        return ToolResult(
+            true,
+            "Inserted $lineCount lines of code into QuickEdit.$note"
+        )
+    }
+
+    /**
+     * Defensive cleanup for insert_code arguments: if a fenced block
+     * is present anywhere in the argument, the code is what's inside
+     * the FIRST fence pair (plus anything after it is dropped — prose
+     * the model added around the code never reaches the editor).
+     */
+    private fun stripCodeFences(raw: String): String {
+        val text = raw.trim()
+        val fenceStart = text.indexOf("```")
+        if (fenceStart >= 0) {
+            val bodyStart = text.indexOf('\n', fenceStart)
+            if (bodyStart >= 0) {
+                val fenceEnd = text.indexOf("```", bodyStart)
+                if (fenceEnd > bodyStart) {
+                    return text.substring(bodyStart + 1, fenceEnd)
+                        .trim('\n')
+                        .trimEnd()
+                }
+            }
+        }
+        return text.trimEnd()
+    }
+
+    /** F6: friendly live-step text for a tool call (label + gist). */
+    private fun stepTextFor(name: String, args: JSONObject): String {
+        val gist = when (name) {
+            "open_app" -> args.optString("app")
+            "youtube_play", "spotify_play" -> args.optString("query")
+            "whatsapp_message", "call_contact" -> args.optString("contact")
+            "click_text" -> args.optString("text")
+            else -> ""
+        }.trim()
+        return when (name) {
+            "open_app" -> "Opening ${gist.ifBlank { "app" }}…"
+            "youtube_play" -> "Playing on YouTube…"
+            "spotify_play" -> "Playing on Spotify…"
+            "inspect_screen", "see_screen" -> "Looking at the screen…"
+            "type_text" -> "Typing…"
+            "edit_text" -> "Editing text…"
+            "insert_code" -> "Inserting code…"
+            "vision_tap" -> "Finding the tap target…"
+            else -> com.nshd.jarvis2.brain.ToolEvent.prettyTool(name) + "…"
+        }
     }
 
     private suspend fun whatsappMessage(args: JSONObject): ToolResult {
@@ -373,12 +522,16 @@ class ToolExecutor(
 
     companion object {
         private const val MAX_UNCONFIRMED_BULK = 5
-        private const val MAX_SUMMARY_ELEMENTS = 15
+        private const val QUICKEDIT_PACKAGE = "com.rhmsoft.edit"
         /** Read-only screen observation — exempt from the F3 ledger. */
         private val OBSERVATION_TOOLS = setOf("inspect_screen", "see_screen")
+
+        /** F6: stateful-but-repeatable tools exempt from ledger dedupe. */
+        private val REPEATABLE_TOOLS = setOf("edit_text")
         private val UI_MUTATION_TOOLS = setOf(
             "open_app", "click_element", "click_text", "type_text", "scroll",
-            "press_key", "tap_percent", "whatsapp_message", "youtube_play"
+            "press_key", "tap_percent", "whatsapp_message", "youtube_play",
+            "spotify_play", "edit_text", "insert_code"
         )
         private val PAYMENT_REGEX = Regex(
             "\\b(pay|payment|payments|purchase|buy now|place order|checkout|check out|" +

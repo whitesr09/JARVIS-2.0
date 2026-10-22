@@ -45,6 +45,28 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v1.5.0 — Speed round: Spotify fast play, live task HUD, editor delete + code writing",
+            body = "Tasks now show on the floating avatar's HUD while they run — " +
+                "every command (chat, voice, quick commands, Live tool turns) " +
+                "registers in the task list with a live step line; before, only " +
+                "split multi-task requests ever registered, and Live voice tasks " +
+                "bypassed it entirely, so the panel sat at \"0 of 0 done — idle\" " +
+                "mid-task. \"Play X on Spotify\" is now ONE fast deep intent " +
+                "(open → search → tap the song) instead of six slow agent steps, " +
+                "with playback verified on screen. Hands are quicker everywhere: " +
+                "settle checks poll every 100 ms with tight caps, typing is an " +
+                "instant SET_TEXT insert at the cursor (it no longer erases the " +
+                "field), and each step logs its model-vs-action time split. " +
+                "QuickEdit gains real editing: say \"delete the last line\" / " +
+                "\"clear everything\" and the new edit_text tool deletes in the " +
+                "focused editor; ask for code in QuickEdit and the chat model " +
+                "writes the COMPLETE code straight into the editor (insert_code), " +
+                "with a short confirmation and preview here in chat.\n" +
+                "Plus a full self-audit pass — 4 extra fixes under the hood."
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+
+        InfoCard(
             title = "v1.4.1 — Live fresh-session fix, faster girlier TTS, brand icons",
             body = "Native Live fix: the app used to save the Gemini Live " +
                 "session-resumption handle and send it on every fresh " +

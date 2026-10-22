@@ -50,6 +50,17 @@ object AgentPipeline {
         // abort can cancel it. dispatch() calls TaskState.begin with
         // this job (once for a single task, once per queue sub-task).
         val job = currentCoroutineContext()[Job] ?: Job()
+        // F6: EVERY turn registers in the TaskQueue registry, not just
+        // compound splits — before this, single tasks and quick
+        // commands never submitted anything, so the HUD (which lists
+        // TaskQueue items) sat at "0 of 0 done — idle" while they ran.
+        // The compound path re-submits with its real sub-task titles,
+        // replacing this single registration; finishRunning() below
+        // only ever closes a still-RUNNING item, so queue sub-tasks
+        // (marked individually) are never double-marked.
+        val turnTitle = text.trim().take(60)
+        if (turnTitle.isNotBlank()) TaskQueue.beginTask(turnTitle)
+        val turnStartedAt = System.currentTimeMillis()
         return try {
             val result = withContext(Dispatchers.IO) {
                 dispatch(
@@ -57,8 +68,17 @@ object AgentPipeline {
                     codeMode, job, onEvent, onAssistantDelta
                 )
             }
+            val success = !result.startsWith("I couldn't") &&
+                !result.startsWith("Please configure")
+            TaskQueue.finishRunning(success)
+            AppLog.i(
+                "Queue",
+                "turn '${turnTitle.take(40)}' finished in " +
+                    "${System.currentTimeMillis() - turnStartedAt}ms " +
+                    "(ok=$success)"
+            )
             TaskState.finish(
-                success = !result.startsWith("I couldn't") && !result.startsWith("Please configure"),
+                success = success,
                 summary = result.lineSequence().firstOrNull()?.take(80).orEmpty()
             )
             result
@@ -70,6 +90,7 @@ object AgentPipeline {
             TaskState.finish(false, "Aborted")
             throw e
         } catch (e: Exception) {
+            TaskQueue.finishRunning(false)
             TaskState.finish(false, e.message ?: "Failed")
             throw e
         }
@@ -92,6 +113,12 @@ object AgentPipeline {
 
         val hudEvent: (ToolEvent) -> Unit = { event ->
             TaskState.step(event.hudText)
+            // F6: the running queue item carries the same friendly
+            // step line (ToolExecutor refines it with the argument
+            // gist when the tool actually starts).
+            if (event.kind != ToolEventKind.INFO) {
+                TaskQueue.setStepForRunning(event.chipText.take(80))
+            }
             onEvent(event)
         }
         TaskState.begin(goal = clean.take(60), job = job, maxSteps = 10)
@@ -122,6 +149,19 @@ object AgentPipeline {
         // ── Deterministic quick commands (work with no API key) ────────
         quickCommand(context, clean)?.let { quick ->
             return@withContext runQuick(context, quick, memoryDb, ExecutionLedger(), hudEvent)
+        }
+
+        // ── Write-code-into-editor route (F6 D2-4) ────────────────────
+        // "Write a code for X in QuickEdit" — the CHAT MODEL generates
+        // the complete code (same brain as chat), then the insert_code
+        // machinery delivers it into the editor. Sits with the media
+        // fast paths: after deterministic quick commands, before the
+        // compound splitter and the generic agent loop.
+        if (isEditorCodeRequest(clean)) {
+            return@withContext runEditorCodeRoute(
+                context, clean, settings, memoryDb, providerStore,
+                codeMode, hudEvent
+            )
         }
 
         // ── Multitask queue (F3): compound request → ordered sub-tasks ─
@@ -378,6 +418,181 @@ object AgentPipeline {
             .filter { it.length > 1 }
     }
 
+    // ── Write-code-into-editor route (F6 D2-4) ─────────────────────────
+
+    /**
+     * Conservative matcher for the editor-code route. Two ways in:
+     *  1. the message names an editor (QuickEdit / "quick edit" /
+     *     "editor") AND asks for code to be written/generated;
+     *  2. QuickEdit is the foreground app AND the message is a
+     *     code-generation request ("write a function…", "code for…").
+     * A plain coding question with no editor target never matches —
+     * it stays a normal chat answer on the code canvas.
+     */
+    private fun isEditorCodeRequest(text: String): Boolean {
+        val lower = text.lowercase()
+        val mentionsEditor = lower.contains("quickedit") ||
+            lower.contains("quick edit") || lower.contains("editor")
+        val asksForCode = CODE_REQUEST_REGEX.containsMatchIn(lower)
+        if (mentionsEditor && asksForCode) return true
+        if (!asksForCode) return false
+        val foreground = com.nshd.jarvis2.service.JarvisAccessibilityService
+            .instance?.screenReader()?.currentPackage()
+            ?: com.nshd.jarvis2.service.JarvisAccessibilityService.lastPackageName
+        return foreground == QUICKEDIT_PACKAGE &&
+            CODE_GEN_LEAD_REGEX.containsMatchIn(lower)
+    }
+
+    /**
+     * Generate the code with the configured chat model (streaming
+     * router chat, persona prompt + an output-shape instruction),
+     * harvest the code, and insert it via the insert_code tool
+     * machinery. Insertion failure never loses the work: the full
+     * generated code falls back into the chat reply (code canvas).
+     */
+    private suspend fun runEditorCodeRoute(
+        context: Context,
+        userText: String,
+        settings: JarvisSettings,
+        memoryDb: MemoryDb,
+        providerStore: ProviderStore,
+        codeMode: Boolean,
+        onEvent: (ToolEvent) -> Unit
+    ): String {
+        onEvent(
+            ToolEvent(
+                ToolEventKind.INFO, "",
+                "Writing code into QuickEdit with the chat model…"
+            )
+        )
+        TaskQueue.setStepForRunning("Writing the code…")
+        val facts = memoryDb.allFacts(null, null)
+        val systemPrompt = PersonaPrompts.build(settings, facts, codeMode) +
+            EDITOR_CODE_INSTRUCTION
+        val history = memoryDb.lastMessages(6)
+            .filter { it.role == "user" || it.role == "assistant" }
+            .map { ChatMsg(role = it.role, content = it.content) }
+        val messages = mutableListOf(ChatMsg("system", systemPrompt))
+        messages += history
+        if (history.lastOrNull()?.content != userText) {
+            messages += ChatMsg("user", userText)
+        }
+        val outcome = FailoverRouter(
+            configsInOrder = providerStore.orderedConfigs(),
+            toolExecutor = null,
+            store = providerStore
+        ).chat(messages, preferReasoningModel = codeMode)
+        return when (outcome) {
+            is ChatOutcome.NoKey ->
+                "Please configure your API Key in Settings → API & Connection first."
+            is ChatOutcome.AllFailed ->
+                "I couldn't write the code — the model couldn't be reached " +
+                    "(${outcome.summary})."
+            is ChatOutcome.Success -> {
+                val harvested = harvestCode(outcome.reply)
+                if (harvested == null) {
+                    AppLog.w(
+                        "Agent",
+                        "editor-code route: no code block harvested from a " +
+                            "${outcome.reply.length}-char reply — returning it as chat"
+                    )
+                    outcome.reply.trim()
+                } else {
+                    val lineCount = harvested.code.lines().count { it.isNotBlank() }
+                    AppLog.i(
+                        "Agent",
+                        "editor-code route: harvested $lineCount lines / " +
+                            "${harvested.code.length} chars " +
+                            "(lang=${harvested.language ?: "?"}, " +
+                            "fenced=${harvested.fenced}) — inserting"
+                    )
+                    TaskQueue.setStepForRunning("Inserting the code into QuickEdit…")
+                    onEvent(ToolEvent(ToolEventKind.STARTED, "insert_code"))
+                    val result = ToolExecutor(
+                        context, memoryDb, ExecutionLedger()
+                    ).execute(
+                        "insert_code",
+                        JSONObject().put("code", harvested.code),
+                        includeScreenSummary = false
+                    )
+                    onEvent(
+                        ToolEvent(
+                            kind = if (result.success) {
+                                ToolEventKind.SUCCESS
+                            } else {
+                                ToolEventKind.FAILURE
+                            },
+                            toolName = "insert_code",
+                            message = result.message
+                        )
+                    )
+                    if (result.success) {
+                        val preview = harvested.code.lines().take(6)
+                            .joinToString("\n")
+                        val lang = harvested.language?.takeIf { it.isNotBlank() }
+                        buildString {
+                            append("Done — I wrote $lineCount lines of ")
+                            append(lang?.let { "$it " } ?: "")
+                            append("code into QuickEdit.")
+                            append("\n\n```").append(lang ?: "").append('\n')
+                            append(preview)
+                            if (lineCount > 6) append("\n…")
+                            append("\n```")
+                        }
+                    } else {
+                        // No work lost: the full code lands in chat.
+                        val lang = harvested.language?.takeIf { it.isNotBlank() }
+                        buildString {
+                            append("I wrote the code, but couldn't insert it ")
+                            append("into QuickEdit — ")
+                            append(result.message)
+                            append(" Here is the full code:\n\n```")
+                            append(lang ?: "").append('\n')
+                            append(harvested.code)
+                            append("\n```")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private data class HarvestedCode(
+        val code: String,
+        val language: String?,
+        val fenced: Boolean
+    )
+
+    /**
+     * Code harvesting: the LARGEST fenced block wins. With no fence,
+     * the whole trimmed reply is taken only when it is predominantly
+     * code (≥ 50% of non-blank lines look like code) — otherwise the
+     * reply is prose and the caller shows it as a normal chat answer.
+     */
+    private fun harvestCode(reply: String): HarvestedCode? {
+        val fences = FENCE_REGEX.findAll(reply).toList()
+        if (fences.isNotEmpty()) {
+            val best = fences.maxByOrNull { it.groupValues[2].length }!!
+            val code = best.groupValues[2].trim('\n').trimEnd()
+            if (code.isNotBlank()) {
+                return HarvestedCode(
+                    code = code,
+                    language = best.groupValues[1].takeIf { it.isNotBlank() },
+                    fenced = true
+                )
+            }
+        }
+        val trimmed = reply.trim()
+        val lines = trimmed.lines().filter { it.isNotBlank() }
+        if (lines.size >= 3) {
+            val codeLike = lines.count { CODE_LINE_REGEX.containsMatchIn(it) }
+            if (codeLike.toDouble() / lines.size >= 0.5) {
+                return HarvestedCode(trimmed, language = null, fenced = false)
+            }
+        }
+        return null
+    }
+
     // ── Local memory parsing ───────────────────────────────────────────
 
     private val rememberPatterns = listOf(
@@ -448,6 +663,30 @@ object AgentPipeline {
             )
         }
 
+        // F6: Spotify fast path — one programmatic deep intent
+        // (open → search → play) instead of ~6 generic agent-loop
+        // steps. These patterns must precede the generic "^open"
+        // quick command below, which would otherwise swallow
+        // "open spotify and play …" as an app name.
+        Regex("(?i)^open\\s+spotify\\s+and\\s+play\\s+(.+)$").find(text)?.let { match ->
+            return QuickCommand(
+                "spotify_play",
+                JSONObject().put("query", match.groupValues[1].trim())
+            )
+        }
+        Regex("(?i)^spotify\\s*,?\\s*play\\s+(.+)$").find(text)?.let { match ->
+            return QuickCommand(
+                "spotify_play",
+                JSONObject().put("query", match.groupValues[1].trim())
+            )
+        }
+        Regex("(?i)^play\\s+(.+?)\\s+(?:on|in)\\s+spotify$").find(text)?.let { match ->
+            return QuickCommand(
+                "spotify_play",
+                JSONObject().put("query", match.groupValues[1].trim())
+            )
+        }
+
         Regex("(?i)^(?:turn\\s+)?(?:the\\s+)?(torch|flashlight)\\s+(on|off)$")
             .find(lower)?.let { match ->
                 return QuickCommand(
@@ -494,6 +733,42 @@ object AgentPipeline {
             "Reply with ONLY a strict JSON array of strings — each string one " +
             "self-contained sub-task, in the order they must run. No markdown, " +
             "no commentary, no numbering inside the strings."
+
+    // ── F6 D2-4 editor-code route constants ────────────────────────────
+
+    private const val QUICKEDIT_PACKAGE = "com.rhmsoft.edit"
+
+    private const val EDITOR_CODE_INSTRUCTION =
+        "\n\nEDITOR CODE REQUEST: He wants this code written INTO his " +
+            "QuickEdit editor. Reply with the COMPLETE, working code for " +
+            "his request as ONE fenced code block with a language tag — " +
+            "the full code, never a sketch or a fragment. At most one " +
+            "short sentence of prose outside the fence."
+
+    /** "write/generate/create/make … code/program/script" or "code for …". */
+    private val CODE_REQUEST_REGEX = Regex(
+        "\\b(write|generate|create|make|build)\\b[^.?!]{0,60}\\b(code|program|script|function|class)\\b" +
+            "|\\bcode\\s+for\\b"
+    )
+
+    /** Conservative lead-in for the foreground-QuickEdit match. */
+    private val CODE_GEN_LEAD_REGEX = Regex(
+        "^\\s*(write|generate|create|make|build)\\b|\\bcode\\s+for\\b"
+    )
+
+    /** One fenced block: ```lang … ``` (language tag optional). */
+    private val FENCE_REGEX = Regex(
+        "```([A-Za-z0-9#+._-]*)\\s*\\n(.*?)```",
+        RegexOption.DOT_MATCHES_ALL
+    )
+
+    /** Heuristic "this line looks like code" for the no-fence harvest. */
+    private val CODE_LINE_REGEX = Regex(
+        "[{};()]|\\b(fun|val|var|class|object|import|package|def|function|return|" +
+            "if|else|for|while|when|public|private|static|void|int|long|let|const|" +
+            "var|new|try|catch|extends|implements|#include|using|namespace)\\b|" +
+            "System\\.|console\\.|print\\(|println\\("
+    )
 
     private val NUMBERED_ITEM_REGEX = Regex("\\d+[.)]\\s+\\S")
 

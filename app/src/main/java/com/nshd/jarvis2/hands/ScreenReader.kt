@@ -121,6 +121,49 @@ class ScreenReader(private val service: JarvisAccessibilityService) {
         }
     }
 
+    /**
+     * F6 compact serialization for the agent loop's per-step decision
+     * context: at most [maxElements] elements (default 40), labels
+     * truncated to ~40 chars, and pure container nodes (no label of
+     * their own and not themselves interactive) dropped. The full
+     * [serialize] (75 elements, full labels) stays untouched for
+     * inspect_screen / see_screen-style reads — only the step prompt
+     * gets leaner, which is where free-tier latency actually lives.
+     */
+    fun serializeCompact(maxElements: Int = 40, labelMax: Int = 40): String {
+        val all = snapshot()
+        val pkg = currentPackage() ?: "unknown"
+        // "Pure container" in snapshot terms: not clickable/editable/
+        // scrollable/checkable AND its label is only merged descendant
+        // text that duplicates a child — indistinguishable here, so
+        // the safe cut is: keep interactive elements and elements
+        // whose OWN text/desc is non-blank (Candidate keeps them
+        // merged; the observable proxy is a non-blank label).
+        val kept = all.filter { element ->
+            element.clickable || element.editable || element.scrollable ||
+                element.checked != null || element.label.isNotBlank()
+        }.take(maxElements.coerceIn(1, MAX_ELEMENTS))
+        if (kept.isEmpty()) return "App: $pkg\nVisible Elements: (none exposed by accessibility)"
+        return buildString {
+            append("App: ").append(pkg).append("\nVisible Elements:")
+            kept.forEach { element ->
+                append("\n[#").append(element.index).append("] ")
+                val label = element.label.ifBlank { simpleClassName(element.className) }
+                append(if (label.length > labelMax) label.take(labelMax - 1) + "…" else label)
+                if (element.editable || element.className.contains("EditText", true)) {
+                    append(" (InputField)")
+                }
+                if (element.className.contains("Switch", true) ||
+                    element.className.contains("Toggle", true) || element.checked != null
+                ) {
+                    append(" (Switch: ").append(if (element.checked == true) "ON" else "OFF").append(")")
+                }
+                if (element.scrollable) append(" (Scrollable)")
+                if (!element.enabled) append(" (Disabled)")
+            }
+        }
+    }
+
     /** Exact matches win, then prefix/contains, then a small edit-distance match. */
     fun findByText(query: String, elements: List<UiElement> = snapshot()): UiElement? {
         val wanted = normalize(query)
