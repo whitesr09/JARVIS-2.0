@@ -54,8 +54,6 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.ProviderStore
-import com.nshd.jarvis2.ui.orb.JarvisOrb
-import com.nshd.jarvis2.ui.orb.toOrbState
 import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.voice.CaptionKind
 import com.nshd.jarvis2.voice.VoiceCaption
@@ -177,11 +175,20 @@ private fun VoiceSessionBody(
     val amplitude by manager.amplitude.collectAsState()
     val captions by manager.captions.collectAsState()
 
+    // F4 crash hardening: every remember in this body sits at the top
+    // level, unconditionally. showDetails used to be remembered inside
+    // the ERROR branch and the screen-share control inside the LIVE
+    // branch — when status/mode flipped mid-session the remember call
+    // order changed, corrupting the slot table (the voice crash). Both
+    // are hoisted here; the branches below only read them.
+    var showDetails by remember { mutableStateOf(false) }
+    val shareControl = rememberScreenShareControl()
+
   Column(modifier = modifier) {
     Spacer(modifier = Modifier.height(10.dp))
 
     // ── Orb (tap toggles the mic) ──────────────────────────────────────
-    // F3: OpenGL JarvisOrb (orb.html port) fed with the live amplitude.
+    // F4: Canvas JarvisOrb (orb.html port) fed with the live amplitude.
     JarvisOrb(
         state = uiState.status.toOrbState(),
         amplitude = amplitude,
@@ -189,7 +196,7 @@ private fun VoiceSessionBody(
         theme = settings.theme,
         customHex = settings.customBgHex,
         modifier = Modifier
-            .size(250.dp)
+            .size(300.dp)
             .align(Alignment.CenterHorizontally)
             .clickable { manager.setMicMuted(!uiState.micMuted) }
     )
@@ -253,7 +260,6 @@ private fun VoiceSessionBody(
 
     // ── Screen share (LIVE sessions): frames stream to Gemini Live ────
     if (uiState.mode == VoiceMode.LIVE) {
-        val shareControl = rememberScreenShareControl()
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.Center
@@ -282,7 +288,6 @@ private fun VoiceSessionBody(
         // Friendly headline first; the raw provider string lives behind
         // a small "Details" expander, never as the primary UI (F2).
         val mapped = FriendlyErrors.map(uiState.errorMessage)
-        var showDetails by remember { mutableStateOf(false) }
         Card(
             shape = RoundedCornerShape(JarvisDimens.radiusCard),
             colors = CardDefaults.cardColors(

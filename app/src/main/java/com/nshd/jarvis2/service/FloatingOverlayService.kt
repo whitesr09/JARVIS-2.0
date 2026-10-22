@@ -88,7 +88,7 @@ class FloatingOverlayService : Service() {
     private var params: WindowManager.LayoutParams? = null
 
     /** Current theme palette for the HUD (D3) — re-read on every start. */
-    private var palette: HudPalette = ThemePalette.hudPalette(AppTheme.PURPLE, null)
+    private var palette: HudPalette = ThemePalette.hudPalette(AppTheme.DARK, null)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -701,15 +701,15 @@ class FloatingOverlayService : Service() {
     /** Reads the saved theme (+ custom hex) from the app's settings prefs. */
     private fun readPalette(): HudPalette {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val rawTheme = prefs.getString(KEY_THEME, AppTheme.PURPLE.name) ?: AppTheme.PURPLE.name
-        // Mirror MainActivity's migration: the retired SUNSET reads as PURPLE.
-        val theme = if (rawTheme == "SUNSET") {
-            AppTheme.PURPLE
+        val rawTheme = prefs.getString(KEY_THEME, AppTheme.DARK.name) ?: AppTheme.DARK.name
+        // Mirror MainActivity's F4 migration: retired PURPLE reads as DARK.
+        val theme = if (rawTheme == "PURPLE") {
+            AppTheme.DARK
         } else {
             try {
                 AppTheme.valueOf(rawTheme)
             } catch (e: IllegalArgumentException) {
-                AppTheme.PURPLE
+                AppTheme.DARK
             }
         }
         return ThemePalette.hudPalette(theme, prefs.getString(KEY_CUSTOM_BG, null))

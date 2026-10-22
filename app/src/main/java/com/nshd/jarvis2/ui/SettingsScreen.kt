@@ -1,15 +1,20 @@
 package com.nshd.jarvis2.ui
 
 import android.Manifest
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.content.pm.Signature
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,32 +32,34 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Accessibility
-import androidx.compose.material.icons.filled.Api
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Fingerprint
-import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Hearing
-import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RecordVoiceOver
-import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Translate
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -64,6 +71,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -73,39 +81,54 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.res.painterResource
 import androidx.core.content.ContextCompat
+import androidx.core.content.pm.PackageInfoCompat
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.R
-import com.nshd.jarvis2.hands.DeepIntents
-import com.nshd.jarvis2.service.A11yStatus
+import com.nshd.jarvis2.brain.ProviderStore
+import com.nshd.jarvis2.memory.MemoryCategories
+import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.service.FloatingOverlayService
-import com.nshd.jarvis2.service.JarvisAccessibilityService
 import com.nshd.jarvis2.service.WakeState
 import com.nshd.jarvis2.service.WakeWordControl
 import com.nshd.jarvis2.voice.BiometricsRecorder
 import com.nshd.jarvis2.voice.VoskModelManager
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
-val JARVIS_LANGUAGES = listOf(
-    "Auto", "English", "Hindi", "Hinglish", "Telugu", "Tamil", "Kannada",
-    "Malayalam", "Bengali", "Marathi", "Gujarati", "Bhojpuri"
-)
+/**
+ * Backwards-compatible alias — the canonical language list now lives in
+ * LanguagePickerDialog.kt ([LANGUAGES]); Home uses that dialog too.
+ */
+val JARVIS_LANGUAGES: List<String> = LANGUAGES
 
 /** The 5 Gemini Live voices (locked set). A custom voice name overrides these. */
 val GEMINI_VOICES = listOf("Aoede", "Kore", "Fenrir", "Puck", "Charon")
 
 private data class InfoDialog(val title: String, val body: String)
+
+/** Real package/signing data for the App Identity & Integrity dialog. */
+private data class IdentityInfo(
+    val appLabel: String,
+    val packageName: String,
+    val versionName: String,
+    val versionCode: Long,
+    val certSha256Short: String
+)
 
 @Composable
 fun SettingsScreen(
@@ -114,23 +137,53 @@ fun SettingsScreen(
     onOpenPermissions: () -> Unit,
     onOpenApi: () -> Unit,
     onOpenMemory: () -> Unit,
-    onOpenAvatars: () -> Unit = {}
+    onOpenAvatars: () -> Unit = {},
+    onOpenHandsFree: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    // ── All dialog / expansion state is hoisted to this top level (F4):
+    // nothing is remembered inside a conditional branch, so expanding a
+    // section can never reshuffle the slot table mid-composition.
     var info by remember { mutableStateOf<InfoDialog?>(null) }
     var showPersona by remember { mutableStateOf(false) }
     var showLanguage by remember { mutableStateOf(false) }
     var showVoiceEngine by remember { mutableStateOf(false) }
     var showTheme by remember { mutableStateOf(false) }
     var showVoice by remember { mutableStateOf(false) }
-    var screenPreview by remember { mutableStateOf<String?>(null) }
-    var torchOn by remember { mutableStateOf(false) }
+    var showNameFields by remember { mutableStateOf(false) }
+    var showEnroll by remember { mutableStateOf(false) }
+    var wakeExpanded by remember { mutableStateOf(false) }
+    var showPrivacy by remember { mutableStateOf(false) }
+    var showIdentity by remember { mutableStateOf(false) }
+    var showImportMemory by remember { mutableStateOf(false) }
+    var confirmClearChat by remember { mutableStateOf(false) }
+    var confirmClearMemories by remember { mutableStateOf(false) }
+    var importJsonText by remember { mutableStateOf("") }
+    var privacyFactCount by remember { mutableIntStateOf(0) }
+    var privacyChatCount by remember { mutableIntStateOf(0) }
     val settingsScope = rememberCoroutineScope()
     val screenShare = rememberScreenShareControl()
     val overlayRunningState = remember { mutableStateOf(FloatingOverlayService.isRunning()) }
+    val wakeUiStatus by WakeState.status.collectAsState()
+    val providerStore = remember { ProviderStore(context) }
+    val activeProvider = remember {
+        providerStore.loadConfig(providerStore.activeProviderId())
+    }
+    val memoryDb = remember { MemoryDb(context) }
+    val identityInfo = remember { loadIdentityInfo(context) }
+
+    // Privacy dialog storage usage — refreshed every time it opens.
+    LaunchedEffect(showPrivacy) {
+        if (showPrivacy) {
+            val counts = withContext(Dispatchers.IO) {
+                memoryDb.factCount() to memoryDb.lastMessages(MAX_CHAT_PROBE).size
+            }
+            privacyFactCount = counts.first
+            privacyChatCount = counts.second
+        }
+    }
 
     // ── Voice biometrics enrollment (Level 6) ──────────────────────────
-    var showBiometrics by remember { mutableStateOf(false) }
     var bioRecordingIndex by remember { mutableStateOf<Int?>(null) }
     var bioCount by remember { mutableIntStateOf(BiometricsRecorder.countSamples(context)) }
     var bioError by remember { mutableStateOf<String?>(null) }
@@ -139,7 +192,7 @@ fun SettingsScreen(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         bioMicGranted = granted
-        if (granted) showBiometrics = true
+        if (granted) showEnroll = true
     }
 
     fun recordBioSample(index: Int) {
@@ -179,10 +232,128 @@ fun SettingsScreen(
         )
     }
 
+    /** Enroll entry points (profile chip, SETUP pill): mic first, then expand. */
+    fun requestEnroll() {
+        if (bioMicGranted) {
+            showEnroll = true
+        } else {
+            bioMicLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     fun openUrl(url: String) {
         runCatching {
             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
         }
+    }
+
+    // ── Privacy & Data Shield actions (wired to MemoryDb, F4) ──────────
+    fun refreshPrivacyCounts() {
+        settingsScope.launch {
+            val counts = withContext(Dispatchers.IO) {
+                memoryDb.factCount() to memoryDb.lastMessages(MAX_CHAT_PROBE).size
+            }
+            privacyFactCount = counts.first
+            privacyChatCount = counts.second
+        }
+    }
+
+    fun exportMemories() {
+        settingsScope.launch {
+            val json = withContext(Dispatchers.IO) {
+                val arr = JSONArray()
+                memoryDb.allFacts(null, null).forEach { f ->
+                    arr.put(
+                        JSONObject()
+                            .put("category", f.category)
+                            .put("text", f.text)
+                    )
+                }
+                arr.toString(2)
+            }
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_SUBJECT, "Jarvis Memory backup")
+                putExtra(Intent.EXTRA_TEXT, json)
+            }
+            runCatching {
+                context.startActivity(
+                    Intent.createChooser(intent, "Export Jarvis memories")
+                )
+            }
+        }
+    }
+
+    fun importMemories() {
+        settingsScope.launch {
+            val inserted = withContext(Dispatchers.IO) {
+                runCatching {
+                    val arr = JSONArray(importJsonText)
+                    var n = 0
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        val text = obj.optString("text").trim()
+                        if (text.isNotEmpty()) {
+                            val cat = obj.optString("category")
+                                .takeIf { it in MemoryCategories.ALL }
+                                ?: MemoryCategories.GENERAL
+                            memoryDb.addFact(cat, text)
+                            n++
+                        }
+                    }
+                    n
+                }.getOrElse { -1 }
+            }
+            showImportMemory = false
+            if (inserted >= 0) {
+                importJsonText = ""
+                refreshPrivacyCounts()
+                info = InfoDialog("Import complete", "Imported $inserted memories.")
+            } else {
+                info = InfoDialog(
+                    "Import failed",
+                    "That wasn't a valid memory JSON array."
+                )
+            }
+        }
+    }
+
+    fun clearChatHistory() {
+        settingsScope.launch {
+            withContext(Dispatchers.IO) { memoryDb.clearChat() }
+            confirmClearChat = false
+            privacyChatCount = 0
+        }
+    }
+
+    fun clearAllMemories() {
+        settingsScope.launch {
+            withContext(Dispatchers.IO) {
+                // MemoryDb has no bulk-delete; clear via its own DAO.
+                memoryDb.allFacts(null, null).forEach { memoryDb.deleteFact(it.id) }
+            }
+            confirmClearMemories = false
+            privacyFactCount = 0
+        }
+    }
+
+    val biometricsSubtitle = when {
+        settings.biometricsEnrolled ->
+            "Enrolled • ${settings.biometricsSampleCount} samples" +
+                if (settings.biometricsEnrolledDate.isNotBlank()) {
+                    " • ${settings.biometricsEnrolledDate}"
+                } else {
+                    ""
+                }
+        bioCount > 0 -> "$bioCount of ${BiometricsRecorder.TOTAL_SAMPLES} samples recorded"
+        else -> "Not enrolled • Tap to record voice profile"
+    }
+
+    val wakeSubtitle = when {
+        !settings.wakeAlwaysOn -> "Tap the mic / orb to talk"
+        wakeUiStatus.listening -> "Always-on • Listening for \"Hey Jarvis\""
+        wakeUiStatus.enabled -> "Always-on • Running"
+        else -> "Always-on • Not running yet"
     }
 
     Column(
@@ -191,94 +362,303 @@ fun SettingsScreen(
             .verticalScroll(rememberScrollState())
             .padding(JarvisDimens.screenPadding)
     ) {
-        Text(
-            text = "Settings & Intelligence",
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold
-        )
+        // ── Header ─────────────────────────────────────────────────────
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Settings & Intelligence",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "System preferences & neural configuration",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(
+                imageVector = Icons.Filled.AutoAwesome,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(28.dp)
+            )
+        }
         Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
 
-        // ── Operator card ──────────────────────────────────────────────
-        GroupCard {
+        // ── Accessibility warning (Fix → Permissions) ──────────────────
+        A11yWarningBanner(onFix = onOpenPermissions)
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
+
+        // ── Profile card ───────────────────────────────────────────────
+        GlassCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Filled.Person,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(34.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .background(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(18.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Person,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(30.dp)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .size(10.dp)
+                            .background(
+                                color = Color(0xFF22C55E),
+                                shape = CircleShape
+                            )
+                            .border(
+                                width = 2.dp,
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = CircleShape
+                            )
+                    )
+                }
                 Spacer(modifier = Modifier.width(12.dp))
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = settings.callsign,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "OPERATOR • JARVIS PRO",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
+                        text = "JARVIS OPERATOR • PRIMARY USER",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 10.sp,
+                            letterSpacing = 1.2.sp
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(onClick = { showNameFields = !showNameFields }) {
+                    Icon(
+                        imageVector = Icons.Filled.Edit,
+                        contentDescription = "Edit name and callsign",
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
             }
             Spacer(modifier = Modifier.height(14.dp))
-            OutlinedTextField(
-                value = settings.assistantName,
-                onValueChange = { onSettingsChange(settings.copy(assistantName = it)) },
-                label = { Text("Assistant name") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            OutlinedTextField(
-                value = settings.callsign,
-                onValueChange = { onSettingsChange(settings.copy(callsign = it)) },
-                label = { Text("${settings.assistantName} should call you") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ProfileChip(icon = Icons.Filled.Mic, label = "Enroll Voice") {
+                    requestEnroll()
+                }
+                ProfileChip(
+                    icon = Icons.Filled.EmojiEmotions,
+                    label = settings.persona
+                ) {
+                    showPersona = true
+                }
+            }
+            if (showNameFields) {
+                Spacer(modifier = Modifier.height(14.dp))
+                OutlinedTextField(
+                    value = settings.assistantName,
+                    onValueChange = { onSettingsChange(settings.copy(assistantName = it)) },
+                    label = { Text("Assistant name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = settings.callsign,
+                    onValueChange = { onSettingsChange(settings.copy(callsign = it)) },
+                    label = { Text("${settings.assistantName} should call you") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
 
-        SectionTitle("Voice & Neural Intelligence")
-        GroupCard {
-            SettingsRow(
-                Icons.Filled.Face, "AI Persona & Voice", settings.persona,
-                showDivider = true
-            ) {
-                showPersona = true
+        // ── Voice biometrics enroll block (expanded from the profile
+        // card / Voice group row — the pre-F4 enroll dialog's content,
+        // moved inline; same recorder state and actions).
+        if (showEnroll) {
+            Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
+            GlassCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconSquare(icon = Icons.Filled.Fingerprint)
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Voice Biometrics",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = biometricsSubtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Samples are stored only on this device. Voice verification " +
+                        "matching arrives in a later update — enrollment only for now.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                val recording = bioRecordingIndex != null
+                if (recording) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(22.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "Recording sample $bioRecordingIndex of " +
+                                "${BiometricsRecorder.TOTAL_SAMPLES} — say: " +
+                                "\"${BiometricsRecorder.WAKE_PHRASE}\"",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                } else if (!settings.biometricsEnrolled) {
+                    Text(
+                        text = "When you tap record, say the wake phrase clearly: " +
+                            "\"${BiometricsRecorder.WAKE_PHRASE}\" " +
+                            "(${BiometricsRecorder.SAMPLE_SECONDS} seconds per sample).",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            recordBioSample(
+                                (bioCount + 1).coerceAtMost(BiometricsRecorder.TOTAL_SAMPLES)
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "Record sample ${(bioCount + 1).coerceAtMost(BiometricsRecorder.TOTAL_SAMPLES)} " +
+                                "of ${BiometricsRecorder.TOTAL_SAMPLES}"
+                        )
+                    }
+                }
+                bioError?.let { error ->
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                if (bioCount > 0 && !recording) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row {
+                        TextButton(onClick = { clearBioSamples() }) { Text("Re-enroll") }
+                        TextButton(onClick = { clearBioSamples() }) { Text("Delete samples") }
+                    }
+                }
             }
-            SettingsRow(
-                Icons.Filled.Translate, "Conversation Language", settings.language,
-                showDivider = true
-            ) {
-                showLanguage = true
-            }
-            SettingsRow(
-                Icons.Filled.GraphicEq, "Voice Engine",
-                when (settings.voiceEngine) {
+        }
+
+        // ── Voice & Neural Intelligence ────────────────────────────────
+        SectionLabel(
+            text = "VOICE & NEURAL INTELLIGENCE",
+            modifier = Modifier.padding(
+                top = JarvisDimens.sectionGap,
+                bottom = JarvisDimens.spaceSm
+            )
+        )
+        GlassCard {
+            GlassRow(
+                icon = Icons.Filled.Mic,
+                title = "Owner Voice Biometrics",
+                subtitle = biometricsSubtitle,
+                showDivider = true,
+                onClick = { showEnroll = !showEnroll },
+                trailing = if (!settings.biometricsEnrolled) {
+                    {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = Color.Transparent,
+                            border = BorderStroke(
+                                1.dp,
+                                MaterialTheme.colorScheme.primary
+                            ),
+                            modifier = Modifier.clickable { requestEnroll() }
+                        ) {
+                            Text(
+                                text = "SETUP",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(
+                                    horizontal = 12.dp,
+                                    vertical = 6.dp
+                                )
+                            )
+                        }
+                    }
+                } else {
+                    null
+                }
+            )
+            GlassRow(
+                icon = Icons.Filled.Translate,
+                title = "Conversation Language",
+                subtitle = settings.language,
+                showDivider = true,
+                onClick = { showLanguage = true }
+            )
+            GlassRow(
+                icon = Icons.Filled.Face,
+                title = "AI Persona & Voice",
+                subtitle = "${settings.persona} • Voice: " +
+                    settings.customVoiceName.ifBlank { settings.voiceName },
+                showDivider = true,
+                onClick = { showPersona = true }
+            )
+            GlassRow(
+                icon = Icons.Filled.GraphicEq,
+                title = "Voice Engine",
+                subtitle = when (settings.voiceEngine) {
                     "NATIVE" -> "Native Live"
                     "UNIVERSAL" -> "Universal"
                     else -> "Auto"
                 },
-                showDivider = true
-            ) {
-                showVoiceEngine = true
-            }
+                showDivider = true,
+                onClick = { showVoiceEngine = true }
+            )
+            GlassRow(
+                icon = Icons.Filled.Hearing,
+                title = "Wake Word",
+                subtitle = wakeSubtitle,
+                showDivider = false,
+                onClick = { wakeExpanded = !wakeExpanded }
+            )
+            // Always composed (its remembers/launchers stay at a fixed
+            // call site); it renders nothing while collapsed.
             WakeWordControls(
                 settings = settings,
                 onSettingsChange = onSettingsChange,
-                onOpenPermissions = onOpenPermissions
+                onOpenPermissions = onOpenPermissions,
+                expanded = wakeExpanded
+            )
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant,
+                modifier = Modifier.padding(start = 58.dp)
             )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 6.dp),
+                    .padding(vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Filled.VolumeOff, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                IconSquare(icon = Icons.Filled.VolumeOff)
                 Spacer(modifier = Modifier.width(14.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Silent Execution Mode", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Silent Execution Mode",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
                     Text(
                         text = "Mute voice narration; a subtle chime still plays when each turn finishes",
                         style = MaterialTheme.typography.bodySmall,
@@ -298,15 +678,17 @@ fun SettingsScreen(
                     )
                 )
             }
-        }
-
-        SectionTitle("Voice")
-        GroupCard {
-            SettingsRow(
-                Icons.Filled.RecordVoiceOver, "Gemini Live Voice",
-                settings.customVoiceName.ifBlank { settings.voiceName } +
-                    if (settings.customVoiceName.isNotBlank()) " (custom)" else ""
-            ) { showVoice = true }
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant,
+                modifier = Modifier.padding(start = 58.dp)
+            )
+            GlassRow(
+                icon = Icons.Filled.RecordVoiceOver,
+                title = "Gemini Live Voice",
+                subtitle = settings.customVoiceName.ifBlank { settings.voiceName } +
+                    if (settings.customVoiceName.isNotBlank()) " (custom)" else "",
+                onClick = { showVoice = true }
+            )
             Spacer(modifier = Modifier.height(8.dp))
             OutlinedTextField(
                 value = settings.customVoiceName,
@@ -331,72 +713,66 @@ fun SettingsScreen(
             )
         }
 
-        SectionTitle("Voice Biometrics")
-        GroupCard {
-            SettingsRow(
-                Icons.Filled.Fingerprint, "Voice Biometrics",
-                when {
-                    settings.biometricsEnrolled ->
-                        "Enrolled — ${settings.biometricsSampleCount} samples" +
-                            if (settings.biometricsEnrolledDate.isNotBlank()) {
-                                " • ${settings.biometricsEnrolledDate}"
-                            } else {
-                                ""
-                            }
-                    bioCount > 0 -> "$bioCount of ${BiometricsRecorder.TOTAL_SAMPLES} samples recorded"
-                    else -> "Not enrolled — record 3 samples of your wake phrase"
-                }
-            ) {
-                if (bioMicGranted) {
-                    showBiometrics = true
-                } else {
-                    bioMicLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                }
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Samples are stored only on this device. Voice verification " +
-                    "matching arrives in a later update — enrollment only for now.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+        // ── System & Data Engine ───────────────────────────────────────
+        SectionLabel(
+            text = "SYSTEM & DATA ENGINE",
+            modifier = Modifier.padding(
+                top = JarvisDimens.sectionGap,
+                bottom = JarvisDimens.spaceSm
+            )
+        )
+        GlassCard {
+            GlassRow(
+                icon = Icons.Filled.Cable,
+                title = "API & Model",
+                subtitle = "${activeProvider.label} • " +
+                    activeProvider.chatModel.ifBlank { "No chat model set" },
+                showDivider = true,
+                onClick = { onOpenApi() }
+            )
+            GlassRow(
+                icon = Icons.Filled.Storage,
+                title = "Neural Memory Bank",
+                subtitle = "Search, review and back up learned facts",
+                showDivider = true,
+                onClick = { onOpenMemory() }
+            )
+            GlassRow(
+                icon = Icons.Filled.VerifiedUser,
+                title = "System Permissions",
+                subtitle = "Microphone, Accessibility, Notifications & System",
+                showDivider = true,
+                onClick = { onOpenPermissions() }
+            )
+            GlassRow(
+                icon = Icons.Filled.Palette,
+                title = "Overlay Avatars",
+                subtitle = "Choose a floating avatar or turn the overlay off",
+                showDivider = true,
+                onClick = { onOpenAvatars() }
+            )
+            GlassRow(
+                icon = Icons.Filled.Apps,
+                title = "App Control & Hands-Free",
+                subtitle = "WhatsApp, YouTube, Media & Phone Automation",
+                onClick = { onOpenHandsFree() }
             )
         }
 
-        SectionTitle("System & Data Engine")
-        GroupCard {
-            SettingsRow(
-                Icons.Filled.Api, "API & Connection", "Providers, keys & models",
-                showDivider = true
-            ) {
-                onOpenApi()
-            }
-            SettingsRow(
-                Icons.Filled.Memory, "Neural Memory Bank", "Facts, preferences, contacts",
-                showDivider = true
-            ) {
-                onOpenMemory()
-            }
-            SettingsRow(
-                Icons.Filled.Security, "System Permissions", "11 authorizations",
-                showDivider = true
-            ) {
-                onOpenPermissions()
-            }
-            SettingsRow(
-                Icons.Filled.Layers, "Floating Avatar",
-                AvatarCatalog.byId(settings.avatarId).label + " • 12 companions + Task HUD"
-            ) {
-                onOpenAvatars()
-            }
-        }
-
-        SectionTitle("Floating Avatar & Vision")
-        GroupCard {
+        // ── Floating Avatar & Vision (preserved from pre-F4) ───────────
+        SectionLabel(
+            text = "FLOATING AVATAR & VISION",
+            modifier = Modifier.padding(
+                top = JarvisDimens.sectionGap,
+                bottom = JarvisDimens.spaceSm
+            )
+        )
+        GlassCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     painter = painterResource(AvatarCatalog.byId(settings.avatarId).resId),
                     contentDescription = null,
-                    tint = androidx.compose.ui.graphics.Color.Unspecified,
+                    tint = Color.Unspecified,
                     modifier = Modifier.size(44.dp)
                 )
                 Spacer(modifier = Modifier.width(12.dp))
@@ -443,11 +819,7 @@ fun SettingsScreen(
             }
             Spacer(modifier = Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Filled.Visibility,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
+                IconSquare(icon = Icons.Filled.Visibility)
                 Spacer(modifier = Modifier.width(14.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Screen Share (Vision)", style = MaterialTheme.typography.bodyLarge)
@@ -467,162 +839,49 @@ fun SettingsScreen(
             }
         }
 
-        SectionTitle("Digital Hands")
-        GroupCard {
-            val handsEnabled = JarvisAccessibilityService.isEnabled()
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Filled.Accessibility,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(14.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Accessibility Service", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        text = if (handsEnabled) "Enabled — Jarvis can read and operate the current screen"
-                        else "Not enabled — intent and hardware tools still work",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                OutlinedButton(onClick = {
-                    runCatching {
-                        context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                    }
-                }) { Text("Open") }
-            }
-            Spacer(modifier = Modifier.height(10.dp))
-            Text(
-                text = "Guardrails: payments, unknown-number calls and similar risky actions always ask first.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+        // ── Appearance & Security ──────────────────────────────────────
+        SectionLabel(
+            text = "APPEARANCE & SECURITY",
+            modifier = Modifier.padding(
+                top = JarvisDimens.sectionGap,
+                bottom = JarvisDimens.spaceSm
             )
-            Spacer(modifier = Modifier.height(12.dp))
-            Row {
-                Button(
-                    onClick = {
-                        screenPreview = JarvisAccessibilityService.instance
-                            ?.screenReader()
-                            ?.serialize()
-                            ?: "Accessibility is not enabled. Enable Jarvis Digital Hands first, then try Read screen again."
+        )
+        GlassCard {
+            GlassRow(
+                icon = Icons.Filled.Palette,
+                title = "Theme & Orb Colors",
+                subtitle = settings.theme.name.lowercase()
+                    .replaceFirstChar { it.uppercase() } +
+                    if (settings.theme == AppTheme.CUSTOM) {
+                        settings.customBgHex?.let { " • custom $it" } ?: ""
+                    } else {
+                        ""
                     },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Filled.Visibility, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Read screen")
-                }
-                Spacer(modifier = Modifier.width(10.dp))
-                OutlinedButton(
-                    onClick = {
-                        val target = !torchOn
-                        settingsScope.launch {
-                            val result = withContext(Dispatchers.IO) {
-                                DeepIntents(context).toggleTorch(target)
-                            }
-                            if (result.success) torchOn = target
-                        }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Filled.FlashOn, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(if (torchOn) "Torch off" else "Torch")
-                }
-            }
+                showDivider = true,
+                onClick = { showTheme = true }
+            )
+            GlassRow(
+                icon = Icons.Filled.Lock,
+                title = "Privacy & Data Shield",
+                subtitle = "On-device processing & data controls",
+                showDivider = true,
+                onClick = { showPrivacy = true }
+            )
+            GlassRow(
+                icon = Icons.Filled.VerifiedUser,
+                title = "App Identity & Integrity",
+                subtitle = "Publisher, app ID and signing certificate status",
+                onClick = { showIdentity = true }
+            )
         }
 
-        SectionTitle("Keep Accessibility Alive (Vivo/iQOO)")
-        GroupCard {
-            val a11yOn = A11yStatus.isEnabled(context)
-            val batteryFree = A11yStatus.isIgnoringBatteryOptimizations(context)
-            Text(
-                text = "Status: Accessibility ${if (a11yOn) "ON" else "OFF"} • " +
-                    "Battery ${if (batteryFree) "unrestricted" else "optimized"}",
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = if (a11yOn && batteryFree) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.error
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Vivo/iQOO phones silently switch off accessibility for " +
-                    "sideloaded apps. These three steps keep Jarvis alive — " +
-                    "do them once, and re-check them if accessibility turns off again.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            KeepAliveStep(
-                step = "1",
-                title = "Allow restricted settings",
-                caption = "On the App info page that opens, tap ⋮ (top right) → " +
-                    "\"Allow restricted settings\", then enable Jarvis under " +
-                    "Accessibility. Android 13+ blocks accessibility for " +
-                    "sideloaded apps until this is allowed.",
-                buttonLabel = "Open App info"
-            ) {
-                runCatching {
-                    context.startActivity(
-                        Intent(
-                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            Uri.parse("package:${context.packageName}")
-                        )
-                    )
-                }
-            }
-            KeepAliveStep(
-                step = "2",
-                title = "Autostart ON",
-                caption = "In iManager → App manager → Autostart, turn Jarvis ON " +
-                    "so the phone doesn't kill it in the background.",
-                buttonLabel = "Open Autostart"
-            ) { openAutostartSettings(context) }
-            KeepAliveStep(
-                step = "3",
-                title = "Battery: Unrestricted",
-                caption = if (batteryFree) {
-                    "Done — Jarvis already runs unrestricted. ✓"
-                } else {
-                    "Choose \"Unrestricted\" on the page that opens so the " +
-                        "system doesn't freeze Jarvis to save battery."
-                },
-                buttonLabel = "Open Battery settings"
-            ) {
-                runCatching {
-                    context.startActivity(
-                        Intent(
-                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                            Uri.parse("package:${context.packageName}")
-                        )
-                    )
-                }
-            }
-        }
-
-        SectionTitle("Appearance")
-        GroupCard {
-            SettingsRow(
-                Icons.Filled.Palette, "Theme & Orb Colors",
-                settings.theme.name.lowercase().replaceFirstChar { it.uppercase() } +
-                    (settings.customBgHex?.let { " • custom $it" } ?: "")
-            ) { showTheme = true }
-        }
-
-        SectionTitle("Developer")
-        GroupCard {
-            Text(
-                text = "Developed by",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Text(
-                text = "N S H D",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(12.dp))
+        // ── Developer footer ───────────────────────────────────────────
+        Spacer(modifier = Modifier.height(JarvisDimens.sectionGap))
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
             // Icon links ONLY — no addresses, numbers or URLs displayed.
             // SpaceBetween across the full width at 44dp (F2): six 48dp
             // buttons + gaps overflowed narrow screens and clipped the
@@ -650,15 +909,21 @@ fun SettingsScreen(
                     openUrl("tel:+918590455801")
                 }
             }
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "JARVIS • v1.3.0",
+                style = MaterialTheme.typography.labelMedium.copy(
+                    letterSpacing = 1.2.sp
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Developed by N S H D",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
-
-        Spacer(modifier = Modifier.height(18.dp))
-        Text(
-            text = "JARVIS • v1.2.0",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.align(Alignment.CenterHorizontally)
-        )
         // ≥120dp clearance so the footer never hides behind the bottom
         // bar / raised mic FAB when scrolled to the end (F2).
         Spacer(modifier = Modifier.height(120.dp))
@@ -671,25 +936,6 @@ fun SettingsScreen(
             title = { Text(info?.title ?: "") },
             text = { Text(info?.body ?: "") },
             confirmButton = { TextButton(onClick = { info = null }) { Text("OK") } }
-        )
-    }
-
-    if (screenPreview != null) {
-        AlertDialog(
-            onDismissRequest = { screenPreview = null },
-            title = { Text("Current screen") },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    Text(screenPreview ?: "")
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { screenPreview = null }) { Text("Close") }
-            }
         )
     }
 
@@ -724,31 +970,10 @@ fun SettingsScreen(
     }
 
     if (showLanguage) {
-        AlertDialog(
-            onDismissRequest = { showLanguage = false },
-            title = { Text("Conversation Language") },
-            text = {
-                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    JARVIS_LANGUAGES.forEach { lang ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    onSettingsChange(settings.copy(language = lang))
-                                }
-                                .padding(vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = settings.language == lang,
-                                onClick = { onSettingsChange(settings.copy(language = lang)) }
-                            )
-                            Text(lang, style = MaterialTheme.typography.bodyLarge)
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showLanguage = false }) { Text("Done") } }
+        LanguagePickerDialog(
+            current = settings.language,
+            onDismiss = { showLanguage = false },
+            onPick = { lang -> onSettingsChange(settings.copy(language = lang)) }
         )
     }
 
@@ -832,92 +1057,177 @@ fun SettingsScreen(
         )
     }
 
-    if (showBiometrics) {
-        val recording = bioRecordingIndex != null
+    if (showPrivacy) {
         AlertDialog(
-            onDismissRequest = { if (!recording) showBiometrics = false },
-            title = { Text("Voice Biometrics") },
+            onDismissRequest = { showPrivacy = false },
+            title = { Text("Privacy & Data Shield") },
             text = {
                 Column {
                     Text(
-                        text = if (settings.biometricsEnrolled) {
-                            "Enrolled — ${settings.biometricsSampleCount} samples" +
-                                if (settings.biometricsEnrolledDate.isNotBlank()) {
-                                    " • ${settings.biometricsEnrolledDate}"
-                                } else {
-                                    ""
-                                }
-                        } else {
-                            "$bioCount of ${BiometricsRecorder.TOTAL_SAMPLES} samples recorded"
-                        },
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Samples are stored only on this device. Voice verification " +
-                            "matching arrives in a later update — enrollment only for now.",
+                        text = "Jarvis keeps memory and chat history only in this " +
+                            "app's private on-device database (jarvis_memory.db). " +
+                            "Nothing below leaves the device except the export you " +
+                            "share yourself.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    if (recording) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.size(22.dp))
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = "Recording sample ${bioRecordingIndex} of " +
-                                    "${BiometricsRecorder.TOTAL_SAMPLES} — say: " +
-                                    "\"${BiometricsRecorder.WAKE_PHRASE}\"",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
-                    } else if (!settings.biometricsEnrolled) {
-                        Text(
-                            text = "When you tap record, say the wake phrase clearly: " +
-                                "\"${BiometricsRecorder.WAKE_PHRASE}\" " +
-                                "(${BiometricsRecorder.SAMPLE_SECONDS} seconds per sample).",
-                            style = MaterialTheme.typography.bodyMedium
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Memories stored: $privacyFactCount",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "Chat messages stored: $privacyChatCount",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    OutlinedButton(
+                        onClick = { exportMemories() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Export memory JSON") }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { showImportMemory = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Import memory JSON") }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { confirmClearChat = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Clear chat history") }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = { confirmClearMemories = true },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Clear all memories") }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPrivacy = false }) { Text("Done") }
+            }
+        )
+    }
+
+    if (showImportMemory) {
+        AlertDialog(
+            onDismissRequest = { showImportMemory = false },
+            title = { Text("Import memories") },
+            text = {
+                Column {
+                    Text(
+                        text = "Paste a memory JSON array ([{\"category\": \"…\", \"text\": \"…\"}]).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = importJsonText,
+                        onValueChange = { importJsonText = it },
+                        label = { Text("JSON") },
+                        modifier = Modifier.fillMaxWidth(),
+                        maxLines = 8
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { importMemories() },
+                    enabled = importJsonText.isNotBlank()
+                ) { Text("Import") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showImportMemory = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (confirmClearChat) {
+        AlertDialog(
+            onDismissRequest = { confirmClearChat = false },
+            title = { Text("Clear chat history?") },
+            text = {
+                Text("Every stored chat message on this device will be deleted. This cannot be undone.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = { clearChatHistory() },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) { Text("Clear") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearChat = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (confirmClearMemories) {
+        AlertDialog(
+            onDismissRequest = { confirmClearMemories = false },
+            title = { Text("Clear all memories?") },
+            text = {
+                Text("Every learned fact in the Neural Memory Bank will be deleted. This cannot be undone.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = { clearAllMemories() },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) { Text("Clear") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearMemories = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showIdentity) {
+        AlertDialog(
+            onDismissRequest = { showIdentity = false },
+            title = { Text("App Identity & Integrity") },
+            text = {
+                Column {
+                    val idInfo = identityInfo
+                    if (idInfo != null) {
+                        IdentityRow("App", idInfo.appLabel)
+                        IdentityRow("Package", idInfo.packageName)
+                        IdentityRow(
+                            "Version",
+                            "${idInfo.versionName} (${idInfo.versionCode})"
                         )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Button(
-                            onClick = {
-                                recordBioSample((bioCount + 1).coerceAtMost(BiometricsRecorder.TOTAL_SAMPLES))
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                "Record sample ${(bioCount + 1).coerceAtMost(BiometricsRecorder.TOTAL_SAMPLES)} " +
-                                    "of ${BiometricsRecorder.TOTAL_SAMPLES}"
-                            )
-                        }
-                    }
-                    bioError?.let { error ->
+                        IdentityRow("Signing SHA-256", idInfo.certSha256Short)
+                        IdentityRow("Developer", "N S H D")
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = error,
+                            text = "Certificate fingerprint truncated to its first " +
+                                "16 hex characters.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                    }
-                    if (bioCount > 0 && !recording) {
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Row {
-                            TextButton(onClick = { clearBioSamples() }) { Text("Re-enroll") }
-                            TextButton(onClick = { clearBioSamples() }) { Text("Delete samples") }
-                        }
+                    } else {
+                        Text(
+                            text = "Package information is unavailable on this device.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
                     }
                 }
             },
             confirmButton = {
-                TextButton(
-                    onClick = { showBiometrics = false },
-                    enabled = !recording
-                ) { Text("Done") }
+                TextButton(onClick = { showIdentity = false }) { Text("Done") }
             }
         )
     }
 }
+
+private const val MAX_CHAT_PROBE = 100_000
 
 private fun hasMicPermission(context: Context): Boolean =
     ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -928,17 +1238,104 @@ private fun isBatteryWhitelisted(context: Context): Boolean {
     return pm.isIgnoringBatteryOptimizations(context.packageName)
 }
 
+/** Reads the real label / version / signing cert for the Identity dialog. */
+private fun loadIdentityInfo(context: Context): IdentityInfo? = runCatching {
+    val pm = context.packageManager
+    val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        PackageManager.GET_SIGNING_CERTIFICATES
+    } else {
+        legacySigningFlags()
+    }
+    val pkgInfo = pm.getPackageInfo(context.packageName, flags)
+    val signer: Signature? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            pkgInfo.signingInfo?.apkContentsSigners?.firstOrNull()
+        } else {
+            legacySignatures(pkgInfo)?.firstOrNull()
+        }
+    val sha = signer?.let {
+        MessageDigest.getInstance("SHA-256").digest(it.toByteArray())
+            .joinToString("") { b -> "%02x".format(b.toInt() and 0xFF) }
+            .uppercase()
+            .take(16)
+    } ?: "Unavailable"
+    IdentityInfo(
+        appLabel = pm.getApplicationLabel(context.applicationInfo).toString(),
+        packageName = context.packageName,
+        versionName = pkgInfo.versionName ?: "—",
+        versionCode = PackageInfoCompat.getLongVersionCode(pkgInfo),
+        certSha256Short = sha
+    )
+}.getOrNull()
+
+@Suppress("DEPRECATION")
+private fun legacySigningFlags(): Int = PackageManager.GET_SIGNATURES
+
+@Suppress("DEPRECATION")
+private fun legacySignatures(info: PackageInfo): Array<Signature>? = info.signatures
+
+@Composable
+private fun IdentityRow(label: String, value: String) {
+    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+/** AssistChip-style pill used in the profile card (Enroll Voice / persona). */
+@Composable
+private fun ProfileChip(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(label, style = MaterialTheme.typography.labelMedium)
+        }
+    }
+}
+
 /**
- * Wake Word card content (Level 6): Tap vs Always-on mode toggle, and —
+ * Wake Word expanded block (Level 6): Tap vs Always-on mode toggle, and —
  * in Always-on mode — the live requirements checklist (offline model
  * download with progress, microphone permission, battery whitelist),
  * Start/Stop listening and the service's live status.
+ *
+ * F4: the Hearing icon + "Wake Word" title moved to the [GlassRow] above
+ * this block in the Voice card; the full-width status line stays here
+ * (F2 layout rule). The composable is ALWAYS called from the same site —
+ * [expanded] only gates rendering, after every hook — so collapsing can
+ * never disturb the caller's slot table.
  */
 @Composable
 private fun WakeWordControls(
     settings: JarvisSettings,
     onSettingsChange: (JarvisSettings) -> Unit,
-    onOpenPermissions: () -> Unit
+    onOpenPermissions: () -> Unit,
+    expanded: Boolean
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -948,6 +1345,8 @@ private fun WakeWordControls(
     val micLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted -> micGranted = granted }
+
+    if (!expanded) return
 
     val modelReady = VoskModelManager.status(context) ==
         VoskModelManager.ModelStatus.READY ||
@@ -963,21 +1362,8 @@ private fun WakeWordControls(
     }
 
     Column {
-        // Layout (F2): title row, then the status on its OWN full-width
-        // line, then a full-width segmented mode selector. The old
-        // single row squeezed the status text under the Tap/Always-on
-        // buttons, where it wrapped into "Always-on • Not running /
-        // yet" fragments.
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.Filled.Hearing, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-            Spacer(modifier = Modifier.width(14.dp))
-            Text("Wake Word", style = MaterialTheme.typography.bodyLarge)
-        }
+        // Full-width status line on its own line (F2), then a full-width
+        // segmented mode selector.
         Text(
             text = when {
                 !settings.wakeAlwaysOn -> "Tap the mic / orb to talk"
@@ -987,7 +1373,7 @@ private fun WakeWordControls(
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 38.dp, top = 2.dp)
+            modifier = Modifier.padding(top = 2.dp)
         )
         Spacer(modifier = Modifier.height(8.dp))
         Row(
@@ -1188,29 +1574,48 @@ private fun ThemeDialog(
                         )
                         Text(
                             theme.name.lowercase().replaceFirstChar { it.uppercase() } +
-                                if (theme == AppTheme.PURPLE) " (default)" else "",
+                                if (theme == AppTheme.DARK) " (default)" else "",
                             style = MaterialTheme.typography.bodyLarge
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(10.dp))
-                OutlinedTextField(
-                    value = hex,
-                    onValueChange = { hex = it },
-                    label = { Text("Custom background (#RRGGBB)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row {
-                    TextButton(onClick = {
-                        if (parseHexColor(hex) != null) {
-                            onSettingsChange(settings.copy(customBgHex = hex.trim()))
-                        }
-                    }) { Text("Apply custom") }
-                    TextButton(onClick = {
-                        hex = ""
-                        onSettingsChange(settings.copy(customBgHex = null))
-                    }) { Text("Clear") }
+                if (settings.theme == AppTheme.CUSTOM) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = hex,
+                        onValueChange = { hex = it },
+                        label = { Text("Custom background (#RRGGBB)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row {
+                        TextButton(onClick = {
+                            if (parseHexColor(hex) != null) {
+                                // F4 contract (Workstream B): the hex only
+                                // takes effect while theme == CUSTOM, so
+                                // applying MUST also select CUSTOM.
+                                onSettingsChange(
+                                    settings.copy(
+                                        theme = AppTheme.CUSTOM,
+                                        customBgHex = hex.trim()
+                                    )
+                                )
+                            }
+                        }) { Text("Apply custom") }
+                        TextButton(onClick = {
+                            hex = ""
+                            onSettingsChange(settings.copy(customBgHex = null))
+                        }) { Text("Clear") }
+                    }
+                } else {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Pick Custom to set your own background colour. " +
+                            "Choosing a preset keeps any stored custom colour " +
+                            "saved but inactive.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         },
@@ -1244,125 +1649,7 @@ private fun PersonaOption(
     }
 }
 
-@Composable
-private fun SectionTitle(text: String) {
-    // D2 section style: letterspaced label (see SectionLabel), one
-    // rhythm of space above / small gap below for every group.
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelLarge.copy(letterSpacing = 0.9.sp),
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(
-            top = JarvisDimens.sectionGap,
-            bottom = JarvisDimens.spaceSm
-        )
-    )
-}
-
-@Composable
-private fun GroupCard(
-    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit
-) {
-    Card(
-        shape = RoundedCornerShape(JarvisDimens.radiusCard),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(JarvisDimens.cardPadding), content = content)
-    }
-}
-
-@Composable
-private fun SettingsRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    showDivider: Boolean = false,
-    onClick: () -> Unit
-) {
-    Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onClick)
-                .padding(vertical = JarvisDimens.spaceMd),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-            Spacer(modifier = Modifier.width(JarvisDimens.spaceLg))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Icon(
-                Icons.Filled.ChevronRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        if (showDivider) {
-            // Hairline aligned with the row text (icon 24 + gap 16).
-            HorizontalDivider(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.padding(start = 40.dp)
-            )
-        }
-    }
-}
-
-/** One numbered step of the Vivo/iQOO accessibility keep-alive guide. */
-@Composable
-private fun KeepAliveStep(
-    step: String,
-    title: String,
-    caption: String,
-    buttonLabel: String,
-    onOpen: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.Top
-    ) {
-        Surface(
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.primaryContainer,
-            modifier = Modifier.size(28.dp)
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Text(
-                    text = step,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-            }
-        }
-        Spacer(modifier = Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                text = caption,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            OutlinedButton(onClick = onOpen) { Text(buttonLabel) }
-        }
-    }
-}
-
-/** Circular tonal button with a brand vector drawable (Developer section). */
+/** Rounded-square outline button with a brand vector drawable (Developer footer). */
 @Composable
 private fun DeveloperBrandButton(
     drawableRes: Int,
@@ -1370,11 +1657,11 @@ private fun DeveloperBrandButton(
     onClick: () -> Unit
 ) {
     Surface(
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier
-            .size(44.dp)
-            .clickable(onClick = onClick)
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.size(44.dp)
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(
@@ -1387,7 +1674,7 @@ private fun DeveloperBrandButton(
     }
 }
 
-/** Circular tonal button with a Material icon (Developer section). */
+/** Rounded-square outline button with a Material icon (Developer footer). */
 @Composable
 private fun DeveloperIconButton(
     icon: ImageVector,
@@ -1395,11 +1682,11 @@ private fun DeveloperIconButton(
     onClick: () -> Unit
 ) {
     Surface(
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier
-            .size(44.dp)
-            .clickable(onClick = onClick)
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.size(44.dp)
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(
@@ -1409,35 +1696,5 @@ private fun DeveloperIconButton(
                 modifier = Modifier.size(22.dp)
             )
         }
-    }
-}
-
-/**
- * Opens the OEM autostart manager. Vivo/iQOO ship it inside their
- * permission manager; other builds fall back to this app's App info
- * page, from where autostart can usually be reached.
- */
-private fun openAutostartSettings(context: Context) {
-    val vivoIntent = Intent().setComponent(
-        ComponentName(
-            "com.vivo.permissionmanager",
-            "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
-        )
-    )
-    if (runCatching { context.startActivity(vivoIntent) }.isSuccess) return
-    val iqooIntent = Intent().setComponent(
-        ComponentName(
-            "com.iqoo.secure",
-            "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"
-        )
-    )
-    if (runCatching { context.startActivity(iqooIntent) }.isSuccess) return
-    runCatching {
-        context.startActivity(
-            Intent(
-                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.parse("package:${context.packageName}")
-            )
-        )
     }
 }

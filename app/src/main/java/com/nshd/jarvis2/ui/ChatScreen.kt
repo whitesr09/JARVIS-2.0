@@ -1,5 +1,8 @@
 package com.nshd.jarvis2.ui
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,27 +12,38 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +52,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -47,6 +64,10 @@ import com.nshd.jarvis2.brain.ProviderStore
 import com.nshd.jarvis2.brain.ToolEvent
 import com.nshd.jarvis2.brain.ToolEventKind
 import com.nshd.jarvis2.memory.MemoryDb
+import com.nshd.jarvis2.voice.VoiceMode
+import com.nshd.jarvis2.voice.VoiceSessionManager
+import com.nshd.jarvis2.voice.VoiceStatus
+import java.util.Calendar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -68,7 +89,11 @@ private enum class ChatMode { JARVIS, CODE }
  * role="tool" rows still load, cleaned into chip text.)
  */
 @Composable
-fun ChatScreen(settings: JarvisSettings, onOpenSettings: () -> Unit = {}) {
+fun ChatScreen(
+    settings: JarvisSettings,
+    onOpenSettings: () -> Unit = {},
+    onOpenVoice: () -> Unit = {}
+) {
     val context = LocalContext.current
     val db = remember { MemoryDb(context) }
     val providerStore = remember { ProviderStore(context) }
@@ -78,6 +103,10 @@ fun ChatScreen(settings: JarvisSettings, onOpenSettings: () -> Unit = {}) {
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
+    var headerMenuOpen by remember { mutableStateOf(false) }
+    var composerMenuOpen by remember { mutableStateOf(false) }
+    // Header subtitle reflects the live voice session (F4).
+    val voiceState by VoiceSessionManager.uiState.collectAsState()
     val messages = remember { mutableStateListOf<UiMessage>() }
     val listState = rememberLazyListState()
 
@@ -204,30 +233,68 @@ fun ChatScreen(settings: JarvisSettings, onOpenSettings: () -> Unit = {}) {
             onFix = onOpenSettings,
             modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp)
         )
-        // Header
+        // Header (F4): options menu · centered greeting + engine status · new chat.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 20.dp, end = 8.dp, top = 14.dp, bottom = 6.dp),
+                .padding(start = 8.dp, end = 8.dp, top = 10.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
+            Box {
+                IconButton(onClick = { headerMenuOpen = true }) {
+                    Icon(
+                        imageVector = Icons.Filled.Menu,
+                        contentDescription = "Chat options",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                ChatOptionsMenu(
+                    expanded = headerMenuOpen,
+                    onDismiss = { headerMenuOpen = false },
+                    onClear = { showClearConfirm = true },
+                    onOpenVoice = onOpenVoice
+                )
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                val hour = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
                 Text(
-                    text = settings.assistantName,
+                    text = when {
+                        hour < 12 -> "Good morning"
+                        hour < 17 -> "Good afternoon"
+                        else -> "Good evening"
+                    },
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
+                val sessionActive = voiceState.status != VoiceStatus.IDLE
+                val engineLabel = when {
+                    sessionActive && voiceState.mode == VoiceMode.UNIVERSAL ->
+                        "Universal • ${voiceState.voiceName}"
+                    sessionActive && voiceState.mode == VoiceMode.LIVE -> "Gemini Live"
+                    settings.voiceEngine.uppercase() == "UNIVERSAL" -> "Universal"
+                    else -> "Gemini Live"
+                }
+                val statusWord = if (sessionActive) "Active" else "Off"
                 Text(
                     text = if (sending) "${settings.assistantName} is thinking…"
-                    else "${settings.assistantName} • ${settings.persona} • Active",
+                    else "${settings.assistantName} • $engineLabel • $statusWord",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            IconButton(onClick = { showClearConfirm = true }) {
+            IconButton(
+                onClick = {
+                    // New chat = the clear flow, confirmed when there
+                    // is a conversation to lose.
+                    if (messages.isNotEmpty()) showClearConfirm = true
+                }
+            ) {
                 Icon(
-                    imageVector = Icons.Filled.Delete,
-                    contentDescription = "Clear chat",
+                    imageVector = Icons.Filled.Add,
+                    contentDescription = "New chat",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -279,49 +346,102 @@ fun ChatScreen(settings: JarvisSettings, onOpenSettings: () -> Unit = {}) {
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Mode pills
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            FilterChip(
-                selected = mode == ChatMode.JARVIS,
-                onClick = { mode = ChatMode.JARVIS },
-                label = { Text(settings.assistantName) },
-                shape = RoundedCornerShape(50)
-            )
-            FilterChip(
-                selected = mode == ChatMode.CODE,
-                onClick = { mode = ChatMode.CODE },
-                label = { Text("<> Code") },
-                shape = RoundedCornerShape(50)
-            )
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Composer
-        Row(
+        // Composer CARD (F4): glass surface holding the text field, the
+        // mode pills, an options (+) button and a gradient send circle.
+        Surface(
+            shape = RoundedCornerShape(28.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            tonalElevation = 0.dp,
+            shadowElevation = 0.dp,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
-            OutlinedTextField(
-                value = input,
-                onValueChange = { input = it },
-                placeholder = { Text("Message ${settings.assistantName}") },
-                shape = RoundedCornerShape(JarvisDimens.radiusField),
-                modifier = Modifier.weight(1f),
-                maxLines = 4
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            IconButton(onClick = { send() }, enabled = !sending) {
-                Icon(
-                    imageVector = Icons.Filled.Send,
-                    contentDescription = "Send",
-                    tint = MaterialTheme.colorScheme.primary
+            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                TextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    placeholder = { Text("Message ${settings.assistantName}") },
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        disabledIndicatorColor = Color.Transparent
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                    maxLines = 4
                 )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ModePill(
+                        selected = mode == ChatMode.JARVIS,
+                        icon = Icons.Filled.Chat,
+                        label = settings.assistantName
+                    ) { mode = ChatMode.JARVIS }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    ModePill(
+                        selected = mode == ChatMode.CODE,
+                        icon = Icons.Filled.Code,
+                        label = "Code"
+                    ) { mode = ChatMode.CODE }
+                    Spacer(modifier = Modifier.weight(1f))
+                    Box {
+                        IconButton(onClick = { composerMenuOpen = true }) {
+                            Icon(
+                                imageVector = Icons.Filled.Add,
+                                contentDescription = "More actions",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        ChatOptionsMenu(
+                            expanded = composerMenuOpen,
+                            onDismiss = { composerMenuOpen = false },
+                            onClear = { showClearConfirm = true },
+                            onOpenVoice = onOpenVoice
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    val canSend = input.isNotBlank()
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .then(
+                                if (canSend) {
+                                    Modifier.background(
+                                        brush = Brush.linearGradient(
+                                            listOf(
+                                                MaterialTheme.colorScheme.primary,
+                                                MaterialTheme.colorScheme.secondary
+                                            )
+                                        ),
+                                        shape = CircleShape
+                                    )
+                                } else {
+                                    Modifier.background(
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        shape = CircleShape
+                                    )
+                                }
+                            )
+                            .clickable { send() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.ArrowUpward,
+                            contentDescription = "Send",
+                            tint = if (canSend) Color.White
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
             }
         }
     }
@@ -347,6 +467,74 @@ fun ChatScreen(settings: JarvisSettings, onOpenSettings: () -> Unit = {}) {
             },
             dismissButton = {
                 TextButton(onClick = { showClearConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+}
+
+/** F4 mode pill inside the composer card: icon + label, selected = primaryContainer. */
+@Composable
+private fun ModePill(
+    selected: Boolean,
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    val content = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
+    else MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(50),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer
+        else MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = content,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = content
+            )
+        }
+    }
+}
+
+/** Shared chat-options dropdown (header Menu button + composer + button). */
+@Composable
+private fun ChatOptionsMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onClear: () -> Unit,
+    onOpenVoice: () -> Unit
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuItem(
+            text = { Text("Clear chat") },
+            onClick = {
+                onDismiss()
+                onClear()
+            },
+            leadingIcon = {
+                Icon(imageVector = Icons.Filled.Delete, contentDescription = null)
+            }
+        )
+        DropdownMenuItem(
+            text = { Text("Open Voice") },
+            onClick = {
+                onDismiss()
+                onOpenVoice()
+            },
+            leadingIcon = {
+                Icon(imageVector = Icons.Filled.Mic, contentDescription = null)
             }
         )
     }

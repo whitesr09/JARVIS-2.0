@@ -1,5 +1,6 @@
 package com.nshd.jarvis2.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -43,6 +44,12 @@ fun UpdatesScreen() {
         )
         Spacer(modifier = Modifier.height(16.dp))
 
+        InfoCard(
+            title = "v1.3.0 — F4 redesign: canvas orb, themes + Hands-Free",
+            body = "F4: Canvas orb (orb.html system), theme system per orb.html " +
+                "(Light/Dark/Red/Sunset/Custom), UI redesign — floating nav, " +
+                "Home/Chat/Settings refresh, Hands-Free guide screen, Voice crash fix."
+        )
         RoadmapCard()
         InfoCard(
             title = "v1.2.0 — Task queue, background wake + F3 fixes",
@@ -146,10 +153,12 @@ fun UpdatesScreen() {
 
 @Composable
 private fun InfoCard(title: String, body: String) {
+    // F4 glass: flat surface, 24dp radius, hairline outlineVariant border.
     Card(
-        shape = RoundedCornerShape(JarvisDimens.radiusCard),
+        shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = JarvisDimens.spaceMd)
@@ -252,8 +261,15 @@ private val ROADMAP = listOf(
         "F3 Task queue + background wake",
         "Orb engine port, visible task queue in the floating HUD, " +
             "agent discipline + confirmations, background wake and " +
-            "overlay-tap voice (no app launch), Connection Test v2. " +
-            "This build.",
+            "overlay-tap voice (no app launch), Connection Test v2.",
+        RoadmapStatus.DONE
+    ),
+    RoadmapEntry(
+        "F4 Orb + UI redesign",
+        "Canvas orb (orb.html system) with its theme system " +
+            "(Light/Dark/Red/Sunset/Custom), floating pill navigation, " +
+            "Home/Chat/Settings refresh, Hands-Free guide screen, " +
+            "Voice crash fix. This build.",
         RoadmapStatus.CURRENT
     )
 )
@@ -261,10 +277,12 @@ private val ROADMAP = listOf(
 /** Roadmap as structured rows with status pills (D2) — one card, hairline dividers. */
 @Composable
 private fun RoadmapCard() {
+    // F4 glass: flat surface, 24dp radius, hairline outlineVariant border.
     Card(
-        shape = RoundedCornerShape(JarvisDimens.radiusCard),
+        shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = JarvisDimens.spaceMd)
@@ -324,9 +342,10 @@ private fun RoadmapCard() {
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
-                text = "v1.2.0 — Task queue, background wake and Connection " +
-                    "Test v2 (Universal Voice Engine shipped at v1.1.0, " +
-                    "design refresh completed at v1.0.0).",
+                text = "v1.3.0 — F4 redesign: canvas orb, theme system, " +
+                    "floating nav and the Hands-Free guide (task queue + " +
+                    "background wake shipped at v1.2.0, Universal Voice " +
+                    "Engine at v1.1.0, design refresh completed at v1.0.0).",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

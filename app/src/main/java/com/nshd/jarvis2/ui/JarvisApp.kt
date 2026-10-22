@@ -7,7 +7,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,9 +18,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -26,10 +30,8 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Update
-import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -45,10 +47,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.voice.VoiceSessionManager
 import com.nshd.jarvis2.voice.VoiceStatus
@@ -56,8 +61,8 @@ import com.nshd.jarvis2.voice.VoiceUiState
 
 private enum class Tab { HOME, CHAT, SETTINGS, UPDATES }
 
-/** Full-screen destinations layered over the tabs (L2: API + Memory, L3: Voice, L5: Avatars). */
-private enum class SubScreen { NONE, PERMISSIONS, API, MEMORY, VOICE, AVATARS }
+/** Full-screen destinations layered over the tabs (L2: API + Memory, L3: Voice, L5: Avatars, F4: Hands-Free). */
+private enum class SubScreen { NONE, PERMISSIONS, API, MEMORY, VOICE, AVATARS, HANDSFREE }
 
 /** What is on screen right now — the AnimatedContent target in JarvisApp. */
 private data class ScreenTarget(val tab: Tab, val sub: SubScreen)
@@ -70,7 +75,7 @@ fun JarvisApp(
     JarvisTheme(theme = settings.theme, customBgHex = settings.customBgHex) {
         var tab by remember { mutableStateOf(Tab.HOME) }
         var subScreen by remember { mutableStateOf(SubScreen.NONE) }
-        // The center FAB reflects the live voice session (F2): it must
+        // The center mic reflects the live voice session (F2): it must
         // not sit there red + MicOff during normal operation.
         val voiceState by VoiceSessionManager.uiState.collectAsState()
 
@@ -84,7 +89,7 @@ fun JarvisApp(
 
         Scaffold(
             bottomBar = {
-                JarvisBottomBar(
+                JarvisFloatingNav(
                     tab = tab,
                     onVoiceScreen = subScreen == SubScreen.VOICE,
                     voiceState = voiceState,
@@ -166,6 +171,11 @@ fun JarvisApp(
                             onBack = { subScreen = SubScreen.NONE },
                             onOpenPermissions = { subScreen = SubScreen.PERMISSIONS }
                         )
+                        SubScreen.HANDSFREE -> HandsFreeScreen(
+                            settings = settings,
+                            onBack = { subScreen = SubScreen.NONE },
+                            onOpenPermissions = { subScreen = SubScreen.PERMISSIONS }
+                        )
                         SubScreen.NONE -> when (target.tab) {
                             Tab.HOME -> HomeScreen(
                                 settings = settings,
@@ -173,11 +183,14 @@ fun JarvisApp(
                                 onOpenPermissions = { subScreen = SubScreen.PERMISSIONS },
                                 onOpenMemory = { subScreen = SubScreen.MEMORY },
                                 onOpenSettings = { tab = Tab.SETTINGS },
-                                onOpenVoice = { subScreen = SubScreen.VOICE }
+                                onOpenVoice = { subScreen = SubScreen.VOICE },
+                                onSettingsChange = onSettingsChange,
+                                onOpenChat = { tab = Tab.CHAT }
                             )
                             Tab.CHAT -> ChatScreen(
                                 settings = settings,
-                                onOpenSettings = { tab = Tab.SETTINGS }
+                                onOpenSettings = { tab = Tab.SETTINGS },
+                                onOpenVoice = { subScreen = SubScreen.VOICE }
                             )
                             Tab.SETTINGS -> SettingsScreen(
                                 settings = settings,
@@ -185,7 +198,8 @@ fun JarvisApp(
                                 onOpenPermissions = { subScreen = SubScreen.PERMISSIONS },
                                 onOpenApi = { subScreen = SubScreen.API },
                                 onOpenMemory = { subScreen = SubScreen.MEMORY },
-                                onOpenAvatars = { subScreen = SubScreen.AVATARS }
+                                onOpenAvatars = { subScreen = SubScreen.AVATARS },
+                                onOpenHandsFree = { subScreen = SubScreen.HANDSFREE }
                             )
                             Tab.UPDATES -> UpdatesScreen()
                         }
@@ -197,79 +211,116 @@ fun JarvisApp(
 }
 
 /**
- * Bottom bar with a raised center mic button, like the reference (Page 1).
- * D1 Warm Minimal: FLAT bar surface (white in the light themes) with a
- * hairline top border and a soft purple-tinted shadow; the selected tab
- * sits in a lavender pill behind its icon; the mic FAB is flat purple.
+ * F4 floating pill navigation: a rounded glass bar floating over the
+ * content (surface, 32dp radius, hairline outlineVariant border, soft
+ * 6dp shadow) with a raised center mic. Selected tab = icon inside a
+ * 40dp ring (1.5dp primary border) + bold primary 10sp label; the
+ * Updates tab carries a small red dot badge. Mic states (F2 language,
+ * kept): idle = flat surface + outline ring + Mic; a live session =
+ * primary→secondary gradient + white Mic (GraphicEq while speaking);
+ * ERROR only = error container + MicOff.
  */
 @Composable
-private fun JarvisBottomBar(
+private fun JarvisFloatingNav(
     tab: Tab,
     onVoiceScreen: Boolean,
     voiceState: VoiceUiState,
     onTab: (Tab) -> Unit,
     onMic: () -> Unit
 ) {
-    // FAB state language (F2): primary + Mic while a session runs
-    // (GraphicEq while Jarvis is speaking); the error treatment —
-    // error container + MicOff — appears ONLY on a real ERROR state.
-    // Red during normal listening made the app look broken/muted.
     val sessionActive = onVoiceScreen || voiceState.status != VoiceStatus.IDLE
     val isError = voiceState.status == VoiceStatus.ERROR
     val isSpeaking = voiceState.status == VoiceStatus.SPEAKING
     Box(modifier = Modifier.fillMaxWidth()) {
-        Column(
+        Surface(
+            shape = RoundedCornerShape(32.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            tonalElevation = 0.dp,
+            shadowElevation = 6.dp,
             modifier = Modifier
-                .fillMaxWidth()
                 .align(Alignment.BottomCenter)
-                .shadow(
-                    elevation = JarvisDimens.navElevation,
-                    shape = RectangleShape,
-                    spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
-                    ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
-                )
-                .background(MaterialTheme.colorScheme.surface)
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp)
+                .navigationBarsPadding()
+                .padding(bottom = 10.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .background(MaterialTheme.colorScheme.outlineVariant)
-            )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 6.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                NavItem(Icons.Filled.Home, "Home", tab == Tab.HOME) { onTab(Tab.HOME) }
-                NavItem(Icons.Filled.Chat, "Chat", tab == Tab.CHAT) { onTab(Tab.CHAT) }
-                Spacer(modifier = Modifier.width(72.dp))
-                NavItem(Icons.Filled.Settings, "Settings", tab == Tab.SETTINGS) { onTab(Tab.SETTINGS) }
-                NavItem(Icons.Filled.Update, "Updates", tab == Tab.UPDATES) { onTab(Tab.UPDATES) }
+                FloatingNavItem(
+                    icon = Icons.Filled.Home,
+                    label = "Home",
+                    selected = tab == Tab.HOME,
+                    modifier = Modifier.weight(1f)
+                ) { onTab(Tab.HOME) }
+                FloatingNavItem(
+                    icon = Icons.Filled.Chat,
+                    label = "Chat",
+                    selected = tab == Tab.CHAT,
+                    modifier = Modifier.weight(1f)
+                ) { onTab(Tab.CHAT) }
+                // Center slot — the raised mic overlaps this space.
+                Spacer(modifier = Modifier.weight(1f))
+                FloatingNavItem(
+                    icon = Icons.Filled.Settings,
+                    label = "Settings",
+                    selected = tab == Tab.SETTINGS,
+                    modifier = Modifier.weight(1f)
+                ) { onTab(Tab.SETTINGS) }
+                FloatingNavItem(
+                    icon = Icons.Filled.Notifications,
+                    label = "Updates",
+                    selected = tab == Tab.UPDATES,
+                    badge = true,
+                    modifier = Modifier.weight(1f)
+                ) { onTab(Tab.UPDATES) }
             }
         }
         // Subtle scale-up while a voice session is live (D2 motion).
-        val fabScale by animateFloatAsState(
+        val micScale by animateFloatAsState(
             targetValue = if (sessionActive && !isError) 1.08f else 1f,
             animationSpec = JarvisMotion.tweenMed(),
-            label = "fabScale"
+            label = "micScale"
         )
-        FloatingActionButton(
-            onClick = onMic,
-            shape = CircleShape,
-            containerColor = if (isError) MaterialTheme.colorScheme.error
-            else MaterialTheme.colorScheme.primary,
-            contentColor = if (isError) MaterialTheme.colorScheme.onError
-            else MaterialTheme.colorScheme.onPrimary,
-            elevation = FloatingActionButtonDefaults.elevation(
-                defaultElevation = JarvisDimens.fabElevation,
-                pressedElevation = JarvisDimens.fabElevation
-            ),
+        Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .size(60.dp)
-                .scale(fabScale)
+                .offset(y = (-14).dp)
+                .size(56.dp)
+                .scale(micScale)
+                .then(
+                    when {
+                        isError -> Modifier.background(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            shape = CircleShape
+                        )
+                        sessionActive -> Modifier.background(
+                            brush = Brush.linearGradient(
+                                listOf(
+                                    MaterialTheme.colorScheme.primary,
+                                    MaterialTheme.colorScheme.secondary
+                                )
+                            ),
+                            shape = CircleShape
+                        )
+                        else -> Modifier
+                            .background(
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = CircleShape
+                            )
+                            .border(
+                                width = 1.5.dp,
+                                color = MaterialTheme.colorScheme.outlineVariant,
+                                shape = CircleShape
+                            )
+                    }
+                )
+                .clickable(onClick = onMic),
+            contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = when {
@@ -281,48 +332,78 @@ private fun JarvisBottomBar(
                     isError -> "Voice session error"
                     sessionActive -> "Voice session active"
                     else -> "Start listening"
-                }
+                },
+                tint = when {
+                    isError -> MaterialTheme.colorScheme.onErrorContainer
+                    sessionActive -> Color.White
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.size(26.dp)
             )
         }
-        Spacer(modifier = Modifier.height(4.dp))
     }
 }
 
 @Composable
-private fun NavItem(
+private fun FloatingNavItem(
     icon: ImageVector,
     label: String,
     selected: Boolean,
+    modifier: Modifier = Modifier,
+    badge: Boolean = false,
     onClick: () -> Unit
 ) {
     val tint = if (selected) MaterialTheme.colorScheme.primary
     else MaterialTheme.colorScheme.onSurfaceVariant
-    Surface(
-        onClick = onClick,
-        color = androidx.compose.ui.graphics.Color.Transparent,
-        modifier = Modifier.width(72.dp)
+    Column(
+        modifier = modifier
+            .clickable(onClick = onClick)
+            .padding(vertical = 2.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(vertical = 4.dp)
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .then(
+                    if (selected) {
+                        Modifier.border(
+                            width = 1.5.dp,
+                            color = MaterialTheme.colorScheme.primary,
+                            shape = CircleShape
+                        )
+                    } else {
+                        Modifier
+                    }
+                ),
+            contentAlignment = Alignment.Center
         ) {
-            Box(
-                modifier = Modifier
-                    .size(width = 56.dp, height = 32.dp)
-                    .background(
-                        color = if (selected) MaterialTheme.colorScheme.primaryContainer
-                        else androidx.compose.ui.graphics.Color.Transparent,
-                        shape = RoundedCornerShape(50)
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(imageVector = icon, contentDescription = label, tint = tint)
-            }
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall,
-                color = tint
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = tint,
+                modifier = Modifier.size(23.dp)
             )
+            if (badge) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(x = (-4).dp, y = 4.dp)
+                        .size(7.dp)
+                        .background(
+                            color = MaterialTheme.colorScheme.error,
+                            shape = CircleShape
+                        )
+                )
+            }
         }
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = label,
+            style = TextStyle(
+                fontSize = 10.sp,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+            ),
+            color = tint
+        )
     }
 }

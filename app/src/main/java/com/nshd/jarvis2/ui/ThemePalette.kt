@@ -6,15 +6,12 @@ import android.graphics.Color as AndroidColor
  * D3 — plain-Kotlin colour palettes for surfaces that cannot host
  * Compose (the floating overlay HUD in `FloatingOverlayService`).
  *
- * The values are hand-derived from the D1 ladders in [Theme.kt], which
- * remains the source of truth for the Compose UI — every hex below is
- * that theme's `surface` / `onSurface` / `onSurfaceVariant` / `primary` /
- * `surfaceVariant` / `outlineVariant`. The DESIGN-PLAN flagged this
- * duplication as accepted for the overlay; keep the two in sync when
- * Theme.kt changes.
- *
- * All text pairs were contrast-checked when these were picked: the
- * weakest text pair (accent status text on the panel) is ≥ 7.1:1.
+ * F4: the entries follow the orb-token ladders in [Theme.kt], which
+ * remains the source of truth for the Compose UI. LIGHT / DARK / RED
+ * keep the hand-picked HUD values carried over from the previous
+ * ladders (panel / ink / accent pairs were contrast-checked when
+ * picked: the weakest text pair is ≥ 7.1:1); SUNSET is new in F4;
+ * CUSTOM derives from the stored hex by luminance, as before.
  */
 data class HudPalette(
     /** Panel fill (the theme surface at ~97% alpha over other apps). */
@@ -36,17 +33,15 @@ object ThemePalette {
     private const val PANEL_ALPHA = 0xF7 // ~97%
 
     fun hudPalette(theme: AppTheme, customBgHex: String?): HudPalette {
-        val custom = parseArgb(customBgHex)
-        if (custom != null) return deriveCustomHudPalette(custom)
+        val dark = HudPalette(
+            background = withAlpha(0x1C1830),
+            border = 0xFF322C4E.toInt(),
+            textPrimary = 0xFFEDEAF6.toInt(),
+            textSecondary = 0xFFC2B8DC.toInt(),
+            accent = 0xFFC4B5FD.toInt(),
+            progressTrack = 0xFF272141.toInt()
+        )
         return when (theme) {
-            AppTheme.PURPLE -> HudPalette(
-                background = withAlpha(0xFFFFFF),
-                border = 0xFFE6E1F4.toInt(),
-                textPrimary = 0xFF1D1B26.toInt(),
-                textSecondary = 0xFF4A3F61.toInt(),
-                accent = 0xFF6D28D9.toInt(),
-                progressTrack = 0xFFF0EBFA.toInt()
-            )
             AppTheme.LIGHT -> HudPalette(
                 background = withAlpha(0xFFFFFF),
                 border = 0xFFE3E3E8.toInt(),
@@ -55,14 +50,7 @@ object ThemePalette {
                 accent = 0xFF6D28D9.toInt(),
                 progressTrack = 0xFFECECF1.toInt()
             )
-            AppTheme.DARK -> HudPalette(
-                background = withAlpha(0x1C1830),
-                border = 0xFF322C4E.toInt(),
-                textPrimary = 0xFFEDEAF6.toInt(),
-                textSecondary = 0xFFC2B8DC.toInt(),
-                accent = 0xFFC4B5FD.toInt(),
-                progressTrack = 0xFF272141.toInt()
-            )
+            AppTheme.DARK -> dark
             AppTheme.RED -> HudPalette(
                 background = withAlpha(0x221012),
                 border = 0xFF3A2222.toInt(),
@@ -71,6 +59,18 @@ object ThemePalette {
                 accent = 0xFFFFB59D.toInt(),
                 progressTrack = 0xFF2E1818.toInt()
             )
+            AppTheme.SUNSET -> HudPalette(
+                background = withAlpha(0xFFFFFF),
+                border = 0xFFF3D3DC.toInt(),
+                textPrimary = 0xFF4A2340.toInt(),
+                textSecondary = 0xFF7A4566.toInt(),
+                accent = 0xFFE83E8C.toInt(),
+                progressTrack = 0xFFFFE7E1.toInt()
+            )
+            // CUSTOM derives from the stored hex by luminance; with no
+            // parseable hex it falls back to the DARK palette.
+            AppTheme.CUSTOM -> parseArgb(customBgHex)
+                ?.let { deriveCustomHudPalette(it) } ?: dark
         }
     }
 

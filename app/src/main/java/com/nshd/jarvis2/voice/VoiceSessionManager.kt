@@ -15,6 +15,7 @@ import com.nshd.jarvis2.brain.tools.ToolResult
 import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.service.ScreenShareState
 import com.nshd.jarvis2.ui.AppTheme
+import com.nshd.jarvis2.ui.FriendlyErrors
 import com.nshd.jarvis2.service.WakeWordControl
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
@@ -167,7 +168,30 @@ object VoiceSessionManager {
 
     // ── Lifecycle ──────────────────────────────────────────────────────
 
+    /**
+     * F4 hardening: engine start must never crash the caller (the
+     * Voice screen's LaunchedEffect, retry, or the wake-word service).
+     * Any exception from session setup is routed to [fail] — the
+     * existing error-posting helper, which tears down capture /
+     * player / recognizer partial state (teardownLive + Universal
+     * shutdown) and posts the ERROR UiState; the raw message is kept
+     * so the UI renders it through FriendlyErrors with its Details
+     * expander. Nothing propagates out of this function.
+     */
     fun start(
+        context: Context,
+        settings: JarvisSettings,
+        providerStore: ProviderStore,
+        memoryDb: MemoryDb
+    ) {
+        try {
+            startSession(context, settings, providerStore, memoryDb)
+        } catch (e: Exception) {
+            runCatching { fail(startFailureMessage(e)) }
+        }
+    }
+
+    private fun startSession(
         context: Context,
         settings: JarvisSettings,
         providerStore: ProviderStore,
@@ -222,32 +246,44 @@ object VoiceSessionManager {
      */
     fun startFromWake(context: Context) {
         if (active) return
-        val appCtx = context.applicationContext
-        start(
-            context = appCtx,
-            settings = loadSettingsForWake(appCtx),
-            providerStore = ProviderStore(appCtx),
-            memoryDb = MemoryDb(appCtx)
-        )
+        // F4 hardening: the settings/store construction below runs
+        // BEFORE start() is entered, so it needs its own guard — a
+        // failure here must surface as the ERROR state via fail(),
+        // never crash the wake-word service.
+        try {
+            val appCtx = context.applicationContext
+            start(
+                context = appCtx,
+                settings = loadSettingsForWake(appCtx),
+                providerStore = ProviderStore(appCtx),
+                memoryDb = MemoryDb(appCtx)
+            )
+        } catch (e: Exception) {
+            runCatching { fail(startFailureMessage(e)) }
+        }
     }
+
+    /** Raw message for [fail]; the UI maps it through FriendlyErrors. */
+    private fun startFailureMessage(e: Exception): String =
+        e.message?.takeIf { it.isNotBlank() } ?: FriendlyErrors.map(null).headline
 
     /**
      * Reads JarvisSettings from the same SharedPreferences file
      * MainActivity owns ("jarvis_settings", same keys/defaults, same
-     * retired-SUNSET → PURPLE migration) so a wake-started session
-     * behaves exactly like one started from the Voice screen.
+     * F4 theme migration) so a wake-started session behaves exactly
+     * like one started from the Voice screen.
      */
     private fun loadSettingsForWake(appContext: Context): JarvisSettings {
         val prefs = appContext.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
-        val rawTheme = prefs.getString("theme", AppTheme.PURPLE.name) ?: AppTheme.PURPLE.name
-        val theme = if (rawTheme == "SUNSET") {
-            AppTheme.PURPLE
-        } else {
-            try {
-                AppTheme.valueOf(rawTheme)
-            } catch (e: IllegalArgumentException) {
-                AppTheme.PURPLE
-            }
+        // F4 migration (mirrors MainActivity): a missing value defaults
+        // to DARK, and any stored name that is not a current theme —
+        // including the retired pre-F4 default — fails valueOf and
+        // reads as DARK. SUNSET is a real theme again and parses.
+        val rawTheme = prefs.getString("theme", AppTheme.DARK.name) ?: AppTheme.DARK.name
+        val theme = try {
+            AppTheme.valueOf(rawTheme)
+        } catch (e: IllegalArgumentException) {
+            AppTheme.DARK
         }
         return JarvisSettings(
             assistantName = prefs.getString("assistant_name", "Jarvis") ?: "Jarvis",

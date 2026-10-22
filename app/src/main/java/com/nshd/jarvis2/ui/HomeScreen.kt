@@ -1,5 +1,12 @@
 package com.nshd.jarvis2.ui
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,33 +20,41 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.filled.Memory
-import androidx.compose.material.icons.filled.Smartphone
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material.icons.filled.PersonalVideo
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.nshd.jarvis2.JarvisSettings
-import com.nshd.jarvis2.ui.orb.JarvisOrb
-import com.nshd.jarvis2.ui.orb.OrbState
 import com.nshd.jarvis2.voice.VoiceSessionManager
 import com.nshd.jarvis2.voice.VoiceStatus
+import java.util.Calendar
 
 @Composable
 fun HomeScreen(
@@ -48,8 +63,14 @@ fun HomeScreen(
     onOpenPermissions: () -> Unit,
     onOpenMemory: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenVoice: () -> Unit
+    onOpenVoice: () -> Unit,
+    onSettingsChange: (JarvisSettings) -> Unit = {},
+    onOpenChat: () -> Unit = {}
 ) {
+    // The Home orb + status pill mirror the live voice session state.
+    val voiceState by VoiceSessionManager.uiState.collectAsState()
+    var showLanguageDialog by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -57,56 +78,91 @@ fun HomeScreen(
             .padding(horizontal = JarvisDimens.screenPadding),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
+
+        // ── Header: chat shortcut · gradient wordmark + greeting · settings ──
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onOpenChat) {
+                Icon(
+                    imageVector = Icons.Filled.Chat,
+                    contentDescription = "Open chat",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = settings.assistantName,
+                    style = TextStyle(
+                        brush = Brush.linearGradient(
+                            listOf(
+                                MaterialTheme.colorScheme.primary,
+                                MaterialTheme.colorScheme.secondary,
+                                MaterialTheme.colorScheme.tertiary
+                            )
+                        ),
+                        fontFamily = MaterialTheme.typography.titleLarge.fontFamily,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 2.sp
+                    )
+                )
+                val hour = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
+                val dayPart = when {
+                    hour < 12 -> "morning"
+                    hour < 17 -> "afternoon"
+                    else -> "evening"
+                }
+                Text(
+                    text = "Good $dayPart, ${settings.callsign}",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(onClick = onOpenSettings) {
+                Icon(
+                    imageVector = Icons.Filled.Settings,
+                    contentDescription = "Open settings",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
         A11yWarningBanner(onFix = onOpenSettings)
         Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
-        Text(
-            text = settings.assistantName,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary
-        )
-        Spacer(modifier = Modifier.height(JarvisDimens.spaceSm))
-        // Greeting hierarchy (D2): display line + the operator's name
-        // emphasised in primary on its own line.
-        Text(
-            text = "Welcome back,",
-            style = MaterialTheme.typography.displayMedium,
-            modifier = Modifier.fillMaxWidth()
-        )
-        Text(
-            text = settings.callsign,
-            style = MaterialTheme.typography.displayMedium,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(modifier = Modifier.height(JarvisDimens.spaceXl))
 
-        // The Home orb mirrors the live voice session state (D3 tints):
-        // thinking swirl while the brain works, error colour on failure.
-        val voiceState by VoiceSessionManager.uiState.collectAsState()
-        // F3: the OpenGL JarvisOrb (exact port of the user's orb.html) —
-        // state mapped from the live voice session; Canvas ParticleOrb
-        // remains only as its internal GL-failure fallback.
+        // F4: the Canvas orb (orb.html system) at hero size — state
+        // mapped from the live voice session via toOrbState()
+        // (CONNECTING renders as THINKING, UNIVERSAL_ACTIVE as
+        // LISTENING); the legacy `listening` flag still forces LISTENING.
         JarvisOrb(
-            state = when {
-                voiceState.status == VoiceStatus.ERROR -> OrbState.ERROR
-                voiceState.status == VoiceStatus.SPEAKING -> OrbState.SPEAKING
-                voiceState.status == VoiceStatus.THINKING ||
-                    voiceState.status == VoiceStatus.CONNECTING -> OrbState.THINKING
-                listening || voiceState.status == VoiceStatus.LISTENING ||
-                    voiceState.status == VoiceStatus.UNIVERSAL_ACTIVE -> OrbState.LISTENING
-                else -> OrbState.IDLE
-            },
+            state = if (listening) OrbState.LISTENING else voiceState.status.toOrbState(),
             theme = settings.theme,
             customHex = settings.customBgHex,
             modifier = Modifier
-                .size(230.dp)
+                .size(330.dp)
                 .clickable(onClick = onOpenVoice)
         )
 
         Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
-        StatusPill(listening = listening)
+        StatusPill(
+            status = voiceState.status,
+            assistantName = settings.assistantName,
+            onClick = onOpenVoice
+        )
+        if (voiceState.status == VoiceStatus.IDLE) {
+            Spacer(modifier = Modifier.height(JarvisDimens.spaceSm))
+            Text(
+                text = "Tap mic or orb to power on",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Spacer(modifier = Modifier.height(JarvisDimens.space2xl))
 
         WeatherCard()
@@ -117,47 +173,128 @@ fun HomeScreen(
             horizontalArrangement = Arrangement.spacedBy(JarvisDimens.spaceMd)
         ) {
             QuickTile(
-                icon = Icons.Filled.Smartphone,
-                label = "Screen",
+                icon = Icons.Filled.PersonalVideo,
+                title = "Screen",
+                subtitle = "Share screen",
                 modifier = Modifier.weight(1f)
-            ) { onOpenPermissions() }
+            ) { onOpenVoice() }
             QuickTile(
-                icon = Icons.Filled.Memory,
-                label = "Memories",
+                icon = Icons.Filled.Layers,
+                title = "Memories",
+                subtitle = "Recall Core",
                 modifier = Modifier.weight(1f)
             ) { onOpenMemory() }
             QuickTile(
                 icon = Icons.Filled.Language,
-                label = "Language",
+                title = "Language",
+                subtitle = settings.language,
                 modifier = Modifier.weight(1f)
-            ) { onOpenSettings() }
+            ) { showLanguageDialog = true }
         }
-        // Bottom clearance so content never ends behind the bottom bar (F2).
+        // Bottom clearance so content never ends behind the floating nav (F2/F4).
         Spacer(modifier = Modifier.height(120.dp))
+    }
+
+    if (showLanguageDialog) {
+        // The dialog reports picks immediately and stays open until
+        // Done / outside tap (its onDismiss) — the tile subtitle and
+        // the radio selection update live from the new settings.
+        LanguagePickerDialog(
+            current = settings.language,
+            onDismiss = { showLanguageDialog = false },
+            onPick = { picked ->
+                onSettingsChange(settings.copy(language = picked))
+            }
+        )
     }
 }
 
+/**
+ * F4 status pill: glass surface + hairline border, a state-coloured
+ * dot (pulsing while a session is live) and a letterspaced 11sp bold
+ * label. Tap = open Voice (start when off, retry on error).
+ */
 @Composable
-private fun StatusPill(listening: Boolean) {
+private fun StatusPill(
+    status: VoiceStatus,
+    assistantName: String,
+    onClick: () -> Unit
+) {
+    val scheme = MaterialTheme.colorScheme
+    val dotColor: Color
+    val label: String
+    val pulsing: Boolean
+    when (status) {
+        VoiceStatus.IDLE -> {
+            dotColor = scheme.onSurfaceVariant
+            label = "${assistantName.uppercase()} OFF • TAP TO START"
+            pulsing = false
+        }
+        VoiceStatus.CONNECTING -> {
+            dotColor = scheme.primary
+            label = "CONNECTING…"
+            pulsing = true
+        }
+        VoiceStatus.LISTENING, VoiceStatus.UNIVERSAL_ACTIVE -> {
+            dotColor = scheme.primary
+            label = "LISTENING"
+            pulsing = true
+        }
+        VoiceStatus.THINKING -> {
+            dotColor = scheme.tertiary
+            label = "THINKING…"
+            pulsing = false
+        }
+        VoiceStatus.SPEAKING -> {
+            dotColor = scheme.secondary
+            label = "SPEAKING"
+            pulsing = true
+        }
+        VoiceStatus.ERROR -> {
+            dotColor = scheme.error
+            label = "SOMETHING'S WRONG — TAP TO RETRY"
+            pulsing = false
+        }
+    }
+    val pulse = rememberInfiniteTransition(label = "statusDotPulse")
+    val dotAlpha by pulse.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.3f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 700),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "statusDotAlpha"
+    )
     Surface(
+        onClick = onClick,
         shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.surfaceVariant
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = if (listening) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(8.dp)
-            ) {}
-            Spacer(modifier = Modifier.size(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(
+                        color = dotColor.copy(alpha = if (pulsing) dotAlpha else 1f),
+                        shape = CircleShape
+                    )
+            )
+            Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = if (listening) "Listening…" else "Jarvis is off — tap the mic to start",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold
+                text = label,
+                style = TextStyle(
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.5.sp
+                ),
+                color = MaterialTheme.colorScheme.onSurface
             )
         }
     }
@@ -166,10 +303,12 @@ private fun StatusPill(listening: Boolean) {
 /** Reference weather data (Page 1) — live weather arrives in a later level. */
 @Composable
 private fun WeatherCard() {
-    Card(
-        shape = RoundedCornerShape(JarvisDimens.radiusCard),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.heroElevation),
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
@@ -178,36 +317,18 @@ private fun WeatherCard() {
                 .padding(JarvisDimens.spaceXl),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(
-                shape = RoundedCornerShape(JarvisDimens.radiusField),
-                color = MaterialTheme.colorScheme.primaryContainer,
-                modifier = Modifier.size(56.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.Filled.Cloud,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.size(JarvisDimens.spaceLg))
+            Text(
+                text = "26°",
+                style = MaterialTheme.typography.displaySmall,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.width(JarvisDimens.spaceLg))
             Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text(
-                        text = "26°",
-                        style = MaterialTheme.typography.displaySmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.width(JarvisDimens.spaceSm))
-                    Text(
-                        text = "Overcast",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(bottom = 3.dp)
-                    )
-                }
+                Text(
+                    text = "Overcast",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = Icons.Filled.LocationOn,
@@ -221,19 +342,18 @@ private fun WeatherCard() {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-            }
-            Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    text = "H 30°  L 25°",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "Humidity 95%",
+                    text = "H 30°  L 25° • Humidity 95%",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            Icon(
+                imageVector = Icons.Filled.Cloud,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.secondary,
+                modifier = Modifier.size(34.dp)
+            )
         }
     }
 }
@@ -241,39 +361,48 @@ private fun WeatherCard() {
 @Composable
 private fun QuickTile(
     icon: ImageVector,
-    label: String,
+    title: String,
+    subtitle: String,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    Card(
-        shape = RoundedCornerShape(JarvisDimens.radiusCard),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = JarvisDimens.cardElevation),
-        modifier = modifier.clickable(onClick = onClick)
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        modifier = modifier
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = JarvisDimens.spaceLg),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = MaterialTheme.colorScheme.primaryContainer,
-                modifier = Modifier.size(48.dp)
+        Column(modifier = Modifier.padding(14.dp)) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .background(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(12.dp)
+                    ),
+                contentAlignment = Alignment.Center
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = label,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
+                Icon(
+                    imageVector = icon,
+                    contentDescription = title,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(22.dp)
+                )
             }
-            Spacer(modifier = Modifier.height(JarvisDimens.spaceSm))
-            Text(text = label, style = MaterialTheme.typography.labelLarge)
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
-
