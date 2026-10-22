@@ -13,6 +13,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -50,6 +51,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -114,18 +116,28 @@ fun JarvisApp(
             }
         }
 
+        // F5.1: while the keyboard is up, the floating nav is hidden
+        // (plain conditional — no animation state to glitch while
+        // typing) so it can never overlap a composer; the Scaffold
+        // then also grants zero bottom clearance, leaving each
+        // screen's own imePadding as the only bottom inset. The nav
+        // returns the moment the keyboard closes.
+        val density = LocalDensity.current
+        val imeVisible = WindowInsets.ime.getBottom(density) > 0
         Scaffold(
             bottomBar = {
-                JarvisFloatingNav(
-                    tab = tab,
-                    onVoiceScreen = subScreen == SubScreen.VOICE,
-                    voiceState = voiceState,
-                    onTab = {
-                        tab = it
-                        subScreen = SubScreen.NONE
-                    },
-                    onMic = { subScreen = SubScreen.VOICE }
-                )
+                if (!imeVisible) {
+                    JarvisFloatingNav(
+                        tab = tab,
+                        onVoiceScreen = subScreen == SubScreen.VOICE,
+                        voiceState = voiceState,
+                        onTab = {
+                            tab = it
+                            subScreen = SubScreen.NONE
+                        },
+                        onMic = { subScreen = SubScreen.VOICE }
+                    )
+                }
             }
         ) { padding ->
             Box(

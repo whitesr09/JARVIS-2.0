@@ -144,6 +144,20 @@ object VoiceSessionManager {
     @Volatile
     private var lastLiveFailureReason: String? = null
 
+    /**
+     * F5.1: the current Live session's resumption handle — IN-MEMORY
+     * ONLY, never persisted. Handles live only minutes; a stored one
+     * sent on a fresh connect makes Google reject the setup before
+     * the model is reached ("session expired / not found / invalid
+     * session handle" — the user's repeated Live failures).
+     */
+    @Volatile
+    private var liveSessionHandle: String? = null
+
+    /** F5.1: the one clean-session retry for this session start is spent. */
+    @Volatile
+    private var liveCleanRetried = false
+
     // F3 Live tool-call dedupe: Gemini toolCall ids already processed in
     // this session, mapped to the exact response that was sent. A
     // duplicate id is answered with the cached response, never
@@ -229,6 +243,16 @@ object VoiceSessionManager {
         reconnectAttempts = 0
         liveSwitchedToUniversal = false
         lastLiveFailureReason = null
+        liveSessionHandle = null
+        liveCleanRetried = false
+        // F5.1: drop any legacy persisted resumption handle (builds
+        // ≤1.4.0 stored one in SharedPreferences). It is never read
+        // again — handles are in-memory only now — and removing it
+        // keeps the stale value out of the app entirely.
+        runCatching {
+            appContext?.getSharedPreferences(LIVE_PREFS, Context.MODE_PRIVATE)
+                ?.edit()?.remove(KEY_RESUMPTION_HANDLE)?.apply()
+        }
         synchronized(liveProcessedToolCalls) { liveProcessedToolCalls.clear() }
         liveLedger = ExecutionLedger()
         mediaListenBlocked = false
@@ -356,7 +380,9 @@ object VoiceSessionManager {
             avatarId = prefs.getString("avatar_id", "droid") ?: "droid",
             biometricsEnrolled = prefs.getBoolean("biometrics_enrolled", false),
             biometricsSampleCount = prefs.getInt("biometrics_sample_count", 0),
-            biometricsEnrolledDate = prefs.getString("biometrics_enrolled_date", "") ?: ""
+            biometricsEnrolledDate = prefs.getString("biometrics_enrolled_date", "") ?: "",
+            ttsRate = prefs.getFloat(KEY_TTS_RATE, UniversalVoice.DEFAULT_TTS_RATE),
+            ttsPitch = prefs.getFloat(KEY_TTS_PITCH, UniversalVoice.DEFAULT_TTS_PITCH)
         )
     }
 
@@ -467,7 +493,12 @@ object VoiceSessionManager {
 
     // ── LIVE path ──────────────────────────────────────────────────────
 
-    private fun startLive() {
+    /**
+     * Starts the Native Live engine. [resumeHandle] is non-null ONLY
+     * for the in-session goAway reconnect (F5.1) — every fresh start
+     * passes null so the setup asks for a brand-new session.
+     */
+    private fun startLive(resumeHandle: String? = null) {
         val store = providerStore ?: return
         val s = settings ?: return
         val db = memoryDb ?: return
@@ -500,15 +531,15 @@ object VoiceSessionManager {
             val facts = withContext(Dispatchers.IO) { db.allFacts(null, null) }
             if (!active) return@launch
             val prompt = PersonaPrompts.build(s, facts, codeMode = false)
-            val handle = appContext
-                ?.getSharedPreferences(LIVE_PREFS, Context.MODE_PRIVATE)
-                ?.getString(KEY_RESUMPTION_HANDLE, null)
+            // F5.1: NO persisted handle is read here anymore — the
+            // only handle a connect may carry is the in-memory one
+            // from THIS session's goAway reconnect (resumeHandle).
             val liveClient = GeminiLiveClient(
                 apiKey = gemini.apiKey,
                 model = s.liveModel,
                 voiceName = voice,
                 systemPrompt = prompt,
-                resumptionHandle = handle,
+                resumptionHandle = resumeHandle,
                 toolDeclarations = ToolRegistry.liveFunctionDeclarations(),
                 languageCode = UniversalVoice.liveLanguageCode(s.language),
                 providerBaseUrl = gemini.baseUrl,
@@ -549,6 +580,15 @@ object VoiceSessionManager {
         }
     }
 
+    /** F5.1: server wording for a rejected Live session/resumption handle. */
+    private fun isSessionRejection(message: String): Boolean {
+        val lower = message.lowercase()
+        if (!lower.contains("session")) return false
+        return lower.contains("handle") ||
+            lower.contains("not found") ||
+            lower.contains("expired")
+    }
+
     /**
      * Native Live died (setup rejected, socket failure, dead close).
      * First time: tear the Live pieces down and continue the SAME
@@ -572,6 +612,21 @@ object VoiceSessionManager {
         AppLog.e("Live", "native live failed: $message")
         lastLiveFailureReason = message
         if (!active || reconnecting) return
+        // F5.1: a session/handle rejection means the server refused
+        // the resumption handle — not the model, not the key. Retry
+        // ONCE with a guaranteed-clean session (fresh client, no
+        // handle) before any Universal fallback.
+        if (!liveCleanRetried && isSessionRejection(message)) {
+            liveCleanRetried = true
+            liveSessionHandle = null
+            AppLog.w("Live", "session rejected — retrying with a clean session")
+            teardownLive()
+            pulseJob?.cancel()
+            _amplitude.value = 0f
+            setStatus(VoiceStatus.CONNECTING)
+            startLive()
+            return
+        }
         if (!liveSwitchedToUniversal && settings != null) {
             liveSwitchedToUniversal = true
             teardownLive()
@@ -663,15 +718,18 @@ object VoiceSessionManager {
         }
 
         override fun onSessionHandle(handle: String) {
-            appContext?.getSharedPreferences(LIVE_PREFS, Context.MODE_PRIVATE)
-                ?.edit()?.putString(KEY_RESUMPTION_HANDLE, handle)?.apply()
+            // F5.1: in-memory only — used solely by the goAway
+            // reconnect within THIS session's lifetime. Persisting it
+            // was the bug: by the next app launch it is always stale.
+            liveSessionHandle = handle
         }
 
         override fun onSessionEnding() {
             if (!active || reconnecting) return
-            // goAway: the server is about to close — reconnect WITH the
-            // stored handle so the conversation survives the ~10-minute
-            // session limit instead of losing context.
+            // goAway: the server is about to close — reconnect WITH
+            // the in-memory handle from this same session so the
+            // conversation survives the ~10-minute session limit
+            // instead of losing context (F5.1: never a stored one).
             if (reconnectAttempts >= MAX_RECONNECTS) return
             reconnecting = true
             reconnectAttempts++
@@ -682,7 +740,7 @@ object VoiceSessionManager {
             setStatus(VoiceStatus.CONNECTING)
             scope.launch {
                 delay(600)
-                if (active) startLive()
+                if (active) startLive(liveSessionHandle)
             }
         }
 
@@ -818,9 +876,20 @@ object VoiceSessionManager {
             engineLabel = "UNIVERSAL • $modelShort",
             micMuted = _uiState.value.micMuted
         )
+        val ctx = appContext ?: return
         val uv = UniversalVoice(
-            appContext ?: return, s.language, UniversalListener(),
-            personaName = s.persona
+            ctx, s.language, UniversalListener(),
+            // F5.1: TTS tuning providers read the persisted slider
+            // values LIVE on every reply, so speed/pitch changes in
+            // Settings apply without restarting the session.
+            ttsRate = {
+                ctx.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+                    .getFloat(KEY_TTS_RATE, UniversalVoice.DEFAULT_TTS_RATE)
+            },
+            ttsPitch = {
+                ctx.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+                    .getFloat(KEY_TTS_PITCH, UniversalVoice.DEFAULT_TTS_PITCH)
+            }
         )
         universal = uv
         if (!uv.isRecognitionAvailable()) {
@@ -958,6 +1027,9 @@ object VoiceSessionManager {
         val silent = isSilent
         val sentenceBuffer = StringBuilder()
         var sawDelta = false
+        // F5.1: the FIRST spoken chunk of a reply flushes at a clause
+        // boundary (see extractSentences) so speech starts sooner.
+        var firstChunkFlushed = false
         scope.launch {
             // Universal voice uses exactly the same pipeline as text
             // chat: local memory commands, deterministic quick commands
@@ -1000,8 +1072,12 @@ object VoiceSessionManager {
                             // Deltas arrive on the streaming thread; the
                             // buffer is only touched under its lock.
                             val ready = synchronized(sentenceBuffer) {
-                                extractSentences(sentenceBuffer, delta)
+                                extractSentences(
+                                    sentenceBuffer, delta,
+                                    allowClauseCut = !firstChunkFlushed
+                                )
                             }
+                            if (ready.isNotEmpty()) firstChunkFlushed = true
                             ready.forEach { sentence -> speakUniversalSentence(sentence) }
                         }
                     }
@@ -1112,8 +1188,20 @@ object VoiceSessionManager {
      * A sentence counts as complete at [.!?…] followed by whitespace;
      * an over-long fragment is cut at a word boundary so one giant
      * utterance never stalls the speech.
+     *
+     * F5.1: while [allowClauseCut] is set (the reply's first chunk
+     * only) and no sentence end is buffered yet, the first clause
+     * boundary — `,` `;` `:` followed by a space, or `—` — at a chunk
+     * length of ≥ [FIRST_CLAUSE_MIN_CHARS] also cuts, so the user
+     * hears speech start noticeably sooner. The trailing space check
+     * keeps decimals ("1,000") and times ("12:30") unbroken; later
+     * chunks always wait for full sentences.
      */
-    private fun extractSentences(buffer: StringBuilder, delta: String): List<String> {
+    private fun extractSentences(
+        buffer: StringBuilder,
+        delta: String,
+        allowClauseCut: Boolean = false
+    ): List<String> {
         buffer.append(delta)
         val sentences = mutableListOf<String>()
         while (true) {
@@ -1130,6 +1218,24 @@ object VoiceSessionManager {
                     }
                 }
                 i++
+            }
+            if (cut < 0 && allowClauseCut && sentences.isEmpty()) {
+                var j = FIRST_CLAUSE_MIN_CHARS - 1
+                while (j < text.length) {
+                    val c = text[j]
+                    val isClause = when (c) {
+                        ',', ';', ':' ->
+                            j + 1 < text.length &&
+                                (text[j + 1] == ' ' || text[j + 1] == '\n')
+                        '—' -> true
+                        else -> false
+                    }
+                    if (isClause) {
+                        cut = j + 1
+                        break
+                    }
+                    j++
+                }
             }
             if (cut < 0 && text.length > 240) {
                 val space = text.lastIndexOf(' ', 240)
@@ -1210,7 +1316,13 @@ object VoiceSessionManager {
     }
 
     private const val LIVE_PREFS = "jarvis_live_session"
+    /** F5.1: retained ONLY so the legacy persisted handle can be removed. */
     private const val KEY_RESUMPTION_HANDLE = "resumption_handle"
+    private const val SETTINGS_PREFS = "jarvis_settings"
+    private const val KEY_TTS_RATE = "tts_rate"
+    private const val KEY_TTS_PITCH = "tts_pitch"
+    /** F5.1: minimum first-chunk length before a clause cut is allowed. */
+    private const val FIRST_CLAUSE_MIN_CHARS = 24
     private const val MAX_RECONNECTS = 3
     private const val TAG = "voice"
     private const val MIC_ACQUIRE_TIMEOUT_MS = 900L

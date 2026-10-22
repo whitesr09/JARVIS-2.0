@@ -48,12 +48,15 @@ data class ToolEvent(
                 "Couldn't open ${app ?: "that app"}"
             }
         }
-        val line = firstLine().trim().trimEnd('.')
+        val line = firstLine().trim()
         if (line.isBlank()) return if (success) "Done" else "Something failed"
-        // Success/failure lines from ToolExecutor are already short
-        // human sentences ("Opened Camera", "WhatsApp message sent…");
-        // cap them so a verbose result can't flood the chip.
-        return if (line.length <= 64) line else line.take(61).trimEnd() + "…"
+        // F5.1: the FULL first-line result sentence is displayed. The
+        // old 64-char cap cut failure reasons off mid-word in Chat
+        // ("…no plausible first video result w…") — hiding exactly the
+        // information the user needed. Tool result first lines are
+        // single human sentences by contract; any multi-line detail
+        // (screen dumps, diagnostics) lives on later lines / AppLog.
+        return line
     }
 
     companion object {

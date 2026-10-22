@@ -41,8 +41,15 @@ class UniversalVoice(
     context: Context,
     private val languageName: String,
     private val listener: Listener,
-    /** F5: persona display name — drives the TTS pitch tuning. */
-    private val personaName: String = ""
+    /**
+     * F5.1: live TTS tuning providers (Settings → Voice sliders).
+     * Read at TTS init AND re-read before the first utterance of
+     * every reply, so speed/pitch changes apply to the next reply
+     * without restarting the session. (The F5 persona-based pitch
+     * override is gone — the sliders fully control pitch now.)
+     */
+    private val ttsRate: () -> Float = { DEFAULT_TTS_RATE },
+    private val ttsPitch: () -> Float = { DEFAULT_TTS_PITCH }
 ) {
     interface Listener {
         /** Partial transcription while the user is still speaking. */
@@ -264,9 +271,10 @@ class UniversalVoice(
      * F5 voice selection, run once on TTS init (main thread): among the
      * engine's voices for the session locale, prefer NETWORK voices
      * (markedly higher quality) at the highest quality level; otherwise
-     * the best offline voice. Persona pitch is applied here too —
-     * Girlfriend Mode speaks slightly higher (1.08), Jarvis Pro stays
-     * neutral (1.0); rate is 1.0 for both.
+     * the best offline voice. The user's TTS speed/pitch settings
+     * (F5.1 sliders) are applied here too, and re-applied before the
+     * first utterance of every reply (see speakSentenceOnMain) so
+     * slider changes land without a session restart.
      */
     private fun configureTts() {
         val engine = tts ?: return
@@ -275,13 +283,10 @@ class UniversalVoice(
         if (selected != null) {
             runCatching { engine.setVoice(selected) }
         }
-        val pitch = if (personaName.contains("Girlfriend", ignoreCase = true)) {
-            GIRLFRIEND_PITCH
-        } else {
-            NEUTRAL_PITCH
-        }
+        val rate = currentTtsRate()
+        val pitch = currentTtsPitch()
         runCatching { engine.setPitch(pitch) }
-        runCatching { engine.setSpeechRate(SPEECH_RATE) }
+        runCatching { engine.setSpeechRate(rate) }
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
             override fun onDone(utteranceId: String?) = utteranceFinished()
@@ -302,9 +307,23 @@ class UniversalVoice(
         AppLog.i(
             "TTS",
             "voice selected: $voiceName (engine=$ttsEnginePackage, " +
-                "locale=$languageTag, pitch=$pitch, rate=$SPEECH_RATE)"
+                "locale=$languageTag, pitch=$pitch, rate=$rate)"
         )
         mainHandler.post { if (!destroyed) listener.onTtsVoiceSelected(voiceName) }
+    }
+
+    /** User TTS speed (F5.1 Settings slider), coerced to a sane range. */
+    private fun currentTtsRate(): Float =
+        runCatching { ttsRate() }.getOrDefault(DEFAULT_TTS_RATE).coerceIn(0.5f, 2.0f)
+
+    /** User TTS pitch (F5.1 Settings slider), coerced to a sane range. */
+    private fun currentTtsPitch(): Float =
+        runCatching { ttsPitch() }.getOrDefault(DEFAULT_TTS_PITCH).coerceIn(0.5f, 2.0f)
+
+    /** Re-apply the live speed/pitch settings to the engine (F5.1). */
+    private fun applyTtsTuning(engine: TextToSpeech) {
+        runCatching { engine.setSpeechRate(currentTtsRate()) }
+        runCatching { engine.setPitch(currentTtsPitch()) }
     }
 
     /** Best voice for [locale]: exact-locale → same-language → any; network first, then quality. */
@@ -363,6 +382,9 @@ class UniversalVoice(
             mainHandler.post { if (!destroyed) listener.onTtsQueueDrained() }
             return
         }
+        // F5.1: nothing queued or speaking → this is the first
+        // utterance of a reply: pick up any slider changes first.
+        if (pendingUtterances.get() == 0) applyTtsTuning(engine)
         val id = "universal-${utteranceSeq.incrementAndGet()}"
         pendingUtterances.incrementAndGet()
         val result = engine.speak(text, TextToSpeech.QUEUE_ADD, null, id)
@@ -396,9 +418,12 @@ class UniversalVoice(
     companion object {
         /** F5: preferred TTS engine package (best stock voices on Android). */
         const val GOOGLE_TTS_ENGINE = "com.google.android.tts"
-        private const val GIRLFRIEND_PITCH = 1.08f
-        private const val NEUTRAL_PITCH = 1.0f
-        private const val SPEECH_RATE = 1.0f
+
+        /** F5.1 default TTS speed — brisker than the old flat 1.0×. */
+        const val DEFAULT_TTS_RATE = 1.18f
+
+        /** F5.1 default TTS pitch — noticeably girlier than neutral 1.0×. */
+        const val DEFAULT_TTS_PITCH = 1.22f
 
         /**
          * App language name → BCP-47 tag for speech recognition. India

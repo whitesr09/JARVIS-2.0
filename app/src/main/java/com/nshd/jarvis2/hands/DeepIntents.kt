@@ -13,6 +13,7 @@ import android.provider.AlarmClock
 import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.content.ContextCompat
+import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.service.JarvisAccessibilityService
 import kotlinx.coroutines.delay
 
@@ -116,35 +117,163 @@ class DeepIntents(context: Context) {
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(true, "Opened YouTube search results for \"$cleanQuery\". Enable Accessibility to auto-play the first result.")
 
-        HandsActions.waitForSettle(3_000)
         val reader = service.screenReader()
-        val snapshot = reader.snapshot()
-        val screenHeight = appContext.resources.displayMetrics.heightPixels
-        val blockedWords = listOf(
-            "search", "shorts", "home", "subscriptions", "library", "explore",
-            "notifications", "voice", "back", "menu", "settings", "sign in"
-        )
-        val candidate = snapshot
-            .filter { element ->
-                val label = element.label
-                element.clickable &&
-                    label.length > 15 &&
-                    blockedWords.none { label.contains(it, ignoreCase = true) } &&
-                    element.bounds.centerY() < screenHeight * 2 / 3
+        val metrics = appContext.resources.displayMetrics
+        val screenHeight = metrics.heightPixels
+        val screenWidth = metrics.widthPixels
+
+        // F5.1: poll up to 3 snapshots over ~3.5 s. The old single
+        // snapshot after one settle kept concluding "no plausible
+        // result" while YouTube was still rendering the results list.
+        var pick: YoutubePick? = null
+        var lastSnapshotSize = 0
+        var attempt = 0
+        while (attempt < YOUTUBE_SNAPSHOT_ATTEMPTS && pick == null) {
+            if (attempt == 0) {
+                HandsActions.waitForSettle(YOUTUBE_FIRST_SETTLE_MS)
+            } else {
+                delay(YOUTUBE_RETRY_SETTLE_MS)
             }
-            .minByOrNull { it.bounds.top }
-            ?: return ActionResult(
-                false,
-                "YouTube results opened, but no plausible first video result was found. Screen: " +
-                    reader.serialize(25)
+            val snapshot = reader.snapshot()
+            lastSnapshotSize = snapshot.size
+            pick = pickYoutubeResult(snapshot, screenWidth, screenHeight)
+            attempt++
+        }
+        val chosen = pick ?: run {
+            // The screen dump goes to AppLog, NOT the result text —
+            // the user-facing sentence stays clean and complete.
+            AppLog.w(
+                "Hands",
+                "youtube_play: no result after $attempt snapshots " +
+                    "($lastSnapshotSize nodes). Screen: ${reader.serialize(25)}"
             )
-        val click = HandsActions.clickElement(candidate.index)
+            return ActionResult(
+                false,
+                "YouTube results opened for \"$cleanQuery\", but no playable video " +
+                    "result appeared after waiting — the results may still be " +
+                    "loading, or YouTube is showing a different layout."
+            )
+        }
+        val click = HandsActions.clickElement(chosen.element.index)
+        if (!click.success) {
+            return ActionResult(
+                false,
+                "YouTube results opened, but the first result could not be tapped: ${click.message}"
+            )
+        }
         return ActionResult(
-            click.success,
-            if (click.success) "Playing the first YouTube result: ${candidate.label}"
-            else "YouTube results opened, but the first result could not be tapped: ${click.message}"
+            true,
+            when {
+                chosen.viaFallback ->
+                    "Playing the first video on YouTube for \"$cleanQuery\" " +
+                        "(picked by position — its title wasn't readable)."
+                chosen.title.isNotBlank() -> "Playing '${chosen.title}' on YouTube."
+                else -> "Playing the first video result on YouTube."
+            }
         )
     }
+
+    /** One chosen YouTube result card (F5.1). */
+    private data class YoutubePick(
+        val element: UiElement,
+        val title: String,
+        val viaFallback: Boolean
+    )
+
+    /**
+     * F5.1 first-result selection. Candidates are clickable,
+     * non-editable cards in the results region (upper two-thirds of
+     * the screen). Identifiable ads ("Sponsored" / an "Ad" badge) and
+     * the Shorts shelf (labels mentioning Shorts) are skipped; nav
+     * chrome words are matched only against SHORT labels, so real
+     * titles containing words like "home" survive. A card is
+     * plausible when its merged subtree label carries a duration
+     * (\d+:\d{2}) or a title longer than 3 chars; duration-bearing
+     * cards rank first, then any plausible card — topmost wins, and
+     * its centre is tapped (via the node's own click action). Last
+     * resort: the largest clickable card in the region (viaFallback).
+     * Every decision is logged under the "Hands" tag.
+     */
+    private fun pickYoutubeResult(
+        snapshot: List<UiElement>,
+        screenWidth: Int,
+        screenHeight: Int
+    ): YoutubePick? {
+        val regionBottom = screenHeight * 2 / 3
+        val region = snapshot.filter { element ->
+            element.clickable && !element.editable &&
+                element.bounds.centerY() < regionBottom &&
+                element.bounds.width() > 0 && element.bounds.height() > 0
+        }
+        var skippedAds = 0
+        var skippedShorts = 0
+        var skippedChrome = 0
+        val cards = region.filter { element ->
+            val label = element.label.trim()
+            when {
+                isAdLabel(label) -> {
+                    skippedAds++
+                    false
+                }
+                label.contains("shorts", ignoreCase = true) -> {
+                    skippedShorts++
+                    false
+                }
+                label.length <= CHROME_LABEL_MAX &&
+                    YOUTUBE_CHROME_WORDS.any { label.contains(it, ignoreCase = true) } -> {
+                    skippedChrome++
+                    false
+                }
+                else -> true
+            }
+        }
+        val withDuration = cards.filter { DURATION_REGEX.containsMatchIn(it.label) }
+        val plausible = cards.filter {
+            DURATION_REGEX.containsMatchIn(it.label) || it.label.trim().length > 3
+        }
+        val primary = withDuration.ifEmpty { plausible }.minByOrNull { it.bounds.top }
+        if (primary != null) {
+            AppLog.d(
+                "Hands",
+                "youtube_play pick: ${cards.size} cards considered " +
+                    "(skipped ads=$skippedAds shorts=$skippedShorts chrome=$skippedChrome), " +
+                    "tapped index=${primary.index} label='${primary.label.take(60)}'"
+            )
+            return YoutubePick(primary, youtubeTitle(primary.label), viaFallback = false)
+        }
+        val fallback = region
+            .filter { element ->
+                element.bounds.width() >= screenWidth / 2 &&
+                    element.bounds.height() >= 80 &&
+                    !element.label.contains("shorts", ignoreCase = true)
+            }
+            .maxByOrNull { it.bounds.width() * it.bounds.height() }
+        if (fallback != null) {
+            AppLog.d(
+                "Hands",
+                "youtube_play pick: FALLBACK largest card index=${fallback.index} " +
+                    "(no readable title/duration among ${cards.size} cards)"
+            )
+            return YoutubePick(fallback, "", viaFallback = true)
+        }
+        AppLog.d(
+            "Hands",
+            "youtube_play pick: none (${region.size} nodes in region, ${cards.size} cards, " +
+                "skipped ads=$skippedAds shorts=$skippedShorts chrome=$skippedChrome)"
+        )
+        return null
+    }
+
+    /** "Title • Channel • 1.2M views • 3:45" → "Title" (clickable nodes merge descendant text). */
+    private fun youtubeTitle(label: String): String {
+        val first = label.substringBefore(" • ").trim()
+        val title = if (first.length >= 4) first else label.trim()
+        return title.take(90)
+    }
+
+    private fun isAdLabel(label: String): Boolean =
+        label.contains("sponsored", ignoreCase = true) ||
+            AD_BADGE_REGEX.containsMatchIn(label)
 
     // ── Apps ───────────────────────────────────────────────────────────
 
@@ -405,6 +534,23 @@ class DeepIntents(context: Context) {
         .trim()
 
     companion object {
+        /** F5.1: video duration badge pattern, e.g. "3:45" / "12:07". */
+        private val DURATION_REGEX = Regex("""\d+:\d{2}""")
+
+        /** F5.1: a standalone "Ad" badge token in a card label. */
+        private val AD_BADGE_REGEX = Regex("""(^|[•\s])Ad([•\s]|$)""")
+
+        /** F5.1: YouTube chrome labels — matched against short labels only. */
+        private val YOUTUBE_CHROME_WORDS = listOf(
+            "search", "shorts", "home", "subscriptions", "library", "explore",
+            "notifications", "voice", "back", "menu", "settings", "sign in"
+        )
+
+        private const val CHROME_LABEL_MAX = 24
+        private const val YOUTUBE_SNAPSHOT_ATTEMPTS = 3
+        private const val YOUTUBE_FIRST_SETTLE_MS = 1_800L
+        private const val YOUTUBE_RETRY_SETTLE_MS = 850L
+
         private val PACKAGE_MAP = mapOf(
             "whatsapp" to "com.whatsapp",
             "youtube" to "com.google.android.youtube",

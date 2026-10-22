@@ -299,7 +299,9 @@ object AgentPipeline {
         result.startsWith("I couldn't") ||
             result.startsWith("Please configure") ||
             result.startsWith("Failed:") ||
-            result.contains("failed before the task could finish")
+            // F5.1: the mid-task failure wording ("I couldn't finish
+            // that — …") already matches the first check; kept explicit.
+            result.startsWith("I couldn't finish")
 
     /**
      * Cheap compound detection: explicit sequencing separators

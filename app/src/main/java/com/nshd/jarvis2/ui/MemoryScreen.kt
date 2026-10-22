@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -114,6 +115,8 @@ fun MemoryScreen(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                // F5.1: the search field stays above the keyboard.
+                .imePadding()
         ) {
             Row(
                 modifier = Modifier
@@ -391,7 +394,7 @@ private fun FactEditorDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (initial == null) "Add memory" else "Edit memory") },
         text = {
-            Column {
+            Column(modifier = Modifier.imePadding()) {
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
@@ -444,7 +447,7 @@ private fun ImportDialog(
         onDismissRequest = onDismiss,
         title = { Text("Import memories") },
         text = {
-            Column {
+            Column(modifier = Modifier.imePadding()) {
                 Text(
                     text = "Paste a memory JSON array ([{\"category\": \"…\", \"text\": \"…\"}]).",
                     style = MaterialTheme.typography.bodySmall,

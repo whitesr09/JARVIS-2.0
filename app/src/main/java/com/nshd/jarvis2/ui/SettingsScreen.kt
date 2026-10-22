@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import android.speech.tts.TextToSpeech
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -47,6 +49,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Storage
@@ -66,12 +69,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -79,6 +84,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -92,7 +98,6 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.pm.PackageInfoCompat
 import com.nshd.jarvis2.JarvisSettings
-import com.nshd.jarvis2.R
 import com.nshd.jarvis2.brain.ProviderStore
 import com.nshd.jarvis2.memory.MemoryCategories
 import com.nshd.jarvis2.memory.MemoryDb
@@ -174,6 +179,47 @@ fun SettingsScreen(
     }
     val memoryDb = remember { MemoryDb(context) }
     val identityInfo = remember { loadIdentityInfo(context) }
+
+    // ── TTS voice preview (F5.1) ───────────────────────────────────────
+    // Standalone throwaway engine for the Voice section's "Test voice"
+    // button — created lazily on first tap, shut down when this screen
+    // leaves composition. Hoisted here per the F4 fixed-call-site rule.
+    var ttsPreview by remember { mutableStateOf<TextToSpeech?>(null) }
+    val latestSettings by rememberUpdatedState(settings)
+    DisposableEffect(Unit) {
+        onDispose {
+            runCatching { ttsPreview?.stop() }
+            runCatching { ttsPreview?.shutdown() }
+        }
+    }
+
+    /** Speaks the preview line with the CURRENT speed/pitch sliders. */
+    fun speakTtsPreview() {
+        runCatching {
+            val s = latestSettings
+            val text = "Hi ${s.callsign}, this is how I sound now."
+            val existing = ttsPreview
+            if (existing != null) {
+                existing.setSpeechRate(s.ttsRate)
+                existing.setPitch(s.ttsPitch)
+                existing.speak(text, TextToSpeech.QUEUE_FLUSH, null, "tts-preview")
+            } else {
+                ttsPreview = TextToSpeech(context.applicationContext) { status ->
+                    if (status == TextToSpeech.SUCCESS) {
+                        runCatching {
+                            ttsPreview?.let { engine ->
+                                engine.setSpeechRate(s.ttsRate)
+                                engine.setPitch(s.ttsPitch)
+                                engine.speak(
+                                    text, TextToSpeech.QUEUE_FLUSH, null, "tts-preview"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Privacy dialog storage usage — refreshed every time it opens.
     LaunchedEffect(showPrivacy) {
@@ -363,6 +409,9 @@ fun SettingsScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
+            // F5.1: keep the focused inline field (names, custom
+            // voice, live model) reachable above the keyboard.
+            .imePadding()
             .padding(JarvisDimens.screenPadding)
     ) {
         // ── Header ─────────────────────────────────────────────────────
@@ -714,6 +763,72 @@ fun SettingsScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+            Spacer(modifier = Modifier.height(14.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Universal voice — device TTS",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "Speed and pitch for the Universal engine's spoken " +
+                    "replies (Gemini Live uses its own voices). Changes " +
+                    "apply from the next reply — no session restart needed.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "TTS speed",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = String.format(Locale.US, "%.2f×", settings.ttsRate),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Slider(
+                value = settings.ttsRate,
+                onValueChange = { onSettingsChange(settings.copy(ttsRate = it)) },
+                valueRange = 0.80f..1.50f,
+                steps = 34,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "TTS pitch (girly ↔ deep)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = String.format(Locale.US, "%.2f×", settings.ttsPitch),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Slider(
+                value = settings.ttsPitch,
+                onValueChange = { onSettingsChange(settings.copy(ttsPitch = it)) },
+                valueRange = 0.80f..1.60f,
+                steps = 39,
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedButton(
+                onClick = { speakTtsPreview() },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Test voice")
+            }
         }
 
         // ── System & Data Engine ───────────────────────────────────────
@@ -900,16 +1015,16 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                DeveloperBrandButton(R.drawable.brand_instagram, "Instagram") {
+                DeveloperBrandButton(BrandIcons.Instagram, "Instagram") {
                     openUrl("https://www.instagram.com/__nshd.__")
                 }
-                DeveloperBrandButton(R.drawable.brand_whatsapp, "WhatsApp") {
+                DeveloperBrandButton(BrandIcons.WhatsApp, "WhatsApp") {
                     openUrl("https://wa.me/+918590455801")
                 }
-                DeveloperBrandButton(R.drawable.brand_telegram, "Telegram") {
+                DeveloperBrandButton(BrandIcons.Telegram, "Telegram") {
                     openUrl("https://t.me/nshd_0")
                 }
-                DeveloperBrandButton(R.drawable.brand_github, "GitHub") {
+                DeveloperBrandButton(BrandIcons.GitHub, "GitHub") {
                     openUrl("https://github.com/whitesr09")
                 }
                 DeveloperIconButton(Icons.Filled.Email, "Email") {
@@ -921,7 +1036,7 @@ fun SettingsScreen(
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "JARVIS • v1.4.0",
+                text = "JARVIS • v1.4.1",
                 style = MaterialTheme.typography.labelMedium.copy(
                     letterSpacing = 1.2.sp
                 ),
@@ -1127,7 +1242,7 @@ fun SettingsScreen(
             onDismissRequest = { showImportMemory = false },
             title = { Text("Import memories") },
             text = {
-                Column {
+                Column(modifier = Modifier.imePadding()) {
                     Text(
                         text = "Paste a memory JSON array ([{\"category\": \"…\", \"text\": \"…\"}]).",
                         style = MaterialTheme.typography.bodySmall,
@@ -1584,7 +1699,7 @@ private fun ThemeDialog(
         onDismissRequest = onDismiss,
         title = { Text("Theme & Orb Colors") },
         text = {
-            Column {
+            Column(modifier = Modifier.imePadding()) {
                 AppTheme.entries.forEach { theme ->
                     Row(
                         modifier = Modifier
@@ -1674,10 +1789,14 @@ private fun PersonaOption(
     }
 }
 
-/** Rounded-square outline button with a brand vector drawable (Developer footer). */
+/**
+ * Rounded-square outline button with a brand glyph (Developer footer).
+ * F5.1: takes a Compose [ImageVector] from [BrandIcons] — the real
+ * Simple Icons glyphs, rendered locally — instead of a drawable res.
+ */
 @Composable
 private fun DeveloperBrandButton(
-    drawableRes: Int,
+    icon: ImageVector,
     contentDescription: String,
     onClick: () -> Unit
 ) {
@@ -1690,7 +1809,7 @@ private fun DeveloperBrandButton(
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(
-                painter = painterResource(drawableRes),
+                imageVector = icon,
                 contentDescription = contentDescription,
                 tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(22.dp)

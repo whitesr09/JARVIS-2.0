@@ -5,6 +5,7 @@ import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
 import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.ui.FriendlyErrors
+import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -112,13 +113,19 @@ class FailoverRouter(
             val provider = config.toProvider()
             val conversation = systemAndHistory.toMutableList()
             var executedAnyTool = false
+            // F5.1: first line of the most recent tool result — used
+            // to say what DID happen if the model dies mid-task (E3).
+            var lastToolOutcome: String? = null
             try {
                 var step = 0
                 while (step < maxSteps.coerceAtLeast(1)) {
-                    val reply = provider.chatStream(
-                        conversation,
-                        model,
-                        ToolRegistry.openAiTools(),
+                    val reply = chatStreamRetrying(
+                        provider = provider,
+                        messages = conversation,
+                        model = model,
+                        tools = ToolRegistry.openAiTools(),
+                        providerLabel = config.label,
+                        toolsExecuted = { executedAnyTool },
                         onDelta = onAssistantDelta
                     )
                     if (reply.toolCalls.isEmpty()) {
@@ -155,6 +162,9 @@ class FailoverRouter(
                                 "in ${System.currentTimeMillis() - toolStartedAt}ms"
                         )
                         executedAnyTool = true
+                        lastToolOutcome = result.message.lineSequence()
+                            .firstOrNull()?.trim()?.trimEnd('.')
+                            ?.takeIf { it.isNotBlank() }
                         onEvent(
                             ToolEvent(
                                 kind = if (result.success) {
@@ -202,13 +212,16 @@ class FailoverRouter(
                         "Tool step limit reached — asking ${config.label} for a summary"
                     )
                 )
-                val summary = provider.chatStream(
-                    conversation + ChatMsg(
+                val summary = chatStreamRetrying(
+                    provider = provider,
+                    messages = conversation + ChatMsg(
                         "user",
                         "You have reached the tool-step limit. Summarise what was accomplished and what remains, without calling more tools."
                     ),
-                    model,
+                    model = model,
                     tools = null,
+                    providerLabel = config.label,
+                    toolsExecuted = { executedAnyTool },
                     onDelta = onAssistantDelta
                 )
                 return summary.content.ifBlank {
@@ -217,17 +230,27 @@ class FailoverRouter(
             } catch (e: Exception) {
                 val detail = e.message ?: "unexpected error"
                 if (executedAnyTool) {
-                    // Raw detail → AppLog only; the user-facing text
-                    // keeps the failure-detection prefix + a short cause.
+                    // Raw detail → AppLog only. F5.1 (E3): the user
+                    // text is human — it says what DID happen (the
+                    // last tool result), keeps the "I couldn't"
+                    // failure prefix the UI keys on, and never names
+                    // internal mechanics (providers / replay).
                     AppLog.e(
                         "Agent",
                         "agent loop died mid-task on ${config.id} after tool " +
                             "execution (no replay): $detail"
                     )
-                    return "I took action, then ${config.label} failed before the task " +
-                        "could finish (${FriendlyErrors.shortReason(detail)}). " +
-                        "I did not replay the task on another provider, because that " +
-                        "could repeat a phone action."
+                    val outcome = lastToolOutcome
+                        ?: "I had already taken a step on the phone"
+                    val cause = if (isTransientFailure(detail)) {
+                        "and then my connection dropped"
+                    } else {
+                        "and then the reply failed " +
+                            "(${FriendlyErrors.shortReason(detail)})"
+                    }
+                    return "I couldn't finish that — $outcome, $cause. " +
+                        "I didn't repeat the phone action on my own; " +
+                        "say the command again and I'll retry it."
                 }
                 failures += config.label to detail
             }
@@ -237,10 +260,68 @@ class FailoverRouter(
             "agent loop: all providers failed — " +
                 failures.joinToString(" • ") { (label, raw) -> "$label: $raw" }
         )
-        return "I couldn't reach any provider for the agent loop (" +
+        // F5.1 (E3): same human tone — no "provider"/"agent loop"
+        // machinery words in the user-facing text.
+        return "I couldn't reach the model — the connection or the API " +
+            "key needs a look. (" +
             failures.joinToString("  •  ") { (label, raw) ->
                 "$label: ${FriendlyErrors.shortReason(raw)}"
-            } + "). The full error is in Settings → App Logs."
+            } + ") The full error is in Settings → App Logs."
+    }
+
+    /**
+     * F5.1 (E2): one provider's model call with same-provider retries
+     * on TRANSIENT failures (connection / timeout / network / 5xx /
+     * unavailable — a free tier dropping one call used to kill whole
+     * tasks). Policy: before any tool has executed, ONE retry, then
+     * the caller fails over to the next provider as before; after a
+     * tool has executed, up to TWO retries on the SAME provider — the
+     * provider is never switched after an action, because replaying
+     * the conversation elsewhere could repeat the action (the
+     * no-replay rule for ACTIONS stays absolute; ExecutionLedger also
+     * prevents duplicate tool execution within the turn). Backoff
+     * ~800 ms, then ~2 s. Retries are logged (Agent, WARN).
+     */
+    private suspend fun chatStreamRetrying(
+        provider: AiProvider,
+        messages: List<ChatMsg>,
+        model: String,
+        tools: JSONArray?,
+        providerLabel: String,
+        toolsExecuted: () -> Boolean,
+        onDelta: (String) -> Unit
+    ): ModelReply {
+        var retriesUsed = 0
+        while (true) {
+            try {
+                return provider.chatStream(messages, model, tools, onDelta)
+            } catch (e: Exception) {
+                val detail = e.message ?: "unexpected error"
+                val maxRetries = if (toolsExecuted()) 2 else 1
+                if (!isTransientFailure(detail) || retriesUsed >= maxRetries) throw e
+                retriesUsed++
+                val backoffMs = if (retriesUsed == 1) 800L else 2_000L
+                AppLog.w(
+                    "Agent",
+                    "transient model failure on $providerLabel: $detail — " +
+                        "retry $retriesUsed/$maxRetries on the SAME provider " +
+                        "in ${backoffMs}ms (toolsExecuted=${toolsExecuted()})"
+                )
+                delay(backoffMs)
+            }
+        }
+    }
+
+    /** F5.1: is this failure worth a same-provider retry? */
+    private fun isTransientFailure(detail: String): Boolean {
+        val lower = detail.lowercase()
+        return lower.contains("connection") ||
+            lower.contains("timeout") ||
+            lower.contains("timed out") ||
+            lower.contains("network") ||
+            lower.contains("unavailable") ||
+            lower.contains("500") || lower.contains("502") ||
+            lower.contains("503") || lower.contains("504")
     }
 
     private fun selectModel(config: ProviderConfig, preferReasoningModel: Boolean): String {

@@ -45,6 +45,38 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v1.4.1 — Live fresh-session fix, faster girlier TTS, brand icons",
+            body = "Native Live fix: the app used to save the Gemini Live " +
+                "session-resumption handle and send it on every fresh " +
+                "connect — but handles live only minutes, so Google " +
+                "rejected each new session up front (\"session expired / " +
+                "not found\", \"Invalid session handle\") before the model " +
+                "was ever reached. Handles are now in-memory only: fresh " +
+                "connects always start a clean session, the handle is " +
+                "used solely for the in-session reconnect, a stale-handle " +
+                "rejection retries once with a clean session before any " +
+                "fallback, and the failure caption now says \"Live session " +
+                "rejected (stale session)\" instead of \"model not found\" " +
+                "(the Live log line shows \"connect: fresh session (no " +
+                "handle)\"). Universal voice: new TTS speed (default " +
+                "1.18×) and pitch (default 1.22× — girlier) sliders in " +
+                "Settings → Voice with a Test voice button; changes apply " +
+                "to the next reply live, and the first spoken chunk of a " +
+                "reply now starts at the first clause, not the first full " +
+                "sentence. Developer footer: WhatsApp, Instagram, " +
+                "Telegram and GitHub now render the real brand glyphs as " +
+                "local Compose vectors (previously Android drawables). " +
+                "Also in this build: YouTube play waits for the results " +
+                "to load and picks the first real video (skipping ads " +
+                "and Shorts), tool results show their full sentence, a " +
+                "model call that drops mid-task now retries on the same " +
+                "connection instead of killing the task, mid-task " +
+                "failures explain in plain words what did happen, and " +
+                "the keyboard lifts the chat composer properly — the " +
+                "send button stays fully visible and the bottom nav " +
+                "hides while you type."
+        )
+        InfoCard(
             title = "v1.4.0 — Full app logs, Live diagnostics + live-only model guard",
             body = "New: a full log system — Settings → App Logs & " +
                 "Diagnostics shows every app log live (voice, Gemini " +

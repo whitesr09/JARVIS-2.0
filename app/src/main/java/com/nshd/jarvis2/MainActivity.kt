@@ -46,7 +46,11 @@ data class JarvisSettings(
     val biometricsEnrolled: Boolean = false,
     val biometricsSampleCount: Int = 0,
     /** Human-readable enrollment date, e.g. "21 Oct 2026" ("" when none). */
-    val biometricsEnrolledDate: String = ""
+    val biometricsEnrolledDate: String = "",
+    /** Device-TTS speed for the Universal voice (F5.1 slider, 0.80–1.50×). */
+    val ttsRate: Float = 1.18f,
+    /** Device-TTS pitch for the Universal voice (F5.1 slider, 0.80–1.60×; >1 = girlier). */
+    val ttsPitch: Float = 1.22f
 )
 
 class MainActivity : ComponentActivity() {
@@ -169,7 +173,9 @@ class MainActivity : ComponentActivity() {
             avatarId = prefs.getString(KEY_AVATAR_ID, "droid") ?: "droid",
             biometricsEnrolled = prefs.getBoolean(KEY_BIO_ENROLLED, false),
             biometricsSampleCount = prefs.getInt(KEY_BIO_COUNT, 0),
-            biometricsEnrolledDate = prefs.getString(KEY_BIO_DATE, "") ?: ""
+            biometricsEnrolledDate = prefs.getString(KEY_BIO_DATE, "") ?: "",
+            ttsRate = prefs.getFloat(KEY_TTS_RATE, 1.18f),
+            ttsPitch = prefs.getFloat(KEY_TTS_PITCH, 1.22f)
         )
     }
 
@@ -191,6 +197,8 @@ class MainActivity : ComponentActivity() {
             .putBoolean(KEY_BIO_ENROLLED, s.biometricsEnrolled)
             .putInt(KEY_BIO_COUNT, s.biometricsSampleCount)
             .putString(KEY_BIO_DATE, s.biometricsEnrolledDate)
+            .putFloat(KEY_TTS_RATE, s.ttsRate)
+            .putFloat(KEY_TTS_PITCH, s.ttsPitch)
             .apply()
     }
 
@@ -215,5 +223,7 @@ class MainActivity : ComponentActivity() {
         private const val KEY_BIO_ENROLLED = "biometrics_enrolled"
         private const val KEY_BIO_COUNT = "biometrics_sample_count"
         private const val KEY_BIO_DATE = "biometrics_enrolled_date"
+        private const val KEY_TTS_RATE = "tts_rate"
+        private const val KEY_TTS_PITCH = "tts_pitch"
     }
 }

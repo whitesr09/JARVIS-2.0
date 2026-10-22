@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -206,6 +207,9 @@ fun ApiConnectionScreen(
             modifier = Modifier
                 .weight(1f)
                 .verticalScroll(rememberScrollState())
+                // F5.1: the focused key/model field + Test button stay
+                // reachable above the keyboard.
+                .imePadding()
                 .padding(horizontal = 20.dp)
         ) {
             SectionLabel("Active provider — tried first")

@@ -22,11 +22,17 @@ import java.util.concurrent.TimeUnit
  *  - Audio does NOT flow until the server sends top-level
  *    "setupComplete" (an early serverContent also counts as implicit
  *    setup-complete).
- *  - Session resumption IS implemented: the setup carries
- *    "session_resumption" when a handle is stored,
- *    "sessionResumptionUpdate" handles are persisted via [Listener],
- *    and "goAway" is surfaced so the session can reconnect with the
- *    handle instead of losing the conversation at the ~10 min limit.
+ *  - Session resumption IS implemented, but IN-MEMORY ONLY (F5.1):
+ *    a fresh connect sends an EMPTY "session_resumption" {} — asking
+ *    for a brand-new resumable session — and never a stored handle.
+ *    Handles from "sessionResumptionUpdate" live only for the current
+ *    voice session (held by the session manager, handed back through
+ *    the constructor) and are used solely for the goAway reconnect,
+ *    so the conversation survives the ~10 min limit. Persisting
+ *    handles across sessions was the F5.1 bug: handles live only
+ *    minutes, so every fresh connect that carried one was rejected
+ *    up front with "session expired / not found / invalid session
+ *    handle" before the model was ever reached.
  *  - The model string is the user's configured id with exactly one
  *    "models/" prefix (F5 normalisation). No allow-list, no silent
  *    substitution — JARVIS-2.0's user-editable-model rule.
@@ -44,6 +50,10 @@ class GeminiLiveClient(
     model: String,
     private val voiceName: String,
     private val systemPrompt: String,
+    /**
+     * F5.1: in-session reconnect handle ONLY (goAway / drop within
+     * this voice session's lifetime). MUST be null on a fresh connect.
+     */
     private val resumptionHandle: String?,
     private val toolDeclarations: JSONArray? = null,
     /** BCP-47 code for speech_config.language_code; null = let Live decide. */
@@ -76,7 +86,10 @@ class GeminiLiveClient(
         /** turnComplete or generationComplete seen on serverContent. */
         fun onTurnComplete()
 
-        /** A new session-resumption handle to persist. */
+        /**
+         * A new session-resumption handle. F5.1: keep it IN MEMORY
+         * for this session only — never persist it.
+         */
         fun onSessionHandle(handle: String)
 
         /** Server sent goAway — reconnect soon, with the stored handle. */
@@ -213,6 +226,17 @@ class GeminiLiveClient(
                     "uses the Google endpoint and needs a Google AI Studio key"
             )
         }
+        // F5.1: makes the next log screenshot self-explanatory — a
+        // fresh connect must show "no handle" on this line.
+        AppLog.i(
+            "Live",
+            if (resumptionHandle.isNullOrBlank()) {
+                "connect: fresh session (no handle)"
+            } else {
+                "connect: resuming in-session (handle suffix …" +
+                    resumptionHandle.takeLast(2) + ")"
+            }
+        )
         val request = Request.Builder().url("$WS_BASE_URL?key=$apiKey").build()
         webSocket = httpClient.newWebSocket(request, SocketListener(gen))
         armSetupTimeout(gen)
@@ -361,9 +385,18 @@ class GeminiLiveClient(
                 )
             )
         }
+        // F5.1: session_resumption is ALWAYS present. The empty
+        // object asks the server for a NEW resumable session (it
+        // answers with a fresh handle via sessionResumptionUpdate).
+        // A handle is included ONLY for an in-session reconnect —
+        // a stale stored handle here makes Google reject the setup
+        // before the model is reached ("BidiGenerateContent session
+        // expired / not found", "Invalid session handle").
+        val resumption = JSONObject()
         if (!resumptionHandle.isNullOrBlank()) {
-            setup.put("session_resumption", JSONObject().put("handle", resumptionHandle))
+            resumption.put("handle", resumptionHandle)
         }
+        setup.put("session_resumption", resumption)
         return JSONObject().put("setup", setup).toString()
     }
 

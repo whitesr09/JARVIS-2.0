@@ -37,6 +37,17 @@ object FriendlyErrors {
                 lower.contains("invalid") || lower.contains("missing")) ->
                 Mapped("API key rejected — check it in Settings → API & Connection.", detail)
 
+            // F5.1: a rejected Live session/resumption handle is NOT
+            // a model problem — say so before the model branch below.
+            lower.contains("session") &&
+                (lower.contains("handle") || lower.contains("not found") ||
+                    lower.contains("expired")) ->
+                Mapped(
+                    "Gemini Live rejected the saved session (it had expired) — " +
+                        "Jarvis retries once with a clean session automatically.",
+                    detail
+                )
+
             lower.contains("not found") && lower.contains("model") ||
                 lower.contains("model") && lower.contains("not available") ||
                 lower.contains("404") ->
@@ -72,6 +83,14 @@ object FriendlyErrors {
         if (text.isBlank()) return "connection failed"
         val lower = text.lowercase()
         return when {
+            // F5.1 FIRST: session/handle rejections must win over the
+            // generic "not found" mapping — "BidiGenerateContent
+            // session not found" used to surface as "model not found",
+            // sending the user to fix a model that was never reached.
+            lower.contains("session") &&
+                (lower.contains("handle") || lower.contains("not found") ||
+                    lower.contains("expired")) ->
+                "Live session rejected (stale session)"
             lower.contains("gateway") -> "needs a Google AI Studio key"
             lower.contains("unsupported language") || lower.contains("language code") ||
                 lower.contains("language not supported") -> "language not supported"
@@ -80,7 +99,13 @@ object FriendlyErrors {
             lower.contains("401") || lower.contains("403") ||
                 lower.contains("api key") || lower.contains("permission denied") ->
                 "API key rejected"
-            lower.contains("not found") || lower.contains("404") -> "model not found"
+            // F5.1: "model not found" only when the text actually
+            // references a model — a "models/…" path with a 404, or
+            // "not found" alongside "model".
+            lower.contains("404") && lower.contains("models/") -> "model not found"
+            (lower.contains("not found") || lower.contains("not_found")) &&
+                lower.contains("model") -> "model not found"
+            lower.contains("404") -> "not found (404)"
             lower.contains("only supports") && lower.contains("websocket") ->
                 "live-only model used for chat"
             lower.contains("timeout") || lower.contains("timed out") -> "timed out"
