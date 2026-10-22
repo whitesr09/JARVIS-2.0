@@ -182,6 +182,9 @@ object HandsActions {
             sensitiveTapDenial(service, near, near.label)?.let { return@serializedLong it }
         }
         val dispatched = dispatchSwipe(service, x, y, x, y, durationMs = 60)
+        com.nshd.jarvis2.core.AppLog.d(
+            "Hands", "tap at $xPercent%, $yPercent% (ok=$dispatched)"
+        )
         ActionResult(dispatched, if (dispatched) "Tapped at $xPercent%, $yPercent%." else "Tap was not dispatched.")
     }
 
@@ -263,9 +266,16 @@ object HandsActions {
             fallbackLabel
         ).joinToString(" ").trim()
         if (labelText.isBlank()) return null
-        if (sensitivePhrase(labelText.lowercase()) == null) return null
+        val phrase = sensitivePhrase(labelText.lowercase()) ?: return null
         val displayLabel = element?.label?.ifBlank { fallbackLabel }
             ?: fallbackLabel.ifBlank { labelText }
+        // F5: every guard trigger is a log line (the ConfirmGate prompt
+        // + decision are logged by the gate itself).
+        com.nshd.jarvis2.core.AppLog.w(
+            "Hands",
+            "SensitiveTapGuard triggered ('$phrase') on " +
+                "'${displayLabel.trim().take(50)}' in ${packageName ?: "unknown app"}"
+        )
         val approved = ConfirmGate.confirm(
             "Tap '${displayLabel.trim().take(60)}' in ${appDisplayName(service, packageName)}?"
         )
@@ -339,6 +349,9 @@ object HandsActions {
         var steps = 0
         while (candidate != null && steps <= 8) {
             if (candidate.isClickable && candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                com.nshd.jarvis2.core.AppLog.d(
+                    "Hands", "click ${targetDescription.take(60)}"
+                )
                 return ActionResult(true, "Clicked $targetDescription.")
             }
             candidate = candidate.parent
@@ -348,6 +361,10 @@ object HandsActions {
         val centerX = element.bounds.exactCenterX()
         val centerY = element.bounds.exactCenterY()
         val tapped = dispatchSwipe(service, centerX, centerY, centerX, centerY, durationMs = 60)
+        com.nshd.jarvis2.core.AppLog.d(
+            "Hands",
+            "tap ${targetDescription.take(60)} (coordinate fallback, ok=$tapped)"
+        )
         return ActionResult(
             tapped,
             if (tapped) "Clicked $targetDescription with a coordinate tap fallback."

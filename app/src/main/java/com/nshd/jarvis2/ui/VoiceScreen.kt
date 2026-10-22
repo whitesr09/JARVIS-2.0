@@ -49,8 +49,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.ProviderStore
@@ -129,15 +131,21 @@ fun VoiceScreen(
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
             }
             Column(modifier = Modifier.weight(1f)) {
+                // F5: one line, ellipsized — a wide engine badge used to
+                // squeeze this into "Jarvis / Voice" on two lines.
                 Text(
                     text = "${settings.assistantName} Voice",
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                 )
                 Text(
                     text = settings.persona,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                 )
             }
             ModeBadge(uiState = uiState)
@@ -208,14 +216,35 @@ private fun VoiceSessionBody(
         modifier = Modifier.align(Alignment.CenterHorizontally)
     )
 
-    uiState.notice?.let { notice ->
+    uiState.sttHint?.let { hint ->
         Text(
-            text = notice,
+            text = hint,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier
                 .align(Alignment.CenterHorizontally)
                 .padding(top = 4.dp)
+        )
+    }
+
+    // F5: in Universal mode, name the voice actually speaking — the
+    // DEVICE TTS voice — and make clear Gemini voices are Live-only.
+    if (uiState.mode == VoiceMode.UNIVERSAL && uiState.ttsVoiceName.isNotBlank()) {
+        Text(
+            text = "Voice: ${uiState.ttsVoiceName} (device TTS)",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .padding(top = 4.dp)
+        )
+        Text(
+            text = "Gemini voices work in Native Live; Universal uses the device voice.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .padding(top = 2.dp)
         )
     }
 
@@ -402,17 +431,49 @@ private fun ModeBadge(uiState: VoiceUiState) {
     // The badge names the ENGINE (F2): "LIVE • Kore" for native audio,
     // "UNIVERSAL • <chat model>" for the any-model engine. LIVE reads
     // as a success state, Universal stays neutral.
-    val label = uiState.engineLabel.ifBlank {
+    // F5: local pill (not JarvisPill) so the text is 10sp, single-line,
+    // and the model part is truncated to 18 chars — the full label
+    // used to push the header title into a second line.
+    val raw = uiState.engineLabel.ifBlank {
         when (uiState.mode) {
             VoiceMode.LIVE -> "LIVE • ${uiState.voiceName}"
             VoiceMode.UNIVERSAL -> "UNIVERSAL"
             VoiceMode.NONE -> "VOICE"
         }
     }
-    JarvisPill(
-        text = label,
-        tone = if (uiState.mode == VoiceMode.LIVE) PillTone.SUCCESS else PillTone.NEUTRAL
-    )
+    val parts = raw.split(" • ", limit = 2)
+    val label = if (parts.size == 2) {
+        val model = parts[1]
+        val short = if (model.length > 18) model.take(17) + "…" else model
+        "${parts[0]} • $short"
+    } else {
+        raw
+    }
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.35f
+    val colors = if (uiState.mode == VoiceMode.LIVE) {
+        if (dark) {
+            JarvisSemanticColors.successBright.copy(alpha = 0.18f) to
+                JarvisSemanticColors.successBright
+        } else {
+            JarvisSemanticColors.successContainer to JarvisSemanticColors.success
+        }
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant to
+            MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = colors.first
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+            color = colors.second,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+        )
+    }
 }
 
 /** One caption line: user/assistant text, or a centered status chip for tool/system events. */

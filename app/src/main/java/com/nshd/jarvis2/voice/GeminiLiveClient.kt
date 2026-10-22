@@ -2,6 +2,7 @@ package com.nshd.jarvis2.voice
 
 import android.util.Base64
 import com.nshd.jarvis2.CrashLogger
+import com.nshd.jarvis2.core.AppLog
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
@@ -11,6 +12,8 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
 /**
@@ -24,8 +27,8 @@ import java.util.concurrent.TimeUnit
  *    "sessionResumptionUpdate" handles are persisted via [Listener],
  *    and "goAway" is surfaced so the session can reconnect with the
  *    handle instead of losing the conversation at the ~10 min limit.
- *  - The model string is passed through EXACTLY as configured (only a
- *    missing "models/" prefix is added). No allow-list, no silent
+ *  - The model string is the user's configured id with exactly one
+ *    "models/" prefix (F5 normalisation). No allow-list, no silent
  *    substitution — JARVIS-2.0's user-editable-model rule.
  *
  * Setup JSON uses snake_case keys. Level 4 adds the shared phone-tool
@@ -45,6 +48,13 @@ class GeminiLiveClient(
     private val toolDeclarations: JSONArray? = null,
     /** BCP-47 code for speech_config.language_code; null = let Live decide. */
     languageCode: String? = null,
+    /**
+     * F5: the Gemini provider's configured REST base URL. Native Live
+     * ALWAYS connects to Google's WebSocket endpoint — if this base URL
+     * points at a third-party gateway, its key will not work here and
+     * the failure reason must say so.
+     */
+    private val providerBaseUrl: String = "",
     private val listener: Listener
 ) {
     interface Listener {
@@ -85,7 +95,25 @@ class GeminiLiveClient(
         fun onToolCall(id: String, name: String, args: JSONObject)
     }
 
-    private val model: String = if (model.startsWith("models/")) model else "models/$model"
+    // F5: exactly one "models/" prefix — strip any number of repeats.
+    private val model: String = normalizeModelId(model)
+
+    /** Host of the configured REST base URL (null = unset/unparseable). */
+    private val providerHost: String? = hostOf(providerBaseUrl)
+
+    /** True when the Gemini key belongs to a gateway, not Google AI Studio. */
+    private val usesGateway: Boolean =
+        providerHost != null && providerHost != WS_HOST
+
+    /** Append the gateway explanation to a failure reason when relevant. */
+    private fun withGatewayHint(message: String): String =
+        if (usesGateway) {
+            "$message (Note: your Gemini base URL points at a gateway — " +
+                "$providerHost — but native Live always connects to Google " +
+                "directly and needs a Google AI Studio key.)"
+        } else {
+            message
+        }
 
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .protocols(listOf(Protocol.HTTP_1_1))
@@ -120,6 +148,48 @@ class GeminiLiveClient(
     @Volatile
     private var connectionGeneration = 0
 
+    // F5: hard setup timeout — a socket that opens but never answers
+    // the setup (bad model, gateway key, silent server rejection) used
+    // to hang "Connecting…" until the user gave up. 12 s, then the
+    // session fails with reason "setup timeout" and falls back.
+    private val timeoutExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "live-setup-timeout").apply { isDaemon = true }
+    }
+
+    @Volatile
+    private var setupTimeoutFuture: ScheduledFuture<*>? = null
+
+    @Volatile
+    private var firstAudioLogged = false
+
+    private fun armSetupTimeout(gen: Int) {
+        cancelSetupTimeout()
+        runCatching {
+            setupTimeoutFuture = timeoutExecutor.schedule({
+                if (gen == connectionGeneration && !setupComplete && !closedByUser) {
+                    AppLog.e("Live", "setup timeout after ${SETUP_TIMEOUT_MS / 1000}s (model=$model)")
+                    // Suppress the resulting onClosed — the failure
+                    // below is the one reason the session reports.
+                    closedByUser = true
+                    runCatching { webSocket?.close(1000, "setup timeout") }
+                    runCatching {
+                        listener.onFailure(
+                            withGatewayHint(
+                                "Live setup timeout — the server never confirmed " +
+                                    "the session setup within ${SETUP_TIMEOUT_MS / 1000} seconds."
+                            )
+                        )
+                    }
+                }
+            }, SETUP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        }
+    }
+
+    private fun cancelSetupTimeout() {
+        runCatching { setupTimeoutFuture?.cancel(false) }
+        setupTimeoutFuture = null
+    }
+
     fun connect() {
         if (apiKey.isBlank()) {
             listener.onFailure("Gemini API key is missing. Please configure it in Settings.")
@@ -127,9 +197,25 @@ class GeminiLiveClient(
         }
         closedByUser = false
         setupComplete = false
+        firstAudioLogged = false
         val gen = ++connectionGeneration
+        // Host only — the URL itself carries the key and is NEVER logged.
+        AppLog.i(
+            "Live",
+            "WS connect host=$WS_HOST model=$model voice=$voiceName " +
+                "language=${currentLanguageCode ?: "auto"} " +
+                "providerHost=${providerHost ?: "default"}"
+        )
+        if (usesGateway) {
+            AppLog.w(
+                "Live",
+                "Gemini base URL is a gateway ($providerHost); native Live " +
+                    "uses the Google endpoint and needs a Google AI Studio key"
+            )
+        }
         val request = Request.Builder().url("$WS_BASE_URL?key=$apiKey").build()
         webSocket = httpClient.newWebSocket(request, SocketListener(gen))
+        armSetupTimeout(gen)
     }
 
     /**
@@ -141,6 +227,7 @@ class GeminiLiveClient(
         if (languageRetried || currentLanguageCode == null) return
         languageRetried = true
         currentLanguageCode = null
+        AppLog.w("Live", "language rejected — retrying setup without language_code")
         val old = webSocket
         webSocket = null
         runCatching { old?.close(1000, "Retrying without language code") }
@@ -219,6 +306,8 @@ class GeminiLiveClient(
     /** Deliberate teardown — no error/closed callbacks are surfaced after this. */
     fun close() {
         closedByUser = true
+        cancelSetupTimeout()
+        runCatching { timeoutExecutor.shutdown() }
         val ws = webSocket
         webSocket = null
         ws?.close(1000, "Session ended by user")
@@ -283,8 +372,24 @@ class GeminiLiveClient(
     private fun markSetupComplete() {
         if (!setupComplete) {
             setupComplete = true
+            cancelSetupTimeout()
+            AppLog.i("Live", "setupComplete")
             listener.onSetupComplete()
         }
+    }
+
+    /** Full server error text: message + code + status when present (F5). */
+    private fun buildErrorMessage(error: JSONObject): String {
+        val parts = mutableListOf<String>()
+        error.optString("message").takeIf { it.isNotBlank() }?.let { parts += it }
+        val code = error.optInt("code", 0)
+        if (code != 0) parts += "code=$code"
+        error.optString("status").takeIf { it.isNotBlank() }?.let { parts += "status=$it" }
+        if (parts.isEmpty()) {
+            // Last resort: a trimmed dump of the error object itself.
+            parts += error.toString().take(200)
+        }
+        return parts.joinToString(" ")
     }
 
     private fun handleMessage(text: String) {
@@ -312,16 +417,18 @@ class GeminiLiveClient(
         root.optJSONObject("sessionResumptionUpdate")?.let { update ->
             val handle = update.optString("newHandle")
             if (update.optBoolean("resumable") && handle.isNotBlank()) {
+                AppLog.d("Live", "session resumption handle updated")
                 listener.onSessionHandle(handle)
             }
         }
 
         if (root.has("goAway")) {
+            AppLog.i("Live", "goAway received — server is ending the session")
             listener.onSessionEnding()
         }
 
         root.optJSONObject("error")?.let { error ->
-            val message = error.optString("message")
+            val message = buildErrorMessage(error)
             if (message.isNotBlank()) {
                 // Unsupported-language setup rejection: retry once with
                 // the language code omitted instead of surfacing a dead
@@ -331,6 +438,18 @@ class GeminiLiveClient(
                     currentLanguageCode != null && !languageRetried
                 ) {
                     retryWithoutLanguage()
+                    return
+                }
+                if (!setupComplete) {
+                    // F5: a server error INSTEAD of setupComplete is a
+                    // connection failure with a real reason (bad model,
+                    // rejected key…) — not a non-fatal session error.
+                    // It used to land in onError (a transient notice),
+                    // which is why every Live failure surfaced as a
+                    // reason-less "unavailable".
+                    AppLog.e("Live", "server error before setupComplete: $message")
+                    cancelSetupTimeout()
+                    listener.onFailure(withGatewayHint("Live setup rejected: $message"))
                     return
                 }
                 listener.onError(message)
@@ -373,7 +492,13 @@ class GeminiLiveClient(
                 } catch (e: Exception) {
                     null
                 }
-                if (bytes != null && bytes.isNotEmpty()) listener.onAudioChunk(bytes)
+                if (bytes != null && bytes.isNotEmpty()) {
+                    if (!firstAudioLogged) {
+                        firstAudioLogged = true
+                        AppLog.d("Live", "first audio frame (${bytes.size} bytes)")
+                    }
+                    listener.onAudioChunk(bytes)
+                }
             }
         }
 
@@ -408,6 +533,7 @@ class GeminiLiveClient(
             val id = call.optString("id")
                 .ifBlank { function?.optString("id").orEmpty() }
                 .ifBlank { "live_call_$i" }
+            AppLog.d("Live", "tool call: $name")
             listener.onToolCall(id, name, args)
         }
     }
@@ -425,6 +551,12 @@ class GeminiLiveClient(
             try {
                 if (stale) return
                 CrashLogger.stage("live", "ws open — sending setup")
+                // The EXACT model string sent (post-normalisation).
+                AppLog.i(
+                    "Live",
+                    "WS open — setup sent model=$model voice=$voiceName " +
+                        "language=${currentLanguageCode ?: "auto"}"
+                )
                 webSocket.send(buildSetupJson())
             } catch (e: Throwable) {
                 CrashLogger.logNonFatal("live", e)
@@ -459,7 +591,17 @@ class GeminiLiveClient(
             CrashLogger.logNonFatal("live", t)
             try {
                 if (closedByUser || stale) return
-                val detail = t.message ?: response?.let { "HTTP ${it.code}" } ?: "unknown error"
+                cancelSetupTimeout()
+                // HTTP upgrade failures carry their status on the
+                // response (401/403/404) — that IS the failure reason.
+                val httpStatus = response?.let { "HTTP ${it.code}" }
+                val detail = t.message ?: httpStatus ?: "unknown error"
+                AppLog.e(
+                    "Live",
+                    "WS failure: ${t.javaClass.simpleName}: " +
+                        "${t.message ?: "(no message)"}" +
+                        if (httpStatus != null) " [$httpStatus]" else ""
+                )
                 // Some revisions deliver the language rejection as a socket
                 // failure instead of an error object — same one-time retry.
                 if (!setupComplete && isLanguageError(detail) &&
@@ -468,7 +610,7 @@ class GeminiLiveClient(
                     retryWithoutLanguage()
                     return
                 }
-                listener.onFailure("Live connection failed: $detail")
+                listener.onFailure(withGatewayHint("Live connection failed: $detail"))
             } catch (e: Throwable) {
                 CrashLogger.logNonFatal("live", e)
             }
@@ -485,13 +627,20 @@ class GeminiLiveClient(
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             try {
                 if (closedByUser || stale) return
+                cancelSetupTimeout()
+                AppLog.w(
+                    "Live",
+                    "WS closed code=$code reason=${reason.ifBlank { "(none)" }}"
+                )
                 if (!setupComplete && isLanguageError(reason) &&
                     currentLanguageCode != null && !languageRetried
                 ) {
                     retryWithoutLanguage()
                     return
                 }
-                listener.onClosed(reason.ifBlank { "Session closed (code $code)" })
+                listener.onClosed(
+                    withGatewayHint(reason.ifBlank { "Session closed (code $code)" })
+                )
             } catch (e: Throwable) {
                 CrashLogger.logNonFatal("live", e)
             }
@@ -499,8 +648,27 @@ class GeminiLiveClient(
     }
 
     companion object {
+        private const val WS_HOST = "generativelanguage.googleapis.com"
         private const val WS_BASE_URL =
-            "wss://generativelanguage.googleapis.com/ws/" +
+            "wss://$WS_HOST/ws/" +
                 "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+        private const val SETUP_TIMEOUT_MS = 12_000L
+
+        /** Exactly one "models/" prefix, however the user typed it (F5). */
+        fun normalizeModelId(raw: String): String {
+            var id = raw.trim()
+            while (id.startsWith("models/")) {
+                id = id.removePrefix("models/")
+            }
+            return "models/$id"
+        }
+
+        /** Host part of a base URL, or null when unset/unparseable. */
+        fun hostOf(url: String): String? =
+            try {
+                java.net.URI(url.trim()).host
+            } catch (e: Exception) {
+                null
+            }
     }
 }

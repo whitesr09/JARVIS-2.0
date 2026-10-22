@@ -52,12 +52,25 @@ class ToolExecutor(
         // must always read the CURRENT screen (the verify-after-act
         // loop depends on fresh state, and a read replays no action).
         val activeLedger = ledger?.takeUnless { name in OBSERVATION_TOOLS }
-        activeLedger?.gate(name, args)?.let { cached -> return cached }
+        activeLedger?.gate(name, args)?.let { cached ->
+            // F5: ledger cache hits are exactly the "why didn't it run
+            // again?" question the log exists to answer.
+            com.nshd.jarvis2.core.AppLog.d(
+                "Agent", "tool $name — ledger cache hit, not re-executed"
+            )
+            return cached
+        }
+        val startedAt = System.currentTimeMillis()
         val raw = try {
             dispatch(name, args)
         } catch (e: Exception) {
             ToolResult(false, "Tool $name failed safely: ${e.message ?: "unexpected error"}")
         }
+        com.nshd.jarvis2.core.AppLog.d(
+            "Agent",
+            "tool $name ${if (raw.success) "ok" else "FAILED"} " +
+                "in ${System.currentTimeMillis() - startedAt}ms"
+        )
         activeLedger?.record(name, args, raw)
         if (!includeScreenSummary || name == "inspect_screen" ||
             name == "see_screen" || name == "vision_tap"

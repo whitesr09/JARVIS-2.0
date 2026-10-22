@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Translate
@@ -138,7 +139,8 @@ fun SettingsScreen(
     onOpenApi: () -> Unit,
     onOpenMemory: () -> Unit,
     onOpenAvatars: () -> Unit = {},
-    onOpenHandsFree: () -> Unit = {}
+    onOpenHandsFree: () -> Unit = {},
+    onOpenLogs: () -> Unit = {}
 ) {
     val context = LocalContext.current
     // ── All dialog / expansion state is hoisted to this top level (F4):
@@ -756,7 +758,14 @@ fun SettingsScreen(
                 icon = Icons.Filled.Apps,
                 title = "App Control & Hands-Free",
                 subtitle = "WhatsApp, YouTube, Media & Phone Automation",
+                showDivider = true,
                 onClick = { onOpenHandsFree() }
+            )
+            GlassRow(
+                icon = Icons.Filled.ReceiptLong,
+                title = "App Logs & Diagnostics",
+                subtitle = "Session logs, errors & crashes — view or export",
+                onClick = { onOpenLogs() }
             )
         }
 
@@ -912,7 +921,7 @@ fun SettingsScreen(
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "JARVIS • v1.3.1",
+                text = "JARVIS • v1.4.0",
                 style = MaterialTheme.typography.labelMedium.copy(
                     letterSpacing = 1.2.sp
                 ),

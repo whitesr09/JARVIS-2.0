@@ -1,5 +1,6 @@
 package com.nshd.jarvis2.brain
 
+import com.nshd.jarvis2.core.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -112,6 +113,16 @@ class OpenAiCompatibleProvider(
 
     private fun endpoint(path: String): String = baseUrl.trimEnd('/') + path
 
+    /** "host/path" for AppLog lines (F5) — never contains the API key. */
+    private fun logTarget(path: String): String = try {
+        val uri = java.net.URI(baseUrl.trimEnd('/'))
+        val host = uri.host ?: "endpoint"
+        val base = uri.path.orEmpty().trimEnd('/')
+        "$host$base$path"
+    } catch (e: Exception) {
+        "endpoint$path"
+    }
+
     private fun authed(builder: Request.Builder): Request.Builder =
         builder.header("Authorization", "Bearer $apiKey")
             .header("Content-Type", "application/json")
@@ -143,17 +154,35 @@ class OpenAiCompatibleProvider(
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
+        val startedAt = System.currentTimeMillis()
         val response = try {
             client.newCall(request).execute()
         } catch (e: IOException) {
+            AppLog.e(
+                "API",
+                "$id model=$model POST ${logTarget("/chat/completions")} " +
+                    "network error: ${e.message ?: "unreachable"}"
+            )
             throw AiException("Network error: ${e.message ?: "unreachable"}")
         }
         response.use {
             val bodyText = it.body?.string().orEmpty()
+            val latencyMs = System.currentTimeMillis() - startedAt
             if (!it.isSuccessful) {
+                AppLog.e(
+                    "API",
+                    "$id model=$model POST ${logTarget("/chat/completions")} " +
+                        "→ HTTP ${it.code} in ${latencyMs}ms: " +
+                        bodyText.replace('\n', ' ').take(300)
+                )
                 val brief = bodyText.replace('\n', ' ').take(160)
                 throw AiException("HTTP ${it.code}${if (brief.isNotBlank()) ": $brief" else ""}")
             }
+            AppLog.d(
+                "API",
+                "$id model=$model POST ${logTarget("/chat/completions")} " +
+                    "→ ${it.code} in ${latencyMs}ms"
+            )
             try {
                 val message = JSONObject(bodyText)
                     .getJSONArray("choices")
@@ -231,9 +260,18 @@ class OpenAiCompatibleProvider(
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
+        val streamStartedAt = System.currentTimeMillis()
+        AppLog.d(
+            "API",
+            "$id model=$model POST ${logTarget("/chat/completions")} stream start"
+        )
         val response = try {
             streamClient.newCall(request).execute()
         } catch (e: IOException) {
+            AppLog.e(
+                "API",
+                "$id model=$model stream network error: ${e.message ?: "unreachable"}"
+            )
             throw AiException("Network error: ${e.message ?: "unreachable"}")
         }
 
@@ -241,10 +279,19 @@ class OpenAiCompatibleProvider(
             if (!it.isSuccessful) {
                 val bodyText = it.body?.string().orEmpty()
                 if (it.code == 400 && bodyText.contains("stream", ignoreCase = true)) {
+                    AppLog.i(
+                        "API",
+                        "$id model=$model stream rejected (HTTP 400) — retrying non-streamed"
+                    )
                     val reply = chatWithTools(messages, model, tools)
                     if (reply.content.isNotBlank()) onDelta(reply.content)
                     return@withContext reply
                 }
+                AppLog.e(
+                    "API",
+                    "$id model=$model POST ${logTarget("/chat/completions")} " +
+                        "→ HTTP ${it.code}: " + bodyText.replace('\n', ' ').take(300)
+                )
                 val brief = bodyText.replace('\n', ' ').take(160)
                 throw AiException("HTTP ${it.code}${if (brief.isNotBlank()) ": $brief" else ""}")
             }
@@ -300,9 +347,19 @@ class OpenAiCompatibleProvider(
                 }
             } catch (e: IOException) {
                 if (emittedAny) {
+                    AppLog.w(
+                        "API",
+                        "$id model=$model stream dropped after deltas " +
+                            "(${content.length} chars kept)"
+                    )
                     val partial = content.toString().trimEnd() + "\n(connection dropped)"
                     return@withContext ModelReply(content = partial)
                 }
+                AppLog.e(
+                    "API",
+                    "$id model=$model stream died before any delta: " +
+                        (e.message ?: "interrupted")
+                )
                 throw AiException("Network error: ${e.message ?: "stream interrupted"}")
             }
             if (!sawDone && !emittedAny && toolBuilders.isEmpty()) {
@@ -323,6 +380,12 @@ class OpenAiCompatibleProvider(
             if (content.isBlank() && calls.isEmpty()) {
                 throw AiException("Empty reply from model")
             }
+            AppLog.d(
+                "API",
+                "$id model=$model stream done in " +
+                    "${System.currentTimeMillis() - streamStartedAt}ms " +
+                    "(${content.length} chars, ${calls.size} tool calls)"
+            )
             ModelReply(content = content.toString(), toolCalls = calls)
         }
     }
@@ -398,10 +461,18 @@ class OpenAiCompatibleProvider(
                 .build()
             client.newCall(req).execute().use { resp ->
                 if (resp.isSuccessful) {
+                    AppLog.d(
+                        "API",
+                        "$id probe model=$model OK in ${elapsed()}ms"
+                    )
                     TestResult(true, elapsed(), "OK")
                 } else {
                     val brief = resp.body?.string().orEmpty()
                         .replace('\n', ' ').trim().take(120)
+                    AppLog.w(
+                        "API",
+                        "$id probe model=$model → HTTP ${resp.code}: $brief"
+                    )
                     TestResult(
                         false, elapsed(),
                         "HTTP ${resp.code}" + if (brief.isNotBlank()) ": $brief" else ""

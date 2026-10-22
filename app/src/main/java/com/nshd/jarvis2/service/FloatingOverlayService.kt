@@ -122,6 +122,7 @@ class FloatingOverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        com.nshd.jarvis2.core.AppLog.i("Overlay", "overlay service created")
         running = true
         palette = readPalette()
         createNotificationChannel()
@@ -145,6 +146,7 @@ class FloatingOverlayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        com.nshd.jarvis2.core.AppLog.i("Overlay", "overlay service destroyed")
         running = false
         AppForeground.removeListener(foregroundListener)
         scope.cancel()
@@ -614,6 +616,7 @@ class FloatingOverlayService : Service() {
         val now = System.currentTimeMillis()
         if (now - lastTapAtMs < DOUBLE_TAP_MS) {
             // Double-tap: toggle the HUD panel.
+            com.nshd.jarvis2.core.AppLog.d("Overlay", "double-tap — toggle HUD")
             lastTapAtMs = 0L
             pendingSingleTap?.let { mainHandler.removeCallbacks(it) }
             pendingSingleTap = null
@@ -638,9 +641,11 @@ class FloatingOverlayService : Service() {
      */
     private fun onSingleTap() {
         if (TaskState.active.value) {
+            com.nshd.jarvis2.core.AppLog.d("Overlay", "tap — abort running task")
             TaskState.abort()
             return
         }
+        com.nshd.jarvis2.core.AppLog.d("Overlay", "tap — toggle voice session")
         val status = VoiceSessionManager.uiState.value.status
         val voiceActive = status != VoiceStatus.IDLE && status != VoiceStatus.ERROR
         if (voiceActive) {
@@ -659,7 +664,10 @@ class FloatingOverlayService : Service() {
     private fun toggleHud() {
         val hud = hudPanel ?: return
         hud.visibility = if (hud.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        if (hud.visibility == View.VISIBLE) refreshHud()
+        if (hud.visibility == View.VISIBLE) {
+            com.nshd.jarvis2.core.AppLog.d("Overlay", "HUD opened")
+            refreshHud()
+        }
     }
 
     private fun snapToEdge() {

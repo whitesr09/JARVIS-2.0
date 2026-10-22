@@ -61,8 +61,8 @@ import com.nshd.jarvis2.voice.VoiceUiState
 
 private enum class Tab { HOME, CHAT, SETTINGS, UPDATES }
 
-/** Full-screen destinations layered over the tabs (L2: API + Memory, L3: Voice, L5: Avatars, F4: Hands-Free). */
-private enum class SubScreen { NONE, PERMISSIONS, API, MEMORY, VOICE, AVATARS, HANDSFREE }
+/** Full-screen destinations layered over the tabs (L2: API + Memory, L3: Voice, L5: Avatars, F4: Hands-Free, F5: Logs). */
+private enum class SubScreen { NONE, PERMISSIONS, API, MEMORY, VOICE, AVATARS, HANDSFREE, LOGS }
 
 /** What is on screen right now — the AnimatedContent target in JarvisApp. */
 private data class ScreenTarget(val tab: Tab, val sub: SubScreen)
@@ -77,6 +77,8 @@ fun JarvisApp(
         // normal UI — the report screen is deliberately plain (no orb,
         // no session state) so it renders even when voice is broken.
         val appContext = androidx.compose.ui.platform.LocalContext.current
+        var tab by remember { mutableStateOf(Tab.HOME) }
+        var subScreen by remember { mutableStateOf(SubScreen.NONE) }
         var showCrashReport by remember {
             mutableStateOf(com.nshd.jarvis2.CrashLogger.hasPendingCrash(appContext))
         }
@@ -89,12 +91,17 @@ fun JarvisApp(
                 onDismissAndClear = {
                     com.nshd.jarvis2.CrashLogger.clearCrash(appContext)
                     showCrashReport = false
+                },
+                onOpenLogs = {
+                    // Keep the report pending — the user may come back
+                    // to it; just drop into the normal UI on the Logs
+                    // sub-screen (F5).
+                    showCrashReport = false
+                    subScreen = SubScreen.LOGS
                 }
             )
             return@JarvisTheme
         }
-        var tab by remember { mutableStateOf(Tab.HOME) }
-        var subScreen by remember { mutableStateOf(SubScreen.NONE) }
         // The center mic reflects the live voice session (F2): it must
         // not sit there red + MicOff during normal operation.
         val voiceState by VoiceSessionManager.uiState.collectAsState()
@@ -196,6 +203,9 @@ fun JarvisApp(
                             onBack = { subScreen = SubScreen.NONE },
                             onOpenPermissions = { subScreen = SubScreen.PERMISSIONS }
                         )
+                        SubScreen.LOGS -> LogsScreen(
+                            onBack = { subScreen = SubScreen.NONE }
+                        )
                         SubScreen.NONE -> when (target.tab) {
                             Tab.HOME -> HomeScreen(
                                 settings = settings,
@@ -219,7 +229,8 @@ fun JarvisApp(
                                 onOpenApi = { subScreen = SubScreen.API },
                                 onOpenMemory = { subScreen = SubScreen.MEMORY },
                                 onOpenAvatars = { subScreen = SubScreen.AVATARS },
-                                onOpenHandsFree = { subScreen = SubScreen.HANDSFREE }
+                                onOpenHandsFree = { subScreen = SubScreen.HANDSFREE },
+                                onOpenLogs = { subScreen = SubScreen.LOGS }
                             )
                             Tab.UPDATES -> UpdatesScreen()
                         }

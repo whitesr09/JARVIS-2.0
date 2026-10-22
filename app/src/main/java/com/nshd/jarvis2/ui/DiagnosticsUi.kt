@@ -47,7 +47,8 @@ import com.nshd.jarvis2.CrashLogger
 @Composable
 fun CrashReportScreen(
     report: String,
-    onDismissAndClear: () -> Unit
+    onDismissAndClear: () -> Unit,
+    onOpenLogs: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -116,6 +117,13 @@ fun CrashReportScreen(
                 },
                 modifier = Modifier.weight(1f)
             ) { Text("Share") }
+        }
+        if (onOpenLogs != null) {
+            // F5: jump straight into the full log viewer from here.
+            OutlinedButton(
+                onClick = onOpenLogs,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Open logs") }
         }
         TextButton(
             onClick = onDismissAndClear,

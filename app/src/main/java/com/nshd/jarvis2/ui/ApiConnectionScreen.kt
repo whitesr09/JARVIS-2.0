@@ -345,6 +345,46 @@ fun ApiConnectionScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    // F5: a live-only model in the CHAT field can never
+                    // answer chats (REST completions bounce off it with
+                    // HTTP 400) — warn inline and, for Gemini, offer the
+                    // one-tap move into the Live model field.
+                    if (config.chatModel.isNotBlank() &&
+                        ModelDiscovery.classify(config.chatModel) ==
+                        ModelDiscovery.Kind.NATIVE_AUDIO
+                    ) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(JarvisDimens.radiusField),
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(JarvisDimens.spaceMd)) {
+                                Text(
+                                    text = "Live-only model — it can't answer chats. " +
+                                        "Pick a text model for Chat/Universal, keep " +
+                                        "this one as the Live model.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                if (editId == ProviderPresets.GEMINI.id && settings != null) {
+                                    TextButton(
+                                        onClick = {
+                                            onSettingsChange(
+                                                settings.copy(liveModel = config.chatModel)
+                                            )
+                                            scope.launch {
+                                                snackbar.showSnackbar(
+                                                    "Live model set to ${config.chatModel} — " +
+                                                        "now pick a text chat model"
+                                                )
+                                            }
+                                        }
+                                    ) { Text("Move to Live model") }
+                                }
+                            }
+                        }
+                    }
                     Spacer(modifier = Modifier.height(10.dp))
                     OutlinedTextField(
                         value = config.reasoningModel,

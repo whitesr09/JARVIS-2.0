@@ -11,6 +11,8 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
+import com.nshd.jarvis2.core.AppLog
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -38,7 +40,9 @@ import java.util.concurrent.atomic.AtomicInteger
 class UniversalVoice(
     context: Context,
     private val languageName: String,
-    private val listener: Listener
+    private val listener: Listener,
+    /** F5: persona display name — drives the TTS pitch tuning. */
+    private val personaName: String = ""
 ) {
     interface Listener {
         /** Partial transcription while the user is still speaking. */
@@ -46,6 +50,15 @@ class UniversalVoice(
 
         /** Final recognized text from one listen pass. */
         fun onFinalResult(text: String)
+
+        /** A new recognizer pass actually started listening (F5: clears stale STT hints). */
+        fun onListeningStarted()
+
+        /** The user started speaking (F5: clears stale STT hints). */
+        fun onBeginningOfSpeech()
+
+        /** F5: device TTS initialised — the voice actually in use. */
+        fun onTtsVoiceSelected(voiceName: String)
 
         /** Recognizer RMS changed (dB) — for the orb. */
         fun onRms(rmsDb: Float)
@@ -117,7 +130,7 @@ class UniversalVoice(
         recognizer = rec
         rec.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
+            override fun onBeginningOfSpeech() = listener.onBeginningOfSpeech()
             override fun onRmsChanged(rmsdB: Float) = listener.onRms(rmsdB)
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
@@ -156,7 +169,9 @@ class UniversalVoice(
         }
         try {
             CrashLogger.stage("universal", "recognizer listening")
+            AppLog.d("STT", "recognizer start lang=$languageTag")
             rec.startListening(intent)
+            listener.onListeningStarted()
         } catch (e: Exception) {
             listener.onError("Speech recognition failed to start", fatal = false)
         }
@@ -197,6 +212,9 @@ class UniversalVoice(
 
     // ── Text-to-speech (sentence queue) ────────────────────────────────
 
+    @Volatile
+    private var ttsEnginePackage: String = ""
+
     private fun ensureTts() {
         if (tts != null || destroyed) return
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -206,23 +224,110 @@ class UniversalVoice(
             return
         }
         CrashLogger.stage("universal", "tts init")
-        tts = TextToSpeech(appContext) { status ->
-            if (destroyed) return@TextToSpeech
+        // F5: prefer Google TTS — its voices are markedly better than
+        // most OEM defaults. Detect it via the TTS service intent,
+        // construct with that engine, and fall back to the system
+        // default engine when it isn't installed (or throws).
+        val googleInstalled = runCatching {
+            val intent = Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE)
+            appContext.packageManager.queryIntentServices(intent, 0)
+                .any { it.serviceInfo.packageName == GOOGLE_TTS_ENGINE }
+        }.getOrDefault(false)
+        val onInit = TextToSpeech.OnInitListener { status ->
+            if (destroyed) return@OnInitListener
             if (status == TextToSpeech.SUCCESS) {
-                runCatching { tts?.setLanguage(locale) }
-                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) {}
-                    override fun onDone(utteranceId: String?) = utteranceFinished()
-                    @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String?) = utteranceFinished()
-                    override fun onError(utteranceId: String?, errorCode: Int) =
-                        utteranceFinished()
-                })
+                configureTts()
                 ttsReady = true
             } else {
                 ttsReady = false
+                AppLog.w("TTS", "engine init failed (status=$status)")
                 mainHandler.post { if (!destroyed) listener.onTtsUnavailable() }
             }
+        }
+        val created: TextToSpeech? = if (googleInstalled) {
+            runCatching {
+                TextToSpeech(appContext, onInit, GOOGLE_TTS_ENGINE)
+            }.getOrNull()?.also { ttsEnginePackage = GOOGLE_TTS_ENGINE }
+        } else {
+            null
+        }
+        if (created != null) {
+            tts = created
+        } else {
+            ttsEnginePackage = "default"
+            tts = TextToSpeech(appContext, onInit)
+        }
+        AppLog.i("TTS", "engine init requested: $ttsEnginePackage")
+    }
+
+    /**
+     * F5 voice selection, run once on TTS init (main thread): among the
+     * engine's voices for the session locale, prefer NETWORK voices
+     * (markedly higher quality) at the highest quality level; otherwise
+     * the best offline voice. Persona pitch is applied here too —
+     * Girlfriend Mode speaks slightly higher (1.08), Jarvis Pro stays
+     * neutral (1.0); rate is 1.0 for both.
+     */
+    private fun configureTts() {
+        val engine = tts ?: return
+        runCatching { engine.setLanguage(locale) }
+        val selected = selectBestVoice(engine)
+        if (selected != null) {
+            runCatching { engine.setVoice(selected) }
+        }
+        val pitch = if (personaName.contains("Girlfriend", ignoreCase = true)) {
+            GIRLFRIEND_PITCH
+        } else {
+            NEUTRAL_PITCH
+        }
+        runCatching { engine.setPitch(pitch) }
+        runCatching { engine.setSpeechRate(SPEECH_RATE) }
+        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) = utteranceFinished()
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                AppLog.w("TTS", "utterance error (legacy callback)")
+                utteranceFinished()
+            }
+            override fun onError(utteranceId: String?, errorCode: Int) {
+                AppLog.w("TTS", "utterance error code=$errorCode")
+                utteranceFinished()
+            }
+        })
+        val voiceName = selected?.name
+            ?: runCatching { engine.voice?.name }.getOrNull()
+            ?: runCatching { engine.defaultVoice?.name }.getOrNull()
+            ?: "unknown"
+        AppLog.i(
+            "TTS",
+            "voice selected: $voiceName (engine=$ttsEnginePackage, " +
+                "locale=$languageTag, pitch=$pitch, rate=$SPEECH_RATE)"
+        )
+        mainHandler.post { if (!destroyed) listener.onTtsVoiceSelected(voiceName) }
+    }
+
+    /** Best voice for [locale]: exact-locale → same-language → any; network first, then quality. */
+    private fun selectBestVoice(engine: TextToSpeech): Voice? {
+        val all = runCatching { engine.voices }.getOrNull().orEmpty()
+        if (all.isEmpty()) return null
+        val sameLanguage = all.filter { voice ->
+            runCatching { voice.locale?.language }.getOrNull() == locale.language
+        }
+        val exact = sameLanguage.filter { voice ->
+            runCatching { voice.locale }.getOrNull() == locale
+        }
+        val pool = when {
+            exact.isNotEmpty() -> exact
+            sameLanguage.isNotEmpty() -> sameLanguage
+            else -> all.toList()
+        }
+        val network = pool.filter { voice ->
+            runCatching { voice.isNetworkConnectionRequired }.getOrDefault(false)
+        }
+        val candidates = network.ifEmpty { pool }
+        return candidates.maxByOrNull { voice ->
+            runCatching { voice.quality }.getOrDefault(0)
         }
     }
 
@@ -289,6 +394,12 @@ class UniversalVoice(
     }
 
     companion object {
+        /** F5: preferred TTS engine package (best stock voices on Android). */
+        const val GOOGLE_TTS_ENGINE = "com.google.android.tts"
+        private const val GIRLFRIEND_PITCH = 1.08f
+        private const val NEUTRAL_PITCH = 1.0f
+        private const val SPEECH_RATE = 1.0f
+
         /**
          * App language name → BCP-47 tag for speech recognition. India
          * variants are the default — the user's accent and names are

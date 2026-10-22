@@ -75,6 +75,10 @@ class WakeWordService : Service(), RecognitionListener {
 
     override fun onCreate() {
         super.onCreate()
+        // F5: AppLog init is idempotent — the service may be the first
+        // entry point in the process.
+        com.nshd.jarvis2.core.AppLog.init(this)
+        com.nshd.jarvis2.core.AppLog.i("Wake", "wake-word service created")
         // F4.1: crash capture (idempotent — whichever entry point runs
         // first in the process installs the handler).
         com.nshd.jarvis2.CrashLogger.install(this)
@@ -121,6 +125,7 @@ class WakeWordService : Service(), RecognitionListener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        com.nshd.jarvis2.core.AppLog.i("Wake", "wake-word service destroyed")
         running = false
         WakeWordControl.setWakeMicHeld(false)
         WakeWordControl.clearSessionHook()
@@ -297,6 +302,7 @@ class WakeWordService : Service(), RecognitionListener {
             val now = System.currentTimeMillis()
             if (now - lastWakeAtMs < WAKE_DEBOUNCE_MS) return
             lastWakeAtMs = now
+            com.nshd.jarvis2.core.AppLog.i("Wake", "wake phrase detected")
             mainHandler.post { onWake() }
         }
     }
@@ -429,10 +435,20 @@ class WakeWordService : Service(), RecognitionListener {
                     status == BatteryManager.BATTERY_STATUS_FULL
                 when {
                     !charging && percent <= BATTERY_PAUSE_PERCENT -> {
-                        if (pauseReasons.add(REASON_BATTERY)) applyEngineState()
+                        if (pauseReasons.add(REASON_BATTERY)) {
+                            com.nshd.jarvis2.core.AppLog.w(
+                                "Wake", "paused — battery at $percent%"
+                            )
+                            applyEngineState()
+                        }
                     }
                     charging || percent > BATTERY_RESUME_PERCENT -> {
-                        if (pauseReasons.remove(REASON_BATTERY)) applyEngineState()
+                        if (pauseReasons.remove(REASON_BATTERY)) {
+                            com.nshd.jarvis2.core.AppLog.i(
+                                "Wake", "battery pause lifted ($percent%)"
+                            )
+                            applyEngineState()
+                        }
                     }
                     // 21–30% and not charging: hysteresis — keep current state.
                 }

@@ -94,6 +94,17 @@ object CrashLogger {
             append(trace)
         }
         File(ctx.filesDir, CRASH_FILE_NAME).writeText(report)
+        // F5: mirror the crash into AppLog too (best-effort — the
+        // process is dying; last_crash.txt above stays the reliable
+        // record, AppLog's async writer may not flush in time).
+        runCatching {
+            com.nshd.jarvis2.core.AppLog.e(
+                "Crash",
+                "UNCAUGHT on thread ${thread.name}: " +
+                    "${throwable.javaClass.name}: ${throwable.message ?: "(no message)"}",
+                throwable
+            )
+        }
         // commit(), not apply(): the process is dying right now.
         ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
@@ -152,16 +163,39 @@ object CrashLogger {
             .map { "    ${it.trim()}" }
             .toList()
         appendLines(listOf("E/$tag $summary") + traceLines)
+        // F5: mirror into the full AppLog (Settings → App Logs viewer).
+        runCatching {
+            com.nshd.jarvis2.core.AppLog.e("Crash", "[$tag] $summary", throwable)
+        }
     }
 
     /** Non-fatal message breadcrumb. */
     fun logNonFatal(tag: String, message: String) {
         appendLines(listOf("E/$tag $message"))
+        runCatching {
+            com.nshd.jarvis2.core.AppLog.e("Crash", "[$tag] $message")
+        }
     }
 
     /** Connect-sequence stage marker — the "how far did it get" trail. */
     fun stage(tag: String, message: String) {
         appendLines(listOf("S/$tag $message"))
+        // F5: F4.1 stage markers are ALSO AppLog lines, under the
+        // viewer's tag names — the whole connect trail is visible in
+        // Settings → App Logs without opening this legacy ring log.
+        runCatching {
+            com.nshd.jarvis2.core.AppLog.d(appLogTag(tag), message)
+        }
+    }
+
+    /** Legacy stage tag ("voice"/"live"/"wake"/…) → AppLog viewer tag. */
+    private fun appLogTag(tag: String): String = when (tag.lowercase()) {
+        "voice", "universal" -> "Voice"
+        "live" -> "Live"
+        "wake" -> "Wake"
+        "app" -> "App"
+        "overlay" -> "Overlay"
+        else -> tag.replaceFirstChar { it.uppercase() }
     }
 
     private fun appendLines(newLines: List<String>) {

@@ -56,6 +56,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // F5: the full log system initialises first so every later
+        // breadcrumb (including CrashLogger's, which mirror into
+        // AppLog) lands in the persistent log from the very start.
+        com.nshd.jarvis2.core.AppLog.init(this)
+        com.nshd.jarvis2.core.AppLog.i(
+            "App",
+            "MainActivity onCreate — Jarvis " +
+                runCatching {
+                    packageManager.getPackageInfo(packageName, 0).versionName
+                }.getOrDefault("?")
+        )
         // F4.1: crash capture goes in before ANYTHING else runs, so a
         // crash anywhere in startup is still recorded for the report
         // screen on the next launch.
@@ -89,6 +100,16 @@ class MainActivity : ComponentActivity() {
                 }
             )
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        com.nshd.jarvis2.core.AppLog.i("App", "MainActivity onStart")
+    }
+
+    override fun onStop() {
+        com.nshd.jarvis2.core.AppLog.i("App", "MainActivity onStop")
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {

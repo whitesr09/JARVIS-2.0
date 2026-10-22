@@ -14,6 +14,7 @@ import com.nshd.jarvis2.brain.ToolEventKind
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
+import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.service.ScreenShareState
 import com.nshd.jarvis2.ui.AppTheme
@@ -58,7 +59,15 @@ data class VoiceUiState(
     /** Mode-badge text: "LIVE • Kore" / "UNIVERSAL • <chat model>". */
     val engineLabel: String = "",
     val micMuted: Boolean = false,
-    val notice: String? = null,
+    /**
+     * F5 (was `notice`): transient recognizer hint ("Didn't catch
+     * that"…). Cleared when a new listen cycle starts, when speech
+     * begins, on a final result, and when a turn completes — it must
+     * never linger under a later "speaking" state.
+     */
+    val sttHint: String? = null,
+    /** F5: device-TTS voice actually in use (Universal mode only). */
+    val ttsVoiceName: String = "",
     val errorMessage: String? = null
 )
 
@@ -130,6 +139,10 @@ object VoiceSessionManager {
     /** Set once a failed Live attempt has fallen back to Universal. */
     @Volatile
     private var liveSwitchedToUniversal = false
+
+    /** F5: full reason of the last Native Live failure this session. */
+    @Volatile
+    private var lastLiveFailureReason: String? = null
 
     // F3 Live tool-call dedupe: Gemini toolCall ids already processed in
     // this session, mapped to the exact response that was sent. A
@@ -215,6 +228,7 @@ object VoiceSessionManager {
         active = true
         reconnectAttempts = 0
         liveSwitchedToUniversal = false
+        lastLiveFailureReason = null
         synchronized(liveProcessedToolCalls) { liveProcessedToolCalls.clear() }
         liveLedger = ExecutionLedger()
         mediaListenBlocked = false
@@ -223,6 +237,11 @@ object VoiceSessionManager {
         ttsSpeaking = false
         _captions.value = emptyList()
         CrashLogger.stage(TAG, "session start (engine setting=${settings.voiceEngine})")
+        AppLog.i(
+            "Voice",
+            "session start engine=${settings.voiceEngine} persona=${settings.persona} " +
+                "language=${settings.language}"
+        )
         // F4.1 mic arbitration handshake: the wake-word service must
         // have FULLY released the microphone (Vosk SpeechService stop
         // is asynchronous) before any engine touches it — two live mic
@@ -247,6 +266,13 @@ object VoiceSessionManager {
             s.liveModel.contains("native-audio", ignoreCase = true)
         val engine = parseEngine(s.voiceEngine)
         CrashLogger.stage(TAG, "engine chosen: $engine")
+        val activeConfig = store.orderedConfigs().firstOrNull()
+        AppLog.i(
+            "Voice",
+            "engine decision: $engine provider=${activeConfig?.id ?: "none"} " +
+                "chatModel=${activeConfig?.chatModel?.ifBlank { "(none)" } ?: "(none)"} " +
+                "liveModel=${s.liveModel}"
+        )
         when (engine) {
             VoiceEngine.UNIVERSAL -> startUniversal()
             VoiceEngine.NATIVE -> startLive()
@@ -363,6 +389,7 @@ object VoiceSessionManager {
     }
 
     fun stop() {
+        AppLog.i("Voice", "session stop")
         stopInternal(resetUi = true)
         runCatching { WakeWordControl.setSessionActive(false) }
     }
@@ -434,7 +461,7 @@ object VoiceSessionManager {
         _uiState.value = _uiState.value.copy(
             status = VoiceStatus.ERROR,
             errorMessage = message,
-            notice = null
+            sttHint = null
         )
     }
 
@@ -484,6 +511,7 @@ object VoiceSessionManager {
                 resumptionHandle = handle,
                 toolDeclarations = ToolRegistry.liveFunctionDeclarations(),
                 languageCode = UniversalVoice.liveLanguageCode(s.language),
+                providerBaseUrl = gemini.baseUrl,
                 listener = LiveListener()
             )
             client = liveClient
@@ -539,6 +567,10 @@ object VoiceSessionManager {
             return
         }
         CrashLogger.stage(TAG, "live failure: $message")
+        // F5: the FULL reason goes to the log; the caption carries the
+        // short FriendlyErrors cause so the user can see WHY Live died.
+        AppLog.e("Live", "native live failed: $message")
+        lastLiveFailureReason = message
         if (!active || reconnecting) return
         if (!liveSwitchedToUniversal && settings != null) {
             liveSwitchedToUniversal = true
@@ -548,7 +580,8 @@ object VoiceSessionManager {
             addCaption(
                 VoiceCaption(
                     fromUser = false,
-                    text = "Native Live unavailable — switched to Universal (works with any model)",
+                    text = "Native Live unavailable " +
+                        "(${FriendlyErrors.shortReason(message)}) — switched to Universal",
                     kind = CaptionKind.SYSTEM
                 )
             )
@@ -655,7 +688,8 @@ object VoiceSessionManager {
 
         override fun onError(message: String) {
             if (!active) return
-            _uiState.value = _uiState.value.copy(notice = message)
+            AppLog.w("Live", "session error notice: $message")
+            _uiState.value = _uiState.value.copy(sttHint = message)
         }
 
         override fun onFailure(message: String) {
@@ -784,13 +818,21 @@ object VoiceSessionManager {
             engineLabel = "UNIVERSAL • $modelShort",
             micMuted = _uiState.value.micMuted
         )
-        val uv = UniversalVoice(appContext ?: return, s.language, UniversalListener())
+        val uv = UniversalVoice(
+            appContext ?: return, s.language, UniversalListener(),
+            personaName = s.persona
+        )
         universal = uv
         if (!uv.isRecognitionAvailable()) {
+            // F5: when Native Live already failed this session, its
+            // reason belongs in this error's Details too.
+            val liveNote = lastLiveFailureReason?.let { reason ->
+                "\n\nNative Live also failed: $reason"
+            } ?: ""
             fail(
                 "Speech recognition is not available on this device. " +
                     "Use text chat, or add a Gemini API key in Settings → " +
-                    "API & Connection for Native Live voice."
+                    "API & Connection for Native Live voice." + liveNote
             )
             return
         }
@@ -808,11 +850,34 @@ object VoiceSessionManager {
     }
 
     private class UniversalListener : UniversalVoice.Listener {
+        override fun onListeningStarted() {
+            if (!active) return
+            // F5: a fresh listen cycle buries any stale recognizer hint.
+            if (_uiState.value.sttHint != null) {
+                _uiState.value = _uiState.value.copy(sttHint = null)
+            }
+        }
+
+        override fun onBeginningOfSpeech() {
+            if (!active) return
+            if (_uiState.value.sttHint != null) {
+                _uiState.value = _uiState.value.copy(sttHint = null)
+            }
+        }
+
+        override fun onTtsVoiceSelected(voiceName: String) {
+            if (!active) return
+            _uiState.value = _uiState.value.copy(ttsVoiceName = voiceName)
+        }
+
         override fun onPartialResult(text: String) {
             if (!active) return
             if (!universalFirstPartialLogged) {
                 universalFirstPartialLogged = true
                 CrashLogger.stage(TAG, "universal: first partial result")
+            }
+            if (_uiState.value.sttHint != null) {
+                _uiState.value = _uiState.value.copy(sttHint = null)
             }
             setTurnCaption(fromUser = true, text = text, partial = true)
         }
@@ -820,6 +885,8 @@ object VoiceSessionManager {
         override fun onFinalResult(text: String) {
             if (!active) return
             CrashLogger.stage(TAG, "universal: final result received")
+            AppLog.d("STT", "final result (${text.length} chars): ${text.take(80)}")
+            _uiState.value = _uiState.value.copy(sttHint = null)
             setTurnCaption(fromUser = true, text = text, partial = false)
             userCaptionIndex = -1
             setStatus(VoiceStatus.THINKING)
@@ -838,7 +905,8 @@ object VoiceSessionManager {
                 fail(message)
                 return
             }
-            _uiState.value = _uiState.value.copy(notice = message)
+            AppLog.w("STT", "recognizer error: $message")
+            _uiState.value = _uiState.value.copy(sttHint = message)
             // One-shot recognizer ended (silence / no match / transient
             // service error) — brief pause, then the loop listens again.
             scope.launch {
@@ -862,19 +930,28 @@ object VoiceSessionManager {
 
         override fun onTtsUnavailable() {
             if (!active) return
+            AppLog.w("TTS", "device TTS unavailable — replies are text-only")
             _uiState.value = _uiState.value.copy(
-                notice = "Text-to-speech is unavailable on this device — replies are text-only."
+                sttHint = "Text-to-speech is unavailable on this device — replies are text-only."
             )
             // Behave like a finished speak so the loop continues.
             onTtsQueueDrained()
         }
     }
 
+    /** F5: pipeline failure replies — friendly-mapped before display/speech. */
+    private fun isFailureReply(reply: String): Boolean =
+        reply.startsWith("I couldn't") ||
+            reply.startsWith("Please configure") ||
+            reply.startsWith("I hit a problem") ||
+            reply.startsWith("Failed:")
+
     private fun routeUniversalTurn(userText: String) {
         val store = providerStore ?: return
         val s = settings ?: return
         val db = memoryDb ?: return
         val ctx = appContext ?: return
+        AppLog.d("Agent", "user turn received (${userText.length} chars)")
         pipelineRunning = true
         pipelineDone = false
         ttsSpeaking = false
@@ -930,27 +1007,36 @@ object VoiceSessionManager {
                     }
                 )
             } catch (e: Exception) {
-                "I hit a problem handling that: ${e.message ?: "unexpected error"}"
+                // Raw exception text goes to the log ONLY (F5) — the
+                // reply string is a clean failure marker.
+                AppLog.e("Agent", "universal turn crashed: ${e.message ?: "unknown"}", e)
+                "I couldn't reach the model — something went wrong handling that."
             }
             pipelineRunning = false
             pipelineDone = true
             if (!active) return@launch
+            val failed = isFailureReply(reply)
+            // F5 error hygiene: a failed turn's raw provider text never
+            // becomes the caption, the chat history, or speech. The
+            // caption/history get the FriendlyErrors headline; the raw
+            // text already lives in AppLog under the API tag.
+            val displayReply = if (failed) FriendlyErrors.map(reply).headline else reply
             withContext(Dispatchers.IO) {
                 db.addMessage("user", userText)
-                db.addMessage("assistant", reply)
+                db.addMessage("assistant", displayReply)
             }
-            // Finalize the assistant caption with the complete reply.
+            // Finalize the assistant caption with the display reply.
             synchronized(assistantTurn) {
                 assistantTurn.setLength(0)
-                assistantTurn.append(reply)
+                assistantTurn.append(displayReply)
             }
-            setTurnCaption(fromUser = false, text = reply, partial = false)
+            setTurnCaption(fromUser = false, text = displayReply, partial = false)
             assistantCaptionIndex = -1
             synchronized(assistantTurn) { assistantTurn.setLength(0) }
+            // Turn complete — no recognizer hint survives into the
+            // next state (the stale "Didn't catch that" bug, F5).
+            _uiState.value = _uiState.value.copy(sttHint = null)
 
-            val failed = reply.startsWith("I couldn't reach any provider") ||
-                reply.startsWith("I hit a problem") ||
-                reply.startsWith("Please configure your API Key")
             when {
                 silent -> {
                     if (failed) chime?.playError() else chime?.playSuccess()
@@ -959,7 +1045,13 @@ object VoiceSessionManager {
                 failed -> {
                     chime?.playError()
                     sentenceBuffer.setLength(0)
-                    maybeResumeUniversalListening()
+                    // Speak ONLY the short friendly line — never the
+                    // raw failure text (F5). The drain callback (or the
+                    // !ttsSpeaking check) resumes listening.
+                    speakUniversalSentence(
+                        "Sorry, I couldn't reach the model — check the connection."
+                    )
+                    if (!ttsSpeaking) maybeResumeUniversalListening()
                 }
                 else -> {
                     // Non-streamed replies (quick commands, memory
@@ -987,6 +1079,8 @@ object VoiceSessionManager {
         if (!active) return
         if (!ttsSpeaking) {
             ttsSpeaking = true
+            // F5: speaking buries any stale recognizer hint.
+            _uiState.value = _uiState.value.copy(sttHint = null)
             setStatus(VoiceStatus.SPEAKING)
             startSpeakingPulse()
         }

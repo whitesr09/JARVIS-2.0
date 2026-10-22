@@ -13,7 +13,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -161,17 +160,23 @@ fun JarvisOrb(
     }
 
     Canvas(modifier = modifier) {
-        drawOrbFrame(
-            scene = scene,
-            anim = anim,
-            palette = palette,
-            state = state,
-            tick = frameMs,
-            reducedMotion = reducedMotion,
-            amplitude = amplitude,
-            bass = bass,
-            high = high
-        )
+        // F5: hard-clip every frame to the canvas bounds — rings and
+        // orbit particles physically cannot paint outside the square
+        // (the QA screenshots showed ring lines escaping to the screen
+        // edges).
+        withTransform({ clipRect(0f, 0f, size.width, size.height) }) {
+            drawOrbFrame(
+                scene = scene,
+                anim = anim,
+                palette = palette,
+                state = state,
+                tick = frameMs,
+                reducedMotion = reducedMotion,
+                amplitude = amplitude,
+                bass = bass,
+                high = high
+            )
+        }
     }
 }
 
@@ -638,8 +643,10 @@ private fun DrawScope.drawOrbFrame(
     if (!size.minDimension.isFinite() || size.minDimension <= 0f) return
     val cx = size.width / 2f
     val cy = size.height / 2f
-    // Sphere radius in px: rings reach 1.39 units (plus pulse), the
-    // glow 1.28 — 0.33 of the min dimension keeps both on-canvas.
+    // Sphere radius in px: R = min(w,h)/2 × 0.66 (the F5 fit rule) —
+    // rings reach 1.39 R and the glow 1.28 R, and orbit particles are
+    // additionally clamped, so the whole composition stays inside the
+    // square canvas.
     val radius = size.minDimension * 0.33f
     if (!radius.isFinite() || radius <= 0f) return
 
@@ -704,58 +711,58 @@ private fun DrawScope.drawOrbFrame(
     val sinT = sin(TILT_X)
 
     // ── Floor shadow (HTML #shadow div): width 1.5 units × s at
-    // cy + 1.2 units, height 0.12 of the width, soft radial falloff.
+    // cy + 1.2 units, height 0.12 of the width, soft falloff.
+    // F5: drawn as nested SOLID ellipses — no Brush anywhere in this
+    // file anymore (see the glow note below for why).
     val shadowW = 1.5f * radius * s
     val shadowCy = cy + 1.2f * radius
     withTransform({
         translate(cx, shadowCy)
         scale(1f, 0.12f, Offset.Zero)
     }) {
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(
-                    Color(
-                        red = palette.shadowR.c01(),
-                        green = palette.shadowG.c01(),
-                        blue = palette.shadowB.c01(),
-                        alpha = palette.shadowAlpha.c01()
-                    ),
-                    Color.Transparent
+        for (i in 3 downTo 1) {
+            val f = i / 3f
+            drawCircle(
+                color = Color(
+                    red = palette.shadowR.c01(),
+                    green = palette.shadowG.c01(),
+                    blue = palette.shadowB.c01(),
+                    alpha = (palette.shadowAlpha * 0.38f).c01()
                 ),
-                center = Offset.Zero,
-                radius = shadowW / 2f
-            ),
-            radius = shadowW / 2f,
-            center = Offset.Zero
-        )
+                radius = shadowW / 2f * f,
+                center = Offset.Zero
+            )
+        }
     }
 
     // ── Glow disc: violet → blue → transparent, radius 1.28 R.
+    // F5 ROOT-CAUSE FIX for the "square panel" in the QA screenshots:
+    // the only translucent full-area painter in this composable was
+    // this glow, and it was a Brush.radialGradient. On the user's GPU
+    // the gradient shader bled to its rectangular bounds, painting a
+    // visible SQUARE behind the sphere (the same class of driver
+    // artifact that made the F3 GL orb render as an opaque square).
+    // The glow is now 16 concentric solid-alpha circles — a radial
+    // falloff that is circular by construction, with a fully
+    // transparent outer edge. Nothing in the orb paints a rectangle.
     if (glowAlpha > 0.003f) {
         val glowRadius = 1.28f * radius * s
-        drawCircle(
-            brush = Brush.radialGradient(
-                colorStops = arrayOf(
-                    0f to Color(
-                        red = effPurp[0].c01(),
-                        green = effPurp[1].c01(),
-                        blue = effPurp[2].c01(),
-                        alpha = glowAlpha
-                    ),
-                    0.55f to Color(
-                        red = effBlue[0].c01(),
-                        green = effBlue[1].c01(),
-                        blue = effBlue[2].c01(),
-                        alpha = (glowAlpha * 0.55f).c01()
-                    ),
-                    1f to Color.Transparent
+        val glowSteps = 16
+        for (i in glowSteps downTo 1) {
+            val f = i.toFloat() / glowSteps // 1 = outer edge
+            val a = (glowAlpha * (1f - f) * (1f - f)).c01()
+            if (a <= 0.002f) continue
+            drawCircle(
+                color = Color(
+                    red = mix(effBlue[0], effPurp[0], 1f - f).c01(),
+                    green = mix(effBlue[1], effPurp[1], 1f - f).c01(),
+                    blue = mix(effBlue[2], effPurp[2], 1f - f).c01(),
+                    alpha = a
                 ),
-                center = Offset(cx, cy),
-                radius = glowRadius
-            ),
-            radius = glowRadius,
-            center = Offset(cx, cy)
-        )
+                radius = glowRadius * f,
+                center = Offset(cx, cy)
+            )
+        }
     }
 
     // ── Rings: dynamic alphas + bass-driven scale pulse.
@@ -763,7 +770,9 @@ private fun DrawScope.drawOrbFrame(
     val ringStroke = 1.5.dp.toPx()
     drawOrbRing(
         cx = cx, cy = cy, radius = radius,
-        ringScale = s * (1f + ringPulse * 0.03f),
+        // F5: 0.95 pull-in — at 1.39 units × perspective the far ring
+        // could cross the canvas edge; the frame clip is the backstop.
+        ringScale = s * (1f + ringPulse * 0.03f) * 0.95f,
         ringRadiusUnits = 1.26f, tiltX = -0.32f,
         phase = ring1Angle, segs = 2f, seed = 0f,
         baseAlpha = 0.4f + ringP * 0.3f + level * 0.35f,
@@ -773,7 +782,7 @@ private fun DrawScope.drawOrbFrame(
     )
     drawOrbRing(
         cx = cx, cy = cy, radius = radius,
-        ringScale = s * (1f + ringPulse * 0.02f),
+        ringScale = s * (1f + ringPulse * 0.02f) * 0.95f,
         ringRadiusUnits = 1.39f, tiltX = 0.22f,
         phase = ring2Angle, segs = 3f, seed = 2.1f,
         baseAlpha = 0.22f + ringP * 0.2f + level * 0.2f,
@@ -843,28 +852,43 @@ private fun DrawScope.drawOrbFrame(
         )
     }
 
-    // ── Orbit particles (exact HTML updateParticles positions).
+    // ── Orbit particles (HTML updateParticles positions, contained).
+    // F5: the HTML orbit radius runs 1.5–2.05 units — at R = 0.33 ×
+    // min dimension with perspective, those particles landed OUTSIDE
+    // the canvas (the stray dots at the screen edges in the QA
+    // screenshots). The orbit is scaled to 0.8× and every particle is
+    // radially clamped inside the canvas as a hard guarantee.
     val thinking = state == OrbState.THINKING
     for (j in 0 until ORBIT_COUNT) {
         val a = scene.oAngle[j]
         val fs = scene.oFreq[j]
         val ph = scene.oPhase[j]
-        val rU = scene.oBaseR[j] +
+        val rU = (scene.oBaseR[j] +
             sin(time * fs + ph) * 0.12f -
             (if (thinking) 0.15f else 0f) +
-            level * 0.1f
+            level * 0.1f) * 0.8f
         val x = cos(a) * rU
         val z = sin(a) * rU * 0.6f
         val y = scene.oYOff[j] * 0.8f + sin(a * 1.3f + ph) * 0.18f + x * scene.oTilt[j] * 0.25f
         val persp = PERSP_F / (PERSP_F - z)
-        val px = cx + x * radius * persp
-        val py = cy + y * radius * persp
+        var px = cx + x * radius * persp
+        var py = cy + y * radius * persp
         val depth01 = smoothstep(-1.3f, 1.3f, z)
         val alphaO = ((0.5f + 0.5f * sin(time * fs * 1.6f + ph)).pow(1.5f) *
             (0.55f + glowP * 0.3f)).c01()
         // Diameter 1–3.2 dp (radius half of that), depth-scaled.
         val sizePx = (0.5f + scene.oSizeRnd[j] * 1.1f) * density * (0.7f + 0.6f * depth01)
         if (!px.isFinite() || !py.isFinite() || !sizePx.isFinite()) continue
+        // Radial clamp: the whole particle stays inside the canvas.
+        val odx = px - cx
+        val ody = py - cy
+        val oDist = sqrt(odx * odx + ody * ody)
+        val oMax = size.minDimension / 2f - sizePx - 1f
+        if (oDist > oMax && oDist > 0f && oMax > 0f) {
+            val k = oMax / oDist
+            px = cx + odx * k
+            py = cy + ody * k
+        }
         val colArr = when (j % 3) {
             0 -> effCyan
             1 -> effBlue

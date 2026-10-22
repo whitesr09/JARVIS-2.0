@@ -3,6 +3,8 @@ package com.nshd.jarvis2.brain
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
+import com.nshd.jarvis2.core.AppLog
+import com.nshd.jarvis2.ui.FriendlyErrors
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -28,7 +30,11 @@ sealed class ChatOutcome {
  */
 class FailoverRouter(
     private val configsInOrder: List<ProviderConfig>,
-    private val toolExecutor: ToolExecutor? = null
+    private val toolExecutor: ToolExecutor? = null,
+    /** F5: cache source for live-only model guard substitutions. */
+    private val store: ProviderStore? = null,
+    /** F5: user-visible note when the guard substitutes a text model. */
+    private val onSystemNote: (String) -> Unit = {}
 ) {
 
     suspend fun chat(
@@ -39,11 +45,11 @@ class FailoverRouter(
         val configured = configsInOrder.filter { it.isConfigured }
         if (configured.isEmpty()) return ChatOutcome.NoKey
 
-        val failures = mutableListOf<String>()
+        val failures = mutableListOf<Pair<String, String>>()
         for (config in configured) {
             val model = selectModel(config, preferReasoningModel)
             if (model.isBlank()) {
-                failures += "${config.label}: no model set"
+                failures += config.label to "no model set"
                 continue
             }
             try {
@@ -55,12 +61,23 @@ class FailoverRouter(
                 if (reply.content.isBlank()) throw AiException("Empty reply from model")
                 return ChatOutcome.Success(reply.content, config.label, model)
             } catch (e: AiException) {
-                failures += "${config.label}: ${e.message ?: "failed"}"
+                failures += config.label to (e.message ?: "failed")
             } catch (e: Exception) {
-                failures += "${config.label}: ${e.message ?: "unexpected error"}"
+                failures += config.label to (e.message ?: "unexpected error")
             }
         }
-        return ChatOutcome.AllFailed(failures.joinToString("  •  "))
+        // F5 error hygiene: raw provider text goes to AppLog ONLY; the
+        // returned summary is FriendlyErrors-shortened per provider.
+        AppLog.e(
+            "API",
+            "chat: all providers failed — " +
+                failures.joinToString(" • ") { (label, raw) -> "$label: $raw" }
+        )
+        return ChatOutcome.AllFailed(
+            failures.joinToString("  •  ") { (label, raw) ->
+                "$label: ${FriendlyErrors.shortReason(raw)}"
+            }
+        )
     }
 
     /**
@@ -84,12 +101,12 @@ class FailoverRouter(
             return "Please configure your API Key in Settings → API & Connection first."
         }
         val executor = toolExecutor ?: return "Phone tools are not available in this session."
-        val failures = mutableListOf<String>()
+        val failures = mutableListOf<Pair<String, String>>()
 
         for (config in configured) {
             val model = selectModel(config, preferReasoningModel)
             if (model.isBlank()) {
-                failures += "${config.label}: no model set"
+                failures += config.label to "no model set"
                 continue
             }
             val provider = config.toProvider()
@@ -123,6 +140,7 @@ class FailoverRouter(
                         } catch (e: Exception) {
                             JSONObject()
                         }
+                        val toolStartedAt = System.currentTimeMillis()
                         val result: ToolResult = try {
                             executor.execute(call.name, args)
                         } catch (e: Exception) {
@@ -131,6 +149,11 @@ class FailoverRouter(
                                 "Tool ${call.name} failed safely: ${e.message ?: "unexpected error"}"
                             )
                         }
+                        AppLog.d(
+                            "Agent",
+                            "tool ${call.name} ${if (result.success) "ok" else "FAILED"} " +
+                                "in ${System.currentTimeMillis() - toolStartedAt}ms"
+                        )
                         executedAnyTool = true
                         onEvent(
                             ToolEvent(
@@ -194,21 +217,117 @@ class FailoverRouter(
             } catch (e: Exception) {
                 val detail = e.message ?: "unexpected error"
                 if (executedAnyTool) {
-                    return "I took action, then ${config.label} failed before the task could finish: $detail. " +
-                        "I did not replay the task on another provider, because that could repeat a phone action."
+                    // Raw detail → AppLog only; the user-facing text
+                    // keeps the failure-detection prefix + a short cause.
+                    AppLog.e(
+                        "Agent",
+                        "agent loop died mid-task on ${config.id} after tool " +
+                            "execution (no replay): $detail"
+                    )
+                    return "I took action, then ${config.label} failed before the task " +
+                        "could finish (${FriendlyErrors.shortReason(detail)}). " +
+                        "I did not replay the task on another provider, because that " +
+                        "could repeat a phone action."
                 }
-                failures += "${config.label}: $detail"
+                failures += config.label to detail
             }
         }
-        return "I couldn't reach any provider for the agent loop: ${failures.joinToString("  •  ")}"
+        AppLog.e(
+            "Agent",
+            "agent loop: all providers failed — " +
+                failures.joinToString(" • ") { (label, raw) -> "$label: $raw" }
+        )
+        return "I couldn't reach any provider for the agent loop (" +
+            failures.joinToString("  •  ") { (label, raw) ->
+                "$label: ${FriendlyErrors.shortReason(raw)}"
+            } + "). The full error is in Settings → App Logs."
     }
 
-    private fun selectModel(config: ProviderConfig, preferReasoningModel: Boolean): String =
-        when {
+    private fun selectModel(config: ProviderConfig, preferReasoningModel: Boolean): String {
+        val chosen = when {
             preferReasoningModel && config.reasoningModel.isNotBlank() -> config.reasoningModel
             config.chatModel.isNotBlank() -> config.chatModel
             else -> config.reasoningModel
         }
+        return guardTextModel(config, chosen)
+    }
+
+    // ── F5 live-only model guard ───────────────────────────────────────
+    //
+    // A NATIVE_AUDIO model (id contains "live"/"native-audio") only
+    // speaks the Live WebSocket protocol — a REST chat completion
+    // against it returns HTTP 400 ("…only supports real-time
+    // bidirectional streaming…"). When such a model is configured as
+    // the CHAT model, substitute a text model for THIS provider, in
+    // order: (a) probe-cache WORKING text model, (b) discovered-models
+    // cache first TEXT model, (c) per-provider default. The user's
+    // configured value is never rewritten — the substitution is
+    // per-call only, and the Live model setting is untouched.
+
+    private fun guardTextModel(config: ProviderConfig, model: String): String {
+        if (model.isBlank()) return model
+        if (ModelDiscovery.classify(model) != ModelDiscovery.Kind.NATIVE_AUDIO) return model
+        val substitute = findTextSubstitute(config)
+        if (substitute == null) {
+            AppLog.w(
+                "Agent",
+                "chat model '$model' on ${config.id} is live-only and no text " +
+                    "substitute is cached — keeping it (friendly failure expected)"
+            )
+            return model
+        }
+        AppLog.w(
+            "Agent",
+            "live-only chat model '$model' on ${config.id} — substituting " +
+                "text model '$substitute' for this call"
+        )
+        val noteKey = "${config.id}|$model"
+        val shouldNote = synchronized(notedSubstitutions) {
+            if (noteKey in notedSubstitutions) {
+                false
+            } else {
+                notedSubstitutions += noteKey
+                true
+            }
+        }
+        if (shouldNote) {
+            onSystemNote(
+                "Chat model '$model' is for Live voice only — using '$substitute' here."
+            )
+        }
+        return substitute
+    }
+
+    private fun findTextSubstitute(config: ProviderConfig): String? {
+        val s = store
+        if (s != null) {
+            s.cachedProbeResults(config.id)
+                .firstOrNull {
+                    it.status == ProbeStatus.WORKING &&
+                        ModelDiscovery.classify(it.modelId) == ModelDiscovery.Kind.TEXT
+                }
+                ?.let { return it.modelId }
+            s.cachedModelIds(config.id)
+                .firstOrNull {
+                    ModelDiscovery.classify(it) == ModelDiscovery.Kind.TEXT
+                }
+                ?.let { return it }
+        }
+        return DEFAULT_TEXT_MODELS[config.id]
+    }
+
+    companion object {
+        /** Substitution source (c): sane default text model per provider. */
+        private val DEFAULT_TEXT_MODELS = mapOf(
+            "gemini" to "gemini-2.5-flash",
+            "groq" to "llama-3.3-70b-versatile",
+            "openrouter" to "openai/gpt-4o-mini"
+            // freellm / custom: none — keep the original and fail friendly.
+        )
+
+        /** "provider|liveModel" pairs already announced this process run. */
+        private val notedSubstitutions = mutableSetOf<String>()
+    }
 
     private fun serializeToolCalls(calls: List<ToolCall>): String {
         val array = JSONArray()

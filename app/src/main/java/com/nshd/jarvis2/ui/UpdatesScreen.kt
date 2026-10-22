@@ -45,6 +45,31 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v1.4.0 — Full app logs, Live diagnostics + live-only model guard",
+            body = "New: a full log system — Settings → App Logs & " +
+                "Diagnostics shows every app log live (voice, Gemini " +
+                "Live socket, API calls, agent/tools, gates, wake word, " +
+                "overlay, crashes) with level/tag filters, search, " +
+                "pause, copy, share, save-to-Downloads and clear; logs " +
+                "persist across restarts and API keys are redacted. " +
+                "Live voice diagnostics: the real reason Native Live " +
+                "fails (bad model, rejected key, gateway key, setup " +
+                "timeout after 12s, unsupported language) is now " +
+                "captured end-to-end and shown in the switch message — " +
+                "\"Native Live unavailable (reason) — switched to " +
+                "Universal\". Live-only model guard: a Live model set " +
+                "as the chat model (e.g. gemini-3.8-live) is swapped " +
+                "for a text model in chat/Universal instead of failing " +
+                "with a raw HTTP 400 — and raw provider errors are never " +
+                "spoken or shown as replies anymore. Universal voice " +
+                "now prefers Google TTS and picks its best " +
+                "network voice for your language; the Voice screen " +
+                "names the device voice it uses. Orb: the square panel " +
+                "behind the sphere is gone and the rings/orbit particles " +
+                "stay inside the orb; the Voice header no longer wraps " +
+                "and stale \"Didn't catch that\" hints clear properly."
+        )
+        InfoCard(
             title = "v1.3.1 — Voice crash hunt: crash capture + connect hardening",
             body = "Hotfix for the Voice screen closing while connecting. " +
                 "The whole connect path is hardened: speech recognition " +

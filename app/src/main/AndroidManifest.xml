@@ -95,5 +95,17 @@
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
+        <!-- F5: shares the exported log file (cacheDir/jarvis-log.txt)
+             from the App Logs viewer. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
     </application>
 </manifest>

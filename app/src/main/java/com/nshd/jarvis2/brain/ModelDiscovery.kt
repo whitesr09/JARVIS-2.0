@@ -1,5 +1,6 @@
 package com.nshd.jarvis2.brain
 
+import com.nshd.jarvis2.core.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -71,10 +72,23 @@ object ModelDiscovery {
                 .header("Content-Type", "application/json")
                 .get()
                 .build()
+            val modelsHost = try {
+                java.net.URI(config.baseUrl.trimEnd('/')).host ?: "endpoint"
+            } catch (e: Exception) {
+                "endpoint"
+            }
+            val fetchStartedAt = System.currentTimeMillis()
             try {
                 client.newCall(request).execute().use { response ->
                     val bodyText = response.body?.string().orEmpty()
+                    val fetchMs = System.currentTimeMillis() - fetchStartedAt
                     if (!response.isSuccessful) {
+                        AppLog.e(
+                            "API",
+                            "${config.id} GET $modelsHost/models → HTTP " +
+                                "${response.code} in ${fetchMs}ms: " +
+                                bodyText.replace('\n', ' ').take(300)
+                        )
                         val brief = bodyText.replace('\n', ' ').take(140)
                         return@withContext Result.failure(
                             AiException(
@@ -84,6 +98,11 @@ object ModelDiscovery {
                         )
                     }
                     val ids = parseIds(bodyText)
+                    AppLog.d(
+                        "API",
+                        "${config.id} GET $modelsHost/models → 200 in " +
+                            "${fetchMs}ms (${ids.size} models)"
+                    )
                     if (ids.isEmpty()) {
                         Result.failure(
                             AiException("The provider returned no models")
@@ -93,6 +112,11 @@ object ModelDiscovery {
                     }
                 }
             } catch (e: IOException) {
+                AppLog.e(
+                    "API",
+                    "${config.id} GET $modelsHost/models network error: " +
+                        (e.message ?: "unreachable")
+                )
                 Result.failure(
                     AiException("Network error: ${e.message ?: "unreachable"}")
                 )

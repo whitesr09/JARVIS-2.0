@@ -3,6 +3,7 @@ package com.nshd.jarvis2.brain
 import android.content.Context
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.tools.ToolExecutor
+import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.hands.DeepIntents
 import com.nshd.jarvis2.hands.TaskState
 import com.nshd.jarvis2.memory.MemoryCategories
@@ -87,6 +88,7 @@ object AgentPipeline {
     ): String = withContext(Dispatchers.IO) {
         val clean = text.trim()
         if (clean.isBlank()) return@withContext "I didn't catch that — please try again."
+        AppLog.d("Agent", "turn received (${clean.length} chars)")
 
         val hudEvent: (ToolEvent) -> Unit = { event ->
             TaskState.step(event.hudText)
@@ -192,7 +194,14 @@ object AgentPipeline {
             messages += ChatMsg("user", userText)
         }
         val executor = ToolExecutor(context, memoryDb, ledger)
-        return FailoverRouter(providerStore.orderedConfigs(), executor).agentLoop(
+        return FailoverRouter(
+            configsInOrder = providerStore.orderedConfigs(),
+            toolExecutor = executor,
+            store = providerStore,
+            onSystemNote = { note ->
+                onEvent(ToolEvent(ToolEventKind.INFO, "", note))
+            }
+        ).agentLoop(
             systemAndHistory = messages,
             maxSteps = 10,
             preferReasoningModel = codeMode,
@@ -221,6 +230,7 @@ object AgentPipeline {
         onAssistantDelta: (String) -> Unit
     ): String {
         val items = TaskQueue.submit(titles)
+        AppLog.i("Agent", "queue split into ${items.size} tasks")
         var done = 0
         var failed = 0
         val lines = mutableListOf<String>()
@@ -252,9 +262,21 @@ object AgentPipeline {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                "Failed: ${e.message ?: "unexpected error"}"
+                // Raw text → AppLog; the queue summary line is friendly.
+                AppLog.e(
+                    "Agent",
+                    "sub-task '${item.title.take(40)}' crashed: " +
+                        (e.message ?: "unexpected error"),
+                    e
+                )
+                "Failed: " + com.nshd.jarvis2.ui.FriendlyErrors.shortReason(e.message)
             }
             val ok = !isFailureResult(result)
+            AppLog.d(
+                "Agent",
+                "task ${index + 1}/${items.size} '${item.title.take(40)}' → " +
+                    if (ok) "done" else "failed"
+            )
             if (ok) {
                 TaskQueue.markDone(item.id)
                 done++
@@ -302,7 +324,11 @@ object AgentPipeline {
      */
     private suspend fun splitTasks(text: String, providerStore: ProviderStore): List<String> {
         try {
-            val outcome = FailoverRouter(providerStore.orderedConfigs(), null).chat(
+            val outcome = FailoverRouter(
+                configsInOrder = providerStore.orderedConfigs(),
+                toolExecutor = null,
+                store = providerStore
+            ).chat(
                 messages = listOf(
                     ChatMsg("system", SPLIT_SYSTEM_PROMPT),
                     ChatMsg("user", text)

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- F5: paths the FileProvider may share — only the app cache, which
+     holds the exported jarvis-log.txt from the App Logs viewer. -->
+<paths>
+    <cache-path name="cache" path="." />
+</paths>

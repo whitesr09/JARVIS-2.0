@@ -218,8 +218,17 @@ fun ChatScreen(
                 streamingText = synchronized(streamBuffer) { streamBuffer.toString() }
                 appendAssistant(reply)
             } catch (e: Exception) {
+                // F5 error hygiene: the raw exception goes to AppLog;
+                // the chat bubble is the friendly headline only.
+                com.nshd.jarvis2.core.AppLog.e(
+                    "Agent",
+                    "chat send failed: ${e.message ?: "unexpected error"}",
+                    e
+                )
                 appendAssistant(
-                    "I hit a problem handling that: ${e.message ?: "unexpected error"}"
+                    "I couldn't reach the model (" +
+                        FriendlyErrors.shortReason(e.message) +
+                        "). The full error is in Settings → App Logs."
                 )
             } finally {
                 resetStream()

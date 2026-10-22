@@ -31,21 +31,36 @@ object ConfirmGate {
     suspend fun confirm(description: String): Boolean {
         // Only one native prompt can be meaningfully answered at a time.
         synchronized(this) {
-            if (deferred?.isActive == true) return false
+            if (deferred?.isActive == true) {
+                com.nshd.jarvis2.core.AppLog.w(
+                    "Gate", "prompt suppressed (another is open): ${description.take(80)}"
+                )
+                return false
+            }
         }
+        com.nshd.jarvis2.core.AppLog.d("Gate", "prompt: ${description.take(100)}")
         val answer = CompletableDeferred<Boolean>()
         val item = PendingConfirm(nextId.getAndIncrement(), description)
         synchronized(this) {
             deferred = answer
             _pending.value = item
         }
-        val approved = withTimeoutOrNull(30_000) { answer.await() } ?: false
+        val answered = withTimeoutOrNull(30_000) { answer.await() }
         synchronized(this) {
             if (deferred === answer) {
                 deferred = null
                 _pending.value = null
             }
         }
+        val approved = answered ?: false
+        com.nshd.jarvis2.core.AppLog.i(
+            "Gate",
+            "decision: " + when {
+                answered == null -> "timeout (deny)"
+                approved -> "allow"
+                else -> "deny"
+            } + " — ${description.take(60)}"
+        )
         return approved
     }
 
