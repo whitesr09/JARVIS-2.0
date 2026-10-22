@@ -75,6 +75,9 @@ class WakeWordService : Service(), RecognitionListener {
 
     override fun onCreate() {
         super.onCreate()
+        // F4.1: crash capture (idempotent — whichever entry point runs
+        // first in the process installs the handler).
+        com.nshd.jarvis2.CrashLogger.install(this)
         running = true
         createNotificationChannel()
         startForegroundCompat("Starting wake-word listener…")
@@ -119,6 +122,7 @@ class WakeWordService : Service(), RecognitionListener {
 
     override fun onDestroy() {
         running = false
+        WakeWordControl.setWakeMicHeld(false)
         WakeWordControl.clearSessionHook()
         batteryReceiver?.let { runCatching { unregisterReceiver(it) } }
         batteryReceiver = null
@@ -142,6 +146,30 @@ class WakeWordService : Service(), RecognitionListener {
         engineStarting = true
         scope.launch {
             try {
+                // F4.1 Vosk integrity gate: a PARTIAL model directory
+                // (interrupted download — the user's was seen at 1%)
+                // must never reach the native Model constructor: Vosk's
+                // JNI load can abort the whole process on a truncated
+                // model, which no Java try/catch can intercept. Verify
+                // completeness first; if it fails, delete the partial
+                // tree and ask for a re-download instead of crashing.
+                if (!VoskModelManager.isModelComplete(this@WakeWordService)) {
+                    com.nshd.jarvis2.CrashLogger.logNonFatal(
+                        "wake",
+                        "Vosk model directory incomplete — deleting partial download, " +
+                            "refusing to construct Model"
+                    )
+                    VoskModelManager.deleteModel(this@WakeWordService)
+                    WakeState.set(
+                        WakeStatus(
+                            enabled = true,
+                            listening = false,
+                            detail = "Wake model incomplete — re-download in Settings"
+                        )
+                    )
+                    updateNotification("Wake word model incomplete — open Jarvis to re-download")
+                    return@launch
+                }
                 val loadedModel = Model(VoskModelManager.modelPath(this@WakeWordService))
                 val rec = Recognizer(loadedModel, SAMPLE_RATE, GRAMMAR)
                 val speech = SpeechService(rec, SAMPLE_RATE)
@@ -177,7 +205,10 @@ class WakeWordService : Service(), RecognitionListener {
             try {
                 speechService?.startListening(this@WakeWordService)
                 listeningNow = true
+                // F4.1: publish the real mic state for the arbiter.
+                WakeWordControl.setWakeMicHeld(true)
             } catch (e: Exception) {
+                WakeWordControl.setWakeMicHeld(false)
                 WakeState.set(
                     WakeStatus(
                         enabled = true,
@@ -192,6 +223,7 @@ class WakeWordService : Service(), RecognitionListener {
         } else if (!shouldListen && listeningNow) {
             runCatching { speechService?.stop() }
             listeningNow = false
+            WakeWordControl.setWakeMicHeld(false)
         }
         val detail = when {
             listeningNow -> "Listening for \"Hey Jarvis\""
@@ -235,6 +267,10 @@ class WakeWordService : Service(), RecognitionListener {
         // A recognizer error must never crash the service: stop the loop,
         // report, and let a later resume/restart rebuild it.
         listeningNow = false
+        WakeWordControl.setWakeMicHeld(false)
+        if (exception != null) {
+            com.nshd.jarvis2.CrashLogger.logNonFatal("wake", exception)
+        }
         WakeState.set(
             WakeStatus(
                 enabled = true,
@@ -279,6 +315,7 @@ class WakeWordService : Service(), RecognitionListener {
         // Release the mic immediately so the voice session can take it.
         runCatching { speechService?.stop() }
         listeningNow = false
+        WakeWordControl.setWakeMicHeld(false)
         pauseReasons += REASON_WAKE_TRANSIENT
         acquireWakeLockBriefly()
         chime.playEarcon()

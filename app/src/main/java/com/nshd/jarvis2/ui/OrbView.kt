@@ -370,11 +370,23 @@ private fun hue2Rgb(p: Float, q: Float, tIn: Float): Float {
 
 /** GLSL smoothstep (edges in increasing order). */
 private fun smoothstep(edge0: Float, edge1: Float, x: Float): Float {
-    val t = ((x - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
+    val t = ((x - edge0) / (edge1 - edge0)).fin().coerceIn(0f, 1f)
     return t * t * (3f - 2f * t)
 }
 
 private fun mix(a: Float, b: Float, t: Float): Float = a + (b - a) * t
+
+// F4.1 finite guards: Kotlin's coerceIn lets NaN straight through, and
+// Compose's Color() / draw calls throw IllegalArgumentException on a
+// NaN channel or coordinate — a process crash inside the frame loop.
+// Every value that reaches a draw call is funnelled through these.
+
+/** NaN / ±Inf → [fallback]; finite values pass through unchanged. */
+private fun Float.fin(fallback: Float = 0f): Float =
+    if (isFinite()) this else fallback
+
+/** Finite AND clamped to the 0..1 colour-channel range. */
+private fun Float.c01(): Float = fin().coerceIn(0f, 1f)
 
 // ── Precomputed scene (particle field + orbit parameters) ───────────
 
@@ -489,9 +501,11 @@ private class OrbAnimState {
         liveAudio: Boolean
     ) {
         inputState = state
-        inputAmp = amplitude.coerceIn(0f, 1f)
-        inputBass = (bass ?: amplitude).coerceIn(0f, 1f)
-        inputHigh = (high ?: amplitude).coerceIn(0f, 1f)
+        // F4.1: amplitude sources (audio RMS) must never inject NaN
+        // into the animation state — c01() replaces it with 0.
+        inputAmp = amplitude.c01()
+        inputBass = (bass ?: amplitude).c01()
+        inputHigh = (high ?: amplitude).c01()
         // Supplying bass/high counts as a live feed too (same rule
         // the previous implementation used).
         inputLive = liveAudio || bass != null || high != null
@@ -619,12 +633,15 @@ private fun DrawScope.drawOrbFrame(
     @Suppress("UNUSED_VARIABLE")
     val frameTick = tick
 
+    // F4.1: a non-finite or empty size must skip the frame entirely —
+    // drawing with NaN geometry throws inside Canvas.
+    if (!size.minDimension.isFinite() || size.minDimension <= 0f) return
     val cx = size.width / 2f
     val cy = size.height / 2f
     // Sphere radius in px: rings reach 1.39 units (plus pulse), the
     // glow 1.28 — 0.33 of the min dimension keeps both on-canvas.
     val radius = size.minDimension * 0.33f
-    if (radius <= 0f) return
+    if (!radius.isFinite() || radius <= 0f) return
 
     // Effective per-frame values: animated state, or one static pose
     // for reduced motion (state row applied directly, half amplitude).
@@ -644,8 +661,8 @@ private fun DrawScope.drawOrbFrame(
         angleY = 0.6f
         ring1Angle = 0.35f
         ring2Angle = -0.25f
-        level = amplitude.coerceIn(0f, 1f) * 0.5f
-        bassV = (bass ?: amplitude).coerceIn(0f, 1f) * 0.5f
+        level = amplitude.c01() * 0.5f
+        bassV = (bass ?: amplitude).c01() * 0.5f
         tintMix = if (state == OrbState.ERROR) ERR_MIX else 0f
     } else {
         curP = anim.cur
@@ -673,7 +690,7 @@ private fun DrawScope.drawOrbFrame(
     val brightEff = curP[P_BRIGHT] + idlePulse
     // Glow strength per the HTML update loop.
     val glowStrength = glowP + level * 0.6f + idlePulse * 2f
-    val glowAlpha = (glowStrength * 0.16f + level * 0.05f).coerceIn(0f, 0.5f)
+    val glowAlpha = (glowStrength * 0.16f + level * 0.05f).fin().coerceIn(0f, 0.5f)
 
     fillEffectivePalette(palette, tintMix, anim)
     val effDeep = anim.effDeep
@@ -698,10 +715,10 @@ private fun DrawScope.drawOrbFrame(
             brush = Brush.radialGradient(
                 colors = listOf(
                     Color(
-                        red = palette.shadowR,
-                        green = palette.shadowG,
-                        blue = palette.shadowB,
-                        alpha = palette.shadowAlpha
+                        red = palette.shadowR.c01(),
+                        green = palette.shadowG.c01(),
+                        blue = palette.shadowB.c01(),
+                        alpha = palette.shadowAlpha.c01()
                     ),
                     Color.Transparent
                 ),
@@ -720,16 +737,16 @@ private fun DrawScope.drawOrbFrame(
             brush = Brush.radialGradient(
                 colorStops = arrayOf(
                     0f to Color(
-                        red = effPurp[0].coerceIn(0f, 1f),
-                        green = effPurp[1].coerceIn(0f, 1f),
-                        blue = effPurp[2].coerceIn(0f, 1f),
+                        red = effPurp[0].c01(),
+                        green = effPurp[1].c01(),
+                        blue = effPurp[2].c01(),
                         alpha = glowAlpha
                     ),
                     0.55f to Color(
-                        red = effBlue[0].coerceIn(0f, 1f),
-                        green = effBlue[1].coerceIn(0f, 1f),
-                        blue = effBlue[2].coerceIn(0f, 1f),
-                        alpha = glowAlpha * 0.55f
+                        red = effBlue[0].c01(),
+                        green = effBlue[1].c01(),
+                        blue = effBlue[2].c01(),
+                        alpha = (glowAlpha * 0.55f).c01()
                     ),
                     1f to Color.Transparent
                 ),
@@ -807,16 +824,19 @@ private fun DrawScope.drawOrbFrame(
         cb = mix(effDeep[2], cb, dm)
         val mult = brightEff * (0.6f + 0.4f * depth01)
 
+        // maxOf() lets NaN WIN over the floor — sanitise first, and
+        // skip the particle entirely if its geometry went non-finite.
         val pointRadius = maxOf(
             radius * scene.sizeBase[i] * (0.85f + 0.35f * depth01) * sizeAmp,
             0.7f
-        )
+        ).fin(0.7f)
+        if (!px.isFinite() || !py.isFinite()) continue
         drawCircle(
             color = Color(
-                red = (cr * mult).coerceIn(0f, 1f),
-                green = (cg * mult).coerceIn(0f, 1f),
-                blue = (cb * mult).coerceIn(0f, 1f),
-                alpha = 0.22f + 0.78f * depth01
+                red = (cr * mult).c01(),
+                green = (cg * mult).c01(),
+                blue = (cb * mult).c01(),
+                alpha = (0.22f + 0.78f * depth01).c01()
             ),
             radius = pointRadius,
             center = Offset(px, py)
@@ -841,9 +861,10 @@ private fun DrawScope.drawOrbFrame(
         val py = cy + y * radius * persp
         val depth01 = smoothstep(-1.3f, 1.3f, z)
         val alphaO = ((0.5f + 0.5f * sin(time * fs * 1.6f + ph)).pow(1.5f) *
-            (0.55f + glowP * 0.3f)).coerceIn(0f, 1f)
+            (0.55f + glowP * 0.3f)).c01()
         // Diameter 1–3.2 dp (radius half of that), depth-scaled.
         val sizePx = (0.5f + scene.oSizeRnd[j] * 1.1f) * density * (0.7f + 0.6f * depth01)
+        if (!px.isFinite() || !py.isFinite() || !sizePx.isFinite()) continue
         val colArr = when (j % 3) {
             0 -> effCyan
             1 -> effBlue
@@ -851,9 +872,9 @@ private fun DrawScope.drawOrbFrame(
         }
         drawCircle(
             color = Color(
-                red = colArr[0].coerceIn(0f, 1f),
-                green = colArr[1].coerceIn(0f, 1f),
-                blue = colArr[2].coerceIn(0f, 1f),
+                red = colArr[0].c01(),
+                green = colArr[1].c01(),
+                blue = colArr[2].c01(),
                 alpha = alphaO
             ),
             radius = sizePx,
@@ -908,7 +929,11 @@ private fun DrawScope.drawOrbRing(
             val am = a - step / 2f
             val m = smoothstep(-0.25f, 0.35f, sin(am * segs + phase)) *
                 smoothstep(-0.9f, -0.2f, sin(am + seed * 0.7f))
-            if (m >= 0.03f) {
+            // NaN mask fails this comparison too (NaN >= x is false),
+            // but the endpoints still get an explicit finite check.
+            if (m >= 0.03f && px.isFinite() && py.isFinite() &&
+                prevX.isFinite() && prevY.isFinite()
+            ) {
                 // HTML ring colour: mix(mix(CYAN, BLUE, s1), violet, s2).
                 val w1 = 0.5f + 0.5f * sin(am + seed)
                 val w2 = 0.5f + 0.5f * sin(am * 2f - seed)
@@ -917,10 +942,10 @@ private fun DrawScope.drawOrbRing(
                 val cb = mix(mix(effCyan[2], effBlue[2], w1), effPurp[2], w2)
                 drawLine(
                     color = Color(
-                        red = cr.coerceIn(0f, 1f),
-                        green = cg.coerceIn(0f, 1f),
-                        blue = cb.coerceIn(0f, 1f),
-                        alpha = (m * baseAlpha).coerceIn(0f, 1f)
+                        red = cr.c01(),
+                        green = cg.c01(),
+                        blue = cb.c01(),
+                        alpha = (m * baseAlpha).c01()
                     ),
                     start = Offset(prevX, prevY),
                     end = Offset(px, py),

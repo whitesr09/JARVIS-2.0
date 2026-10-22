@@ -1,6 +1,8 @@
 package com.nshd.jarvis2.voice
 
 import android.content.Context
+import android.os.Looper
+import com.nshd.jarvis2.CrashLogger
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.AgentPipeline
 import com.nshd.jarvis2.brain.ExecutionLedger
@@ -139,6 +141,13 @@ object VoiceSessionManager {
     @Volatile
     private var liveLedger = ExecutionLedger()
 
+    // F4.1 stage-log one-shot flags (reset per engine start).
+    @Volatile
+    private var liveFirstFrameLogged = false
+
+    @Volatile
+    private var universalFirstPartialLogged = false
+
     /**
      * F3 voice auto-listen guard: set when a media-play tool succeeds.
      * While set, UniversalVoice must NOT auto-restart the recognizer —
@@ -213,18 +222,36 @@ object VoiceSessionManager {
         pipelineDone = true
         ttsSpeaking = false
         _captions.value = emptyList()
-        // Mic arbitration (Level 6): the wake-word service releases the
-        // microphone while a voice session owns it, and resumes after.
-        runCatching { WakeWordControl.setSessionActive(true) }
+        CrashLogger.stage(TAG, "session start (engine setting=${settings.voiceEngine})")
+        // F4.1 mic arbitration handshake: the wake-word service must
+        // have FULLY released the microphone (Vosk SpeechService stop
+        // is asynchronous) before any engine touches it — two live mic
+        // consumers racing is a classic OEM-stack crash. The engine
+        // starts only after acquireForSession confirms the mic is free
+        // (or the short timeout elapses, which is logged).
+        scope.launch {
+            CrashLogger.stage(TAG, "mic acquire: begin")
+            val acquired = WakeWordControl.acquireForSession(MIC_ACQUIRE_TIMEOUT_MS)
+            CrashLogger.stage(TAG, "mic acquire: acquired=$acquired")
+            if (!active) return@launch
+            beginEngine()
+        }
+    }
 
-        val gemini = providerStore.loadConfig(ProviderPresets.GEMINI.id)
-        val liveModelLooksNative = settings.liveModel.contains("live", ignoreCase = true) ||
-            settings.liveModel.contains("native-audio", ignoreCase = true)
-        when (parseEngine(settings.voiceEngine)) {
+    /** Engine selection — runs on Main, after the mic handshake. */
+    private fun beginEngine() {
+        val store = providerStore ?: return
+        val s = settings ?: return
+        val gemini = store.loadConfig(ProviderPresets.GEMINI.id)
+        val liveModelLooksNative = s.liveModel.contains("live", ignoreCase = true) ||
+            s.liveModel.contains("native-audio", ignoreCase = true)
+        val engine = parseEngine(s.voiceEngine)
+        CrashLogger.stage(TAG, "engine chosen: $engine")
+        when (engine) {
             VoiceEngine.UNIVERSAL -> startUniversal()
             VoiceEngine.NATIVE -> startLive()
             VoiceEngine.AUTO -> {
-                val nativeOk = providerStore.activeProviderId() == ProviderPresets.GEMINI.id &&
+                val nativeOk = store.activeProviderId() == ProviderPresets.GEMINI.id &&
                     gemini.apiKey.isNotBlank() && liveModelLooksNative
                 if (nativeOk) startLive() else startUniversal()
             }
@@ -396,6 +423,7 @@ object VoiceSessionManager {
     }
 
     private fun fail(message: String) {
+        CrashLogger.stage(TAG, "fail: $message")
         pulseJob?.cancel()
         teardownLive()
         universal?.shutdown()
@@ -418,6 +446,8 @@ object VoiceSessionManager {
         val db = memoryDb ?: return
         val gemini = store.loadConfig(ProviderPresets.GEMINI.id)
         val voice = s.customVoiceName.ifBlank { s.voiceName }
+        liveFirstFrameLogged = false
+        CrashLogger.stage(TAG, "live: connect begin model=${s.liveModel}")
 
         _uiState.value = VoiceUiState(
             status = VoiceStatus.CONNECTING,
@@ -437,6 +467,7 @@ object VoiceSessionManager {
         playback.muted = isSilent
         playback.start()
         player = playback
+        CrashLogger.stage(TAG, "live: audio player started")
 
         scope.launch {
             val facts = withContext(Dispatchers.IO) { db.allFacts(null, null) }
@@ -457,6 +488,7 @@ object VoiceSessionManager {
             )
             client = liveClient
             liveClient.connect()
+            CrashLogger.stage(TAG, "live: ws connect issued")
             // connect() can fail synchronously (blank key) and switch
             // the session to Universal — only forward frames if the
             // session is still on the Live engine.
@@ -497,6 +529,16 @@ object VoiceSessionManager {
      * real error.
      */
     private fun handleLiveFailure(message: String) {
+        // F4.1: this is called from GeminiLiveClient callbacks, which
+        // run on OkHttp WebSocket threads. The Universal switch below
+        // constructs SpeechRecognizer / TextToSpeech — main-thread-only
+        // APIs whose off-main use is a prime "crashes while connecting"
+        // suspect — so the whole failure path is marshalled to Main.
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            scope.launch { handleLiveFailure(message) }
+            return
+        }
+        CrashLogger.stage(TAG, "live failure: $message")
         if (!active || reconnecting) return
         if (!liveSwitchedToUniversal && settings != null) {
             liveSwitchedToUniversal = true
@@ -519,6 +561,7 @@ object VoiceSessionManager {
     private class LiveListener : GeminiLiveClient.Listener {
         override fun onSetupComplete() {
             if (!active) return
+            CrashLogger.stage(TAG, "live: setupComplete received")
             reconnectAttempts = 0
             reconnecting = false
             val captureDevice = AudioCapture(
@@ -531,7 +574,9 @@ object VoiceSessionManager {
                 onError = { message -> if (active) fail(message) }
             )
             capture = captureDevice
+            CrashLogger.stage(TAG, "live: audio capture start")
             if (captureDevice.start()) {
+                CrashLogger.stage(TAG, "live: capture running — LISTENING")
                 setStatus(VoiceStatus.LISTENING)
             } else if (active) {
                 // AudioCapture already reported via onError; if it returns
@@ -557,6 +602,10 @@ object VoiceSessionManager {
 
         override fun onAudioChunk(bytes: ByteArray) {
             if (!active) return
+            if (!liveFirstFrameLogged) {
+                liveFirstFrameLogged = true
+                CrashLogger.stage(TAG, "live: first audio frame received")
+            }
             player?.enqueue(bytes)
             if (_uiState.value.status != VoiceStatus.SPEAKING) {
                 setStatus(VoiceStatus.SPEAKING)
@@ -708,6 +757,16 @@ object VoiceSessionManager {
     // ── UNIVERSAL path ─────────────────────────────────────────────────
 
     private fun startUniversal() {
+        // F4.1: SpeechRecognizer / TextToSpeech are main-thread-only.
+        // However we got here (UI tap — fine; a Live failure marshalled
+        // through handleLiveFailure — also fine; any future caller),
+        // never construct the engine off Main.
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            scope.launch { startUniversal() }
+            return
+        }
+        CrashLogger.stage(TAG, "universal: engine start")
+        universalFirstPartialLogged = false
         val s = settings ?: return
         val store = providerStore ?: return
         teardownLive()
@@ -738,6 +797,7 @@ object VoiceSessionManager {
         pipelineDone = true
         pipelineRunning = false
         setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
+        CrashLogger.stage(TAG, "universal: recognizer ready — listening")
         if (!_uiState.value.micMuted) uv.startListening()
     }
 
@@ -750,11 +810,16 @@ object VoiceSessionManager {
     private class UniversalListener : UniversalVoice.Listener {
         override fun onPartialResult(text: String) {
             if (!active) return
+            if (!universalFirstPartialLogged) {
+                universalFirstPartialLogged = true
+                CrashLogger.stage(TAG, "universal: first partial result")
+            }
             setTurnCaption(fromUser = true, text = text, partial = true)
         }
 
         override fun onFinalResult(text: String) {
             if (!active) return
+            CrashLogger.stage(TAG, "universal: final result received")
             setTurnCaption(fromUser = true, text = text, partial = false)
             userCaptionIndex = -1
             setStatus(VoiceStatus.THINKING)
@@ -1053,4 +1118,6 @@ object VoiceSessionManager {
     private const val LIVE_PREFS = "jarvis_live_session"
     private const val KEY_RESUMPTION_HANDLE = "resumption_handle"
     private const val MAX_RECONNECTS = 3
+    private const val TAG = "voice"
+    private const val MIC_ACQUIRE_TIMEOUT_MS = 900L
 }

@@ -1,6 +1,7 @@
 package com.nshd.jarvis2.voice
 
 import android.util.Base64
+import com.nshd.jarvis2.CrashLogger
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
@@ -153,17 +154,21 @@ class GeminiLiveClient(
     fun sendAudioChunk(pcm: ByteArray) {
         val ws = webSocket ?: return
         if (!setupComplete || pcm.isEmpty()) return
-        val payload = JSONObject()
-            .put(
-                "realtimeInput",
-                JSONObject().put(
-                    "audio",
-                    JSONObject()
-                        .put("mimeType", "audio/pcm;rate=16000")
-                        .put("data", Base64.encodeToString(pcm, Base64.NO_WRAP))
+        // F4.1: a send racing socket teardown must never throw into the
+        // capture thread feeding it.
+        runCatching {
+            val payload = JSONObject()
+                .put(
+                    "realtimeInput",
+                    JSONObject().put(
+                        "audio",
+                        JSONObject()
+                            .put("mimeType", "audio/pcm;rate=16000")
+                            .put("data", Base64.encodeToString(pcm, Base64.NO_WRAP))
+                    )
                 )
-            )
-        ws.send(payload.toString())
+            ws.send(payload.toString())
+        }.onFailure { CrashLogger.logNonFatal("live", it) }
     }
 
     /**
@@ -174,37 +179,41 @@ class GeminiLiveClient(
     fun sendVideoFrame(jpeg: ByteArray) {
         val ws = webSocket ?: return
         if (!setupComplete || jpeg.isEmpty()) return
-        val payload = JSONObject()
-            .put(
-                "realtimeInput",
-                JSONObject().put(
-                    "video",
-                    JSONObject()
-                        .put("mimeType", "image/jpeg")
-                        .put("data", Base64.encodeToString(jpeg, Base64.NO_WRAP))
+        runCatching {
+            val payload = JSONObject()
+                .put(
+                    "realtimeInput",
+                    JSONObject().put(
+                        "video",
+                        JSONObject()
+                            .put("mimeType", "image/jpeg")
+                            .put("data", Base64.encodeToString(jpeg, Base64.NO_WRAP))
+                    )
                 )
-            )
-        ws.send(payload.toString())
+            ws.send(payload.toString())
+        }.onFailure { CrashLogger.logNonFatal("live", it) }
     }
 
     /** Return one locally executed tool result to the Live model. */
     fun sendToolResponse(id: String, name: String, result: JSONObject) {
         val ws = webSocket ?: return
-        val functionResponse = JSONObject()
-            .put("id", id)
-            .put("name", name)
-            .put(
-                "response",
-                JSONObject().put("result", result.toString())
+        runCatching {
+            val functionResponse = JSONObject()
+                .put("id", id)
+                .put("name", name)
+                .put(
+                    "response",
+                    JSONObject().put("result", result.toString())
+                )
+            val payload = JSONObject().put(
+                "tool_response",
+                JSONObject().put(
+                    "function_responses",
+                    JSONArray().put(functionResponse)
+                )
             )
-        val payload = JSONObject().put(
-            "tool_response",
-            JSONObject().put(
-                "function_responses",
-                JSONArray().put(functionResponse)
-            )
-        )
-        ws.send(payload.toString())
+            ws.send(payload.toString())
+        }.onFailure { CrashLogger.logNonFatal("live", it) }
     }
 
     /** Deliberate teardown — no error/closed callbacks are surfaced after this. */
@@ -282,9 +291,19 @@ class GeminiLiveClient(
         val root = try {
             JSONObject(text)
         } catch (e: Exception) {
+            // Malformed / partial frame: log + ignore, never throw out
+            // of the socket listener (it runs on an OkHttp thread).
+            CrashLogger.logNonFatal("live", "malformed frame ignored")
             return
         }
+        try {
+            handleParsedMessage(root)
+        } catch (e: Throwable) {
+            CrashLogger.logNonFatal("live", e)
+        }
+    }
 
+    private fun handleParsedMessage(root: JSONObject) {
         if (root.has("setupComplete")) {
             markSetupComplete()
             return
@@ -393,52 +412,89 @@ class GeminiLiveClient(
         }
     }
 
+    // F4.1: EVERY callback body is wrapped in try/catch(Throwable).
+    // These run on OkHttp dispatcher threads, where an escaping
+    // exception becomes an uncaught process crash — and the callbacks
+    // dispatch straight into the session manager (audio start, engine
+    // switch, UI state). Faults are logged to the session log and, for
+    // onOpen, still routed into the normal failure handling.
     private inner class SocketListener(private val gen: Int) : WebSocketListener() {
         private val stale: Boolean get() = gen != connectionGeneration
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            if (stale) return
-            webSocket.send(buildSetupJson())
+            try {
+                if (stale) return
+                CrashLogger.stage("live", "ws open — sending setup")
+                webSocket.send(buildSetupJson())
+            } catch (e: Throwable) {
+                CrashLogger.logNonFatal("live", e)
+                if (!closedByUser && !stale) {
+                    runCatching {
+                        listener.onFailure("Live connection failed: ${e.message ?: "setup failed"}")
+                    }
+                }
+            }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
-            if (stale) return
-            handleMessage(text)
+            try {
+                if (stale) return
+                handleMessage(text)
+            } catch (e: Throwable) {
+                CrashLogger.logNonFatal("live", e)
+            }
         }
 
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-            if (stale) return
-            // The Live API speaks JSON text frames; tolerate binary-wrapped JSON too.
-            handleMessage(bytes.utf8())
+            try {
+                if (stale) return
+                // The Live API speaks JSON text frames; tolerate binary-wrapped JSON too.
+                handleMessage(bytes.utf8())
+            } catch (e: Throwable) {
+                CrashLogger.logNonFatal("live", e)
+            }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            if (closedByUser || stale) return
-            val detail = t.message ?: response?.let { "HTTP ${it.code}" } ?: "unknown error"
-            // Some revisions deliver the language rejection as a socket
-            // failure instead of an error object — same one-time retry.
-            if (!setupComplete && isLanguageError(detail) &&
-                currentLanguageCode != null && !languageRetried
-            ) {
-                retryWithoutLanguage()
-                return
+            CrashLogger.logNonFatal("live", t)
+            try {
+                if (closedByUser || stale) return
+                val detail = t.message ?: response?.let { "HTTP ${it.code}" } ?: "unknown error"
+                // Some revisions deliver the language rejection as a socket
+                // failure instead of an error object — same one-time retry.
+                if (!setupComplete && isLanguageError(detail) &&
+                    currentLanguageCode != null && !languageRetried
+                ) {
+                    retryWithoutLanguage()
+                    return
+                }
+                listener.onFailure("Live connection failed: $detail")
+            } catch (e: Throwable) {
+                CrashLogger.logNonFatal("live", e)
             }
-            listener.onFailure("Live connection failed: $detail")
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-            webSocket.close(1000, null)
+            try {
+                webSocket.close(1000, null)
+            } catch (e: Throwable) {
+                CrashLogger.logNonFatal("live", e)
+            }
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            if (closedByUser || stale) return
-            if (!setupComplete && isLanguageError(reason) &&
-                currentLanguageCode != null && !languageRetried
-            ) {
-                retryWithoutLanguage()
-                return
+            try {
+                if (closedByUser || stale) return
+                if (!setupComplete && isLanguageError(reason) &&
+                    currentLanguageCode != null && !languageRetried
+                ) {
+                    retryWithoutLanguage()
+                    return
+                }
+                listener.onClosed(reason.ifBlank { "Session closed (code $code)" })
+            } catch (e: Throwable) {
+                CrashLogger.logNonFatal("live", e)
             }
-            listener.onClosed(reason.ifBlank { "Session closed (code $code)" })
         }
     }
 

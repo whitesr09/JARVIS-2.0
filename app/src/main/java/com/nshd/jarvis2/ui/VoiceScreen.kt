@@ -301,18 +301,39 @@ private fun VoiceSessionBody(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onErrorContainer
                 )
-                if (mapped.rawDetail != null) {
-                    TextButton(
-                        onClick = { showDetails = !showDetails },
-                        modifier = Modifier.padding(top = 2.dp)
-                    ) {
-                        Text(if (showDetails) "Hide details" else "Details")
-                    }
-                    if (showDetails) {
+                // F4.1: the expander always exists now — besides the
+                // raw provider string it shows the last CrashLogger
+                // stage lines, so a screenshot of this card tells us
+                // exactly how far the connect sequence got before it
+                // died. Plain reads in the branch (no remember — the
+                // F4 conditional-remember lesson).
+                TextButton(
+                    onClick = { showDetails = !showDetails },
+                    modifier = Modifier.padding(top = 2.dp)
+                ) {
+                    Text(if (showDetails) "Hide details" else "Details")
+                }
+                if (showDetails) {
+                    if (mapped.rawDetail != null) {
                         Text(
                             text = mapped.rawDetail,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    val stageTail = com.nshd.jarvis2.CrashLogger
+                        .sessionLogTail(
+                            androidx.compose.ui.platform.LocalContext.current,
+                            15
+                        )
+                    if (stageTail.isNotEmpty()) {
+                        Text(
+                            text = stageTail.joinToString("\n"),
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp)
                         )
                     }
                 }

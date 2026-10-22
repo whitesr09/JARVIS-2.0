@@ -45,6 +45,23 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v1.3.1 — Voice crash hunt: crash capture + connect hardening",
+            body = "Hotfix for the Voice screen closing while connecting. " +
+                "The whole connect path is hardened: speech recognition " +
+                "and text-to-speech are now strictly main-thread, the " +
+                "wake-word recognizer must fully release the microphone " +
+                "before a session starts (mic handshake), WebSocket " +
+                "callbacks can no longer throw out of the socket thread, " +
+                "audio start/stop is fully guarded, a partial wake-word " +
+                "model download is detected and never loaded, and the " +
+                "orb skips any frame with non-finite values instead of " +
+                "crashing. New crash capture: if the app ever closes " +
+                "unexpectedly, the next launch opens a crash report " +
+                "screen with the full technical trace (Copy / Share), " +
+                "and Settings → App Identity & Integrity → Diagnostics " +
+                "shows the session log with connect stage markers."
+        )
+        InfoCard(
             title = "v1.3.0 — F4 redesign: canvas orb, themes + Hands-Free",
             body = "F4: Canvas orb (orb.html system), theme system per orb.html " +
                 "(Light/Dark/Red/Sunset/Custom), UI redesign — floating nav, " +
@@ -345,7 +362,8 @@ private fun RoadmapCard() {
                 text = "v1.3.0 — F4 redesign: canvas orb, theme system, " +
                     "floating nav and the Hands-Free guide (task queue + " +
                     "background wake shipped at v1.2.0, Universal Voice " +
-                    "Engine at v1.1.0, design refresh completed at v1.0.0).",
+                    "Engine at v1.1.0, design refresh completed at v1.0.0). " +
+                    "Voice crash-capture hotfix shipped at v1.3.1.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

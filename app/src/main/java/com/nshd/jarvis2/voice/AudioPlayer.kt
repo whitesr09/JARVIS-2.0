@@ -4,6 +4,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.Process
+import com.nshd.jarvis2.CrashLogger
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -39,6 +40,9 @@ class AudioPlayer(
         val minBuffer = AudioTrack.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
+        if (minBuffer <= 0) {
+            CrashLogger.logNonFatal("audio", "AudioTrack getMinBufferSize returned $minBuffer")
+        }
         val bufferSize = maxOf(if (minBuffer > 0) minBuffer * 8 else 0, 96_000)
         val audioTrack = try {
             AudioTrack.Builder()
@@ -59,11 +63,23 @@ class AudioPlayer(
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
         } catch (e: Exception) {
+            CrashLogger.logNonFatal("audio", e)
+            return
+        }
+        // F4.1: a built-but-uninitialised track throws on play/write —
+        // refuse it up front, same as AudioCapture's record check.
+        if (audioTrack.state != AudioTrack.STATE_INITIALIZED) {
+            CrashLogger.logNonFatal(
+                "audio",
+                "AudioTrack not STATE_INITIALIZED (state=${audioTrack.state})"
+            )
+            runCatching { audioTrack.release() }
             return
         }
         track = audioTrack
         running = true
         runCatching { audioTrack.play() }
+            .onFailure { CrashLogger.logNonFatal("audio", it) }
         writer = Thread({ writeLoop(audioTrack) }, "jarvis-audio-player").apply {
             isDaemon = true
             start()

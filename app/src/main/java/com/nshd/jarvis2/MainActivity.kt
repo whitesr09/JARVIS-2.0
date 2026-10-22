@@ -56,6 +56,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // F4.1: crash capture goes in before ANYTHING else runs, so a
+        // crash anywhere in startup is still recorded for the report
+        // screen on the next launch.
+        CrashLogger.install(this)
         // F2: track app foreground so the floating overlay bubble hides
         // while Jarvis's own screens are up.
         com.nshd.jarvis2.service.AppForeground.register(application)

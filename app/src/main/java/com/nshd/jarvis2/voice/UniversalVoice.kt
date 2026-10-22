@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.speech.RecognitionListener
+import com.nshd.jarvis2.CrashLogger
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
@@ -26,9 +27,13 @@ import java.util.concurrent.atomic.AtomicInteger
  *    starts at the first sentence boundary. [Listener.onTtsQueueDrained]
  *    fires (on the main thread) when everything queued has been spoken.
  *
- * Recognizer and TTS calls that must run on the main thread are the
- * caller's responsibility for startListening (VoiceSessionManager's
- * scope is Main); TTS listener callbacks are re-posted to Main here.
+ * F4.1 threading rule: SpeechRecognizer and TextToSpeech are
+ * main-thread-only APIs, and this class now confines them ITSELF —
+ * every recognizer create/start/stop/destroy and every TTS
+ * create/speak/stop/shutdown is funnelled through [runOnMain], so
+ * callers may invoke any method from any thread (the Live-failure →
+ * Universal switch arrives on an OkHttp WebSocket thread). TTS
+ * listener callbacks are re-posted to Main as well.
  */
 class UniversalVoice(
     context: Context,
@@ -85,11 +90,29 @@ class UniversalVoice(
     fun isRecognitionAvailable(): Boolean =
         SpeechRecognizer.isRecognitionAvailable(appContext)
 
+    /**
+     * Run [block] on the main thread — inline when already there,
+     * posted otherwise. Handler posting preserves call order, so a
+     * start posted from a WS thread still lands before a later stop.
+     */
+    private fun runOnMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+        } else {
+            mainHandler.post(block)
+        }
+    }
+
     // ── Recognition ────────────────────────────────────────────────────
 
     fun startListening() {
+        runOnMain { startListeningOnMain() }
+    }
+
+    private fun startListeningOnMain() {
         if (destroyed) return
-        stopListening()
+        stopListeningOnMain()
+        CrashLogger.stage("universal", "recognizer create")
         val rec = SpeechRecognizer.createSpeechRecognizer(appContext)
         recognizer = rec
         rec.setRecognitionListener(object : RecognitionListener {
@@ -132,6 +155,7 @@ class UniversalVoice(
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
         }
         try {
+            CrashLogger.stage("universal", "recognizer listening")
             rec.startListening(intent)
         } catch (e: Exception) {
             listener.onError("Speech recognition failed to start", fatal = false)
@@ -139,6 +163,10 @@ class UniversalVoice(
     }
 
     fun stopListening() {
+        runOnMain { stopListeningOnMain() }
+    }
+
+    private fun stopListeningOnMain() {
         val rec = recognizer
         recognizer = null
         if (rec != null) {
@@ -171,6 +199,13 @@ class UniversalVoice(
 
     private fun ensureTts() {
         if (tts != null || destroyed) return
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            // TextToSpeech construction is main-thread-only; the
+            // engine's init callback fills `tts` in when it runs.
+            runOnMain { ensureTts() }
+            return
+        }
+        CrashLogger.stage("universal", "tts init")
         tts = TextToSpeech(appContext) { status ->
             if (destroyed) return@TextToSpeech
             if (status == TextToSpeech.SUCCESS) {
@@ -206,6 +241,10 @@ class UniversalVoice(
      * fires so the conversation loop never stalls.
      */
     fun speakSentence(sentence: String) {
+        runOnMain { speakSentenceOnMain(sentence) }
+    }
+
+    private fun speakSentenceOnMain(sentence: String) {
         val text = sentence.trim()
         if (text.isBlank() || destroyed) return
         ensureTts()
@@ -227,7 +266,7 @@ class UniversalVoice(
 
     /** Barge-in: stop speaking now and report the queue as drained. */
     fun stopSpeaking() {
-        runCatching { tts?.stop() }
+        runOnMain { runCatching { tts?.stop() } }
         pendingUtterances.set(0)
         mainHandler.post { if (!destroyed) listener.onTtsQueueDrained() }
     }
@@ -240,8 +279,12 @@ class UniversalVoice(
         ttsReady = false
         pendingUtterances.set(0)
         if (engine != null) {
-            runCatching { engine.stop() }
-            runCatching { engine.shutdown() }
+            // stop()/shutdown() are main-confined like all TTS calls;
+            // `destroyed` is already set, so the posted block still runs.
+            runOnMain {
+                runCatching { engine.stop() }
+                runCatching { engine.shutdown() }
+            }
         }
     }
 

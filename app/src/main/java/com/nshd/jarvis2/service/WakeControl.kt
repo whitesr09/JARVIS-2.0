@@ -6,6 +6,8 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Live status of the always-on wake-word listener (Level 6), published
@@ -64,6 +66,48 @@ object WakeWordControl {
         } catch (e: Exception) {
             // Arbitration is best-effort: never break the voice session.
         }
+    }
+
+    // ── F4.1 mic arbitration handshake ────────────────────────────────
+    //
+    // setSessionActive alone is fire-and-forget: the session used to
+    // start its own capture/recognizer immediately, racing the Vosk
+    // SpeechService's asynchronous stop — two live mic consumers is a
+    // classic OEM-stack crash. The handshake fixes the ordering:
+    // WakeWordService reports (via [setWakeMicHeld]) whether it is
+    // actually holding the mic right now, and [acquireForSession]
+    // signals the pause AND waits until the mic is confirmed free.
+
+    /** True while the wake-word recognizer is NOT holding the mic. */
+    private val _micFree = MutableStateFlow(true)
+    val micFree: StateFlow<Boolean> = _micFree.asStateFlow()
+
+    /** WakeWordService reports its real mic state on every transition. */
+    fun setWakeMicHeld(held: Boolean) {
+        _micFree.value = !held
+    }
+
+    /**
+     * Ask the wake service to release the mic and WAIT until it has.
+     * Returns true when the mic is confirmed free (or no wake service
+     * is running); false on timeout — the caller proceeds anyway after
+     * the wait, but the timeout is logged so the race stays visible in
+     * the session log instead of silently crashing later.
+     */
+    suspend fun acquireForSession(timeoutMs: Long = 900): Boolean {
+        setSessionActive(true)
+        if (!WakeWordService.isRunning()) return true
+        if (_micFree.value) return true
+        val acquired = withTimeoutOrNull(timeoutMs) {
+            _micFree.first { it }
+        } != null
+        if (!acquired) {
+            com.nshd.jarvis2.CrashLogger.logNonFatal(
+                "mic",
+                "acquireForSession timed out after ${timeoutMs}ms — proceeding anyway"
+            )
+        }
+        return acquired
     }
 
     fun start(context: Context) {

@@ -1,0 +1,195 @@
+package com.nshd.jarvis2
+
+import android.content.Context
+import android.os.Build
+import android.os.Process
+import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.system.exitProcess
+
+/**
+ * F4.1 crash capture + session diagnostics.
+ *
+ * Two jobs:
+ *  1. **Crash capture**: [install] registers a default uncaught-exception
+ *     handler that synchronously writes the full stack trace to
+ *     `filesDir/last_crash.txt`, raises the `crash_pending` flag, and
+ *     then delegates to the previous handler so the process dies exactly
+ *     as it would have anyway. On the next launch the app shows the
+ *     trace on a dedicated screen (see JarvisApp) — the user can
+ *     screenshot / copy / share it instead of the crash vanishing.
+ *  2. **Session ring log**: [logNonFatal] and [stage] append timestamped
+ *     lines to `filesDir/session_log.txt` (last [MAX_LOG_LINES] lines
+ *     kept). Stage markers trace the voice connect sequence step by
+ *     step, so even a *silent* death (native abort, OEM kill) leaves a
+ *     "last thing that happened" breadcrumb, and a soft failure's
+ *     Details expander can show exactly how far connect got.
+ *
+ * Everything here is best-effort and internally `runCatching`-guarded:
+ * the diagnostics layer must never become a crash source itself. All
+ * file IO is tiny (one small file) and synchronised on [logLock].
+ */
+object CrashLogger {
+
+    private const val PREFS_NAME = "jarvis_diagnostics"
+    private const val KEY_CRASH_PENDING = "crash_pending"
+    private const val CRASH_FILE_NAME = "last_crash.txt"
+    private const val LOG_FILE_NAME = "session_log.txt"
+    private const val MAX_LOG_LINES = 200
+
+    private val installed = AtomicBoolean(false)
+
+    @Volatile
+    private var appContext: Context? = null
+
+    @Volatile
+    private var previousHandler: Thread.UncaughtExceptionHandler? = null
+
+    private val logLock = Any()
+
+    /**
+     * Install the uncaught-exception handler. Idempotent — safe to call
+     * from MainActivity AND WakeWordService (whichever starts first in
+     * the process wins; later calls are no-ops).
+     */
+    fun install(context: Context) {
+        if (!installed.compareAndSet(false, true)) return
+        appContext = context.applicationContext
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        previousHandler = previous
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            // Synchronous, tiny, and guarded: this runs while the
+            // process is already dying, so nothing here may throw.
+            runCatching { writeCrashReport(thread, throwable) }
+            val delegate = previousHandler
+            if (delegate != null) {
+                delegate.uncaughtException(thread, throwable)
+            } else {
+                Process.killProcess(Process.myPid())
+                exitProcess(10)
+            }
+        }
+        stage("app", "crash logger installed")
+    }
+
+    // ── Crash report ───────────────────────────────────────────────────
+
+    private fun writeCrashReport(thread: Thread, throwable: Throwable) {
+        val ctx = appContext ?: return
+        val trace = StringWriter().also { sw ->
+            throwable.printStackTrace(PrintWriter(sw))
+        }.toString()
+        val report = buildString {
+            appendLine("Jarvis crash report")
+            appendLine("Time: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())}")
+            appendLine("App version: ${appVersion(ctx)}")
+            appendLine("Thread: ${thread.name}")
+            appendLine("Exception: ${throwable.javaClass.name}: ${throwable.message ?: "(no message)"}")
+            appendLine("---")
+            append(trace)
+        }
+        File(ctx.filesDir, CRASH_FILE_NAME).writeText(report)
+        // commit(), not apply(): the process is dying right now.
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_CRASH_PENDING, true)
+            .commit()
+    }
+
+    private fun appVersion(ctx: Context): String = runCatching {
+        val info = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode.toLong()
+        }
+        "${info.versionName} ($code)"
+    }.getOrDefault("unknown")
+
+    /** True when an unviewed crash report is waiting. Cheap prefs read. */
+    fun hasPendingCrash(context: Context): Boolean = runCatching {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_CRASH_PENDING, false)
+    }.getOrDefault(false)
+
+    /** Full crash report text for the report screen; never throws. */
+    fun readCrashReport(context: Context): String = runCatching {
+        val file = File(context.filesDir, CRASH_FILE_NAME)
+        if (file.exists()) {
+            file.readText().takeIf { it.isNotBlank() }
+                ?: "The crash report file was empty."
+        } else {
+            "No crash report file was found."
+        }
+    }.getOrDefault("The crash report could not be read.")
+
+    /** User dismissed the report: delete the file + clear the flag. */
+    fun clearCrash(context: Context) {
+        runCatching { File(context.filesDir, CRASH_FILE_NAME).delete() }
+        runCatching {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_CRASH_PENDING, false)
+                .apply()
+        }
+    }
+
+    // ── Session ring log ───────────────────────────────────────────────
+
+    /** Non-fatal error breadcrumb (one summary line + a few trace lines). */
+    fun logNonFatal(tag: String, throwable: Throwable) {
+        val summary = "${throwable.javaClass.simpleName}: ${throwable.message ?: "(no message)"}"
+        val traceLines = throwable.stackTraceToString()
+            .lineSequence()
+            .drop(1)
+            .take(10)
+            .map { "    ${it.trim()}" }
+            .toList()
+        appendLines(listOf("E/$tag $summary") + traceLines)
+    }
+
+    /** Non-fatal message breadcrumb. */
+    fun logNonFatal(tag: String, message: String) {
+        appendLines(listOf("E/$tag $message"))
+    }
+
+    /** Connect-sequence stage marker — the "how far did it get" trail. */
+    fun stage(tag: String, message: String) {
+        appendLines(listOf("S/$tag $message"))
+    }
+
+    private fun appendLines(newLines: List<String>) {
+        val ctx = appContext ?: return
+        synchronized(logLock) {
+            runCatching {
+                val stamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+                val file = File(ctx.filesDir, LOG_FILE_NAME)
+                val existing = if (file.exists()) {
+                    file.readLines().takeLast(MAX_LOG_LINES)
+                } else {
+                    emptyList()
+                }
+                val stamped = newLines.map { "$stamp $it" }
+                file.writeText((existing + stamped).takeLast(MAX_LOG_LINES).joinToString("\n"))
+            }
+        }
+    }
+
+    /** Last [count] session-log lines, oldest first. Never throws. */
+    fun sessionLogTail(context: Context, count: Int): List<String> = runCatching {
+        val file = File(context.filesDir, LOG_FILE_NAME)
+        if (file.exists()) file.readLines().takeLast(count) else emptyList()
+    }.getOrDefault(emptyList())
+
+    /** Whole session log as one string (for copy / diagnostics UI). */
+    fun sessionLogText(context: Context): String = runCatching {
+        val file = File(context.filesDir, LOG_FILE_NAME)
+        if (file.exists()) file.readText() else ""
+    }.getOrDefault("")
+}

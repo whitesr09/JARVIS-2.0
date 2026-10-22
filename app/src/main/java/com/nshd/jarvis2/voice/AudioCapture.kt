@@ -7,6 +7,7 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Process
+import com.nshd.jarvis2.CrashLogger
 import kotlin.math.sqrt
 
 /**
@@ -42,6 +43,8 @@ class AudioCapture(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
         if (minBuffer <= 0) {
+            // F4.1: device refused a buffer size — fail soft, logged.
+            CrashLogger.logNonFatal("audio", "getMinBufferSize returned $minBuffer")
             onError("Microphone buffer unavailable on this device")
             return false
         }
@@ -55,10 +58,15 @@ class AudioCapture(
                 maxOf(minBuffer * 4, 32_000)
             )
         } catch (e: Exception) {
+            CrashLogger.logNonFatal("audio", e)
             onError("Microphone could not be opened: ${e.message ?: "unknown error"}")
             return false
         }
         if (record.state != AudioRecord.STATE_INITIALIZED) {
+            CrashLogger.logNonFatal(
+                "audio",
+                "AudioRecord not STATE_INITIALIZED (state=${record.state})"
+            )
             runCatching { record.release() }
             onError("Microphone could not be initialized (is RECORD_AUDIO granted?)")
             return false
@@ -69,6 +77,7 @@ class AudioCapture(
         try {
             record.startRecording()
         } catch (e: Exception) {
+            CrashLogger.logNonFatal("audio", e)
             running = false
             releaseEffects()
             runCatching { record.release() }

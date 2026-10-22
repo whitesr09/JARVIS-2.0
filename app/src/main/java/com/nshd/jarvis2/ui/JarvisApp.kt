@@ -73,6 +73,26 @@ fun JarvisApp(
     onSettingsChange: (JarvisSettings) -> Unit
 ) {
     JarvisTheme(theme = settings.theme, customBgHex = settings.customBgHex) {
+        // F4.1: a crash from the previous run is reported BEFORE any
+        // normal UI — the report screen is deliberately plain (no orb,
+        // no session state) so it renders even when voice is broken.
+        val appContext = androidx.compose.ui.platform.LocalContext.current
+        var showCrashReport by remember {
+            mutableStateOf(com.nshd.jarvis2.CrashLogger.hasPendingCrash(appContext))
+        }
+        if (showCrashReport) {
+            val report = remember {
+                com.nshd.jarvis2.CrashLogger.readCrashReport(appContext)
+            }
+            CrashReportScreen(
+                report = report,
+                onDismissAndClear = {
+                    com.nshd.jarvis2.CrashLogger.clearCrash(appContext)
+                    showCrashReport = false
+                }
+            )
+            return@JarvisTheme
+        }
         var tab by remember { mutableStateOf(Tab.HOME) }
         var subScreen by remember { mutableStateOf(SubScreen.NONE) }
         // The center mic reflects the live voice session (F2): it must

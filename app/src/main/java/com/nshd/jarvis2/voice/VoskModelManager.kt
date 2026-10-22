@@ -40,6 +40,8 @@ object VoskModelManager {
         "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
     private const val MODEL_DIR_NAME = "vosk-model-small-en-us"
     private const val ZIP_NAME = "vosk-model-small-en-us-0.15.zip"
+    /** Sanity floor for am/final.mdl (the real file is ~15 MB). */
+    private const val MIN_FINAL_MDL_BYTES = 1_000_000L
 
     private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
@@ -57,13 +59,41 @@ object VoskModelManager {
     fun modelPath(context: Context): String = modelDir(context).absolutePath
 
     /**
-     * READY when the extracted tree really looks like a Vosk model: the
-     * acoustic-model (`am`) and config (`conf`) folders must both exist.
+     * READY only when the extracted tree is a COMPLETE
+     * vosk-model-small-en-us-0.15: all four subtrees (`am`, `conf`,
+     * `graph`, `ivector`) present AND the acoustic model file
+     * `am/final.mdl` present at a plausible size (> 1 MB — the real one
+     * is ~15 MB).
+     *
+     * F4.1: the old check only tested that `am/` and `conf/` existed,
+     * so an interrupted download/extraction (two empty folders) read
+     * as READY and the partial tree was handed to the native Vosk
+     * Model constructor — a native abort there kills the whole process
+     * with no Java exception. This strict check is the gate that keeps
+     * that from ever happening.
      */
     fun status(context: Context): ModelStatus {
+        return if (isModelComplete(context)) {
+            ModelStatus.READY
+        } else {
+            ModelStatus.NOT_DOWNLOADED
+        }
+    }
+
+    /** Full completeness test used by both [status] and the wake service gate. */
+    fun isModelComplete(context: Context): Boolean {
         val dir = modelDir(context)
-        val ready = File(dir, "conf").isDirectory && File(dir, "am").isDirectory
-        return if (ready) ModelStatus.READY else ModelStatus.NOT_DOWNLOADED
+        if (!File(dir, "am").isDirectory) return false
+        if (!File(dir, "conf").isDirectory) return false
+        if (!File(dir, "graph").isDirectory) return false
+        if (!File(dir, "ivector").isDirectory) return false
+        val finalMdl = File(dir, "am/final.mdl")
+        return finalMdl.isFile && finalMdl.length() > MIN_FINAL_MDL_BYTES
+    }
+
+    /** Delete the (partial) model tree so the next download starts clean. */
+    fun deleteModel(context: Context) {
+        runCatching { modelDir(context).deleteRecursively() }
     }
 
     /** Download + extract, reporting through [downloadState]. Safe to retry. */

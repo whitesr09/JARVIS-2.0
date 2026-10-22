@@ -155,6 +155,7 @@ fun SettingsScreen(
     var wakeExpanded by remember { mutableStateOf(false) }
     var showPrivacy by remember { mutableStateOf(false) }
     var showIdentity by remember { mutableStateOf(false) }
+    var showDiagnostics by remember { mutableStateOf(false) }
     var showImportMemory by remember { mutableStateOf(false) }
     var confirmClearChat by remember { mutableStateOf(false) }
     var confirmClearMemories by remember { mutableStateOf(false) }
@@ -911,7 +912,7 @@ fun SettingsScreen(
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "JARVIS • v1.3.0",
+                text = "JARVIS • v1.3.1",
                 style = MaterialTheme.typography.labelMedium.copy(
                     letterSpacing = 1.2.sp
                 ),
@@ -1205,6 +1206,16 @@ fun SettingsScreen(
                         )
                         IdentityRow("Signing SHA-256", idInfo.certSha256Short)
                         IdentityRow("Developer", "N S H D")
+                        IdentityRow(
+                            "Diagnostics",
+                            "Session log & crash breadcrumbs — tap View"
+                        )
+                        TextButton(
+                            onClick = {
+                                showIdentity = false
+                                showDiagnostics = true
+                            }
+                        ) { Text("View diagnostics") }
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = "Certificate fingerprint truncated to its first " +
@@ -1224,6 +1235,11 @@ fun SettingsScreen(
                 TextButton(onClick = { showIdentity = false }) { Text("Done") }
             }
         )
+    }
+
+    // F4.1: session-log viewer (CrashLogger ring log).
+    if (showDiagnostics) {
+        DiagnosticsDialog(onDismiss = { showDiagnostics = false })
     }
 }
 
