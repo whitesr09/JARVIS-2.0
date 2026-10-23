@@ -1458,7 +1458,6 @@ class ToolExecutor(
             "org.telegram.messenger"
         )
 
-        /**
         /** v2.0.0: tools whose success has a recorded #41 inverse. */
         private val UNDOABLE_TOOLS = setOf(
             "type_text", "edit_text", "insert_code", "open_app"
