@@ -300,6 +300,30 @@ fun LogsScreen(onBack: () -> Unit) {
                 modifier = Modifier.weight(1f)
             ) { confirmClear = true }
         }
+        // F8 (#97): one-tap diagnostics pack — version, device, last
+        // crash, last 500 log lines, provider/model/probe summary and
+        // settings summary in a single shareable .txt (NO keys).
+        OutlinedButton(
+            onClick = {
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) {
+                        com.nshd.jarvis2.core.DiagnosticsPack.share(context)
+                    }
+                    statusText = if (ok) {
+                        "Diagnostics pack ready to share"
+                    } else {
+                        "Diagnostics pack failed — try Share instead"
+                    }
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp)
+        ) {
+            Icon(Icons.Filled.Share, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Share diagnostics pack")
+        }
         statusText?.let { status ->
             Text(
                 text = status,

@@ -7,6 +7,9 @@ import java.util.ArrayDeque
 import kotlin.math.abs
 import kotlin.math.max
 
+/** F8 (#29): a finder hit plus the strategy that produced it. */
+data class FindResult(val element: UiElement, val strategy: String)
+
 /** One model-addressable element from an accessibility snapshot. */
 data class UiElement(
     val index: Int,
@@ -131,6 +134,26 @@ class ScreenReader(private val service: JarvisAccessibilityService) {
      * gets leaner, which is where free-tier latency actually lives.
      */
     fun serializeCompact(maxElements: Int = 40, labelMax: Int = 40): String {
+        val (pkg, lines) = compactEntries(maxElements, labelMax)
+        if (lines.isEmpty()) {
+            return "App: $pkg\nVisible Elements: (none exposed by accessibility)"
+        }
+        return buildString {
+            append("App: ").append(pkg).append("\nVisible Elements:")
+            lines.forEach { line -> append("\n").append(line) }
+        }
+    }
+
+    /**
+     * F8 (#21): the compact serialization as (package, entry lines) —
+     * the same content [serializeCompact] renders, one string per
+     * element ("[#3] Label (InputField)"), so the agent loop can diff
+     * steps entry-by-entry instead of re-sending the whole screen.
+     */
+    fun compactEntries(
+        maxElements: Int = 40,
+        labelMax: Int = 40
+    ): Pair<String, List<String>> {
         val all = snapshot()
         val pkg = currentPackage() ?: "unknown"
         // "Pure container" in snapshot terms: not clickable/editable/
@@ -143,11 +166,9 @@ class ScreenReader(private val service: JarvisAccessibilityService) {
             element.clickable || element.editable || element.scrollable ||
                 element.checked != null || element.label.isNotBlank()
         }.take(maxElements.coerceIn(1, MAX_ELEMENTS))
-        if (kept.isEmpty()) return "App: $pkg\nVisible Elements: (none exposed by accessibility)"
-        return buildString {
-            append("App: ").append(pkg).append("\nVisible Elements:")
-            kept.forEach { element ->
-                append("\n[#").append(element.index).append("] ")
+        val lines = kept.map { element ->
+            buildString {
+                append("[#").append(element.index).append("] ")
                 val label = element.label.ifBlank { simpleClassName(element.className) }
                 append(if (label.length > labelMax) label.take(labelMax - 1) + "…" else label)
                 if (element.editable || element.className.contains("EditText", true)) {
@@ -162,6 +183,73 @@ class ScreenReader(private val service: JarvisAccessibilityService) {
                 if (!element.enabled) append(" (Disabled)")
             }
         }
+        return pkg to lines
+    }
+
+    /**
+     * F8 (#29): self-healing finder. Strategy chain, in order:
+     * exact text → contains text → content-description exact →
+     * content-description contains → viewId suffix → playbook
+     * descriptor for the foreground package (when the query names a
+     * known role) → the legacy prefix/fuzzy tail of [findByText] →
+     * relative position hint (top-most clickable in [region]:
+     * "top"/"bottom") when the caller supplies one. Every fallback
+     * runs ONLY on a miss of the strategies before it, so existing
+     * callers see identical primary behaviour. The returned
+     * [FindResult.strategy] names what matched (logged by callers).
+     */
+    fun findSmart(
+        query: String,
+        elements: List<UiElement> = snapshot(),
+        packageName: String? = null,
+        region: String? = null
+    ): FindResult? {
+        val wanted = normalize(query)
+        if (wanted.isBlank()) return null
+        elements.firstOrNull { normalize(it.text) == wanted }
+            ?.let { return FindResult(it, "exact-text") }
+        elements.firstOrNull { normalize(it.text).contains(wanted) }
+            ?.let { return FindResult(it, "contains-text") }
+        elements.firstOrNull { normalize(it.desc) == wanted }
+            ?.let { return FindResult(it, "exact-desc") }
+        elements.firstOrNull { normalize(it.desc).contains(wanted) }
+            ?.let { return FindResult(it, "contains-desc") }
+        val rawQuery = query.trim()
+        elements.firstOrNull { element ->
+            element.viewId.isNotBlank() &&
+                (element.viewId.endsWith(rawQuery, ignoreCase = true) ||
+                    element.viewId.substringAfterLast('/')
+                        .equals(rawQuery, ignoreCase = true))
+        }?.let { return FindResult(it, "viewid-suffix") }
+        if (packageName != null) {
+            Playbooks.roleForQuery(wanted)?.let { role ->
+                Playbooks.find(elements, packageName, role)
+                    ?.let { return FindResult(it, "playbook") }
+            }
+        }
+        // Legacy tail (startsWith → fuzzy) via the original finder,
+        // minus the strategies already tried above.
+        findByText(query, elements)?.let { element ->
+            val strategy = if (
+                normalize(element.text).startsWith(wanted) ||
+                normalize(element.desc).startsWith(wanted)
+            ) {
+                "prefix"
+            } else {
+                "fuzzy"
+            }
+            return FindResult(element, strategy)
+        }
+        if (region != null) {
+            val clickables = elements.filter { it.clickable }
+            val picked = when (region.lowercase()) {
+                "top" -> clickables.minByOrNull { it.bounds.top }
+                "bottom" -> clickables.maxByOrNull { it.bounds.top }
+                else -> null
+            }
+            picked?.let { return FindResult(it, "position-$region") }
+        }
+        return null
     }
 
     /** Exact matches win, then prefix/contains, then a small edit-distance match. */

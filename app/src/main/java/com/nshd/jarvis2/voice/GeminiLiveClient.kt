@@ -65,6 +65,13 @@ class GeminiLiveClient(
      * the failure reason must say so.
      */
     private val providerBaseUrl: String = "",
+    /**
+     * F8 (#13): how long to wait for setupComplete before failing.
+     * The session manager lowers this to 6 s when a weak network is
+     * suspected, so a doomed Live start falls back to Universal fast
+     * instead of hanging the full 12 s.
+     */
+    private val setupTimeoutMs: Long = SETUP_TIMEOUT_MS,
     private val listener: Listener
 ) {
     interface Listener {
@@ -180,7 +187,7 @@ class GeminiLiveClient(
         runCatching {
             setupTimeoutFuture = timeoutExecutor.schedule({
                 if (gen == connectionGeneration && !setupComplete && !closedByUser) {
-                    AppLog.e("Live", "setup timeout after ${SETUP_TIMEOUT_MS / 1000}s (model=$model)")
+                    AppLog.e("Live", "setup timeout after ${setupTimeoutMs / 1000}s (model=$model)")
                     // Suppress the resulting onClosed — the failure
                     // below is the one reason the session reports.
                     closedByUser = true
@@ -189,12 +196,12 @@ class GeminiLiveClient(
                         listener.onFailure(
                             withGatewayHint(
                                 "Live setup timeout — the server never confirmed " +
-                                    "the session setup within ${SETUP_TIMEOUT_MS / 1000} seconds."
+                                    "the session setup within ${setupTimeoutMs / 1000} seconds."
                             )
                         )
                     }
                 }
-            }, SETUP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }, setupTimeoutMs, TimeUnit.MILLISECONDS)
         }
     }
 

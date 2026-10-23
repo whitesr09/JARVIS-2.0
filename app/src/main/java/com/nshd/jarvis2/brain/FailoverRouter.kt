@@ -110,6 +110,21 @@ class FailoverRouter(
                 failures += config.label to "no model set"
                 continue
             }
+            // F8 (#19): STEP calls run on this provider's fastest
+            // WORKING probed TEXT model (probe-cache latency), when a
+            // probe record exists — steps are latency-bound, and the
+            // probe already measured which model answers quickest.
+            // The FINAL summary call below keeps the user's chosen
+            // model. Same provider, always — failover semantics and
+            // the no-replay rule are untouched.
+            val stepModel = fastestProbedTextModel(config) ?: model
+            if (stepModel != model) {
+                AppLog.i(
+                    "Agent",
+                    "step model for ${config.id}: '$stepModel' " +
+                        "(fastest probed) — final answer keeps '$model'"
+                )
+            }
             val provider = config.toProvider()
             val conversation = systemAndHistory.toMutableList()
             var executedAnyTool = false
@@ -128,7 +143,7 @@ class FailoverRouter(
                     val reply = chatStreamRetrying(
                         provider = provider,
                         messages = conversation,
-                        model = model,
+                        model = stepModel,
                         tools = ToolRegistry.openAiTools(),
                         providerLabel = config.label,
                         toolsExecuted = { executedAnyTool },
@@ -369,6 +384,24 @@ class FailoverRouter(
             lower.contains("unavailable") ||
             lower.contains("500") || lower.contains("502") ||
             lower.contains("503") || lower.contains("504")
+    }
+
+    /**
+     * F8 (#19): the lowest-latency WORKING probed TEXT model for this
+     * provider from the Connection-Test probe cache, or null when no
+     * usable probe record exists (→ step calls keep the chosen model,
+     * exactly the pre-F8 behaviour).
+     */
+    private fun fastestProbedTextModel(config: ProviderConfig): String? {
+        val s = store ?: return null
+        return s.cachedProbeResults(config.id)
+            .filter {
+                it.status == ProbeStatus.WORKING &&
+                    it.latencyMs > 0 &&
+                    ModelDiscovery.classify(it.modelId) == ModelDiscovery.Kind.TEXT
+            }
+            .minByOrNull { it.latencyMs }
+            ?.modelId
     }
 
     private fun selectModel(config: ProviderConfig, preferReasoningModel: Boolean): String {

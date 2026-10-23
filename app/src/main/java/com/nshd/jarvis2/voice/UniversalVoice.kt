@@ -77,6 +77,14 @@ class UniversalVoice(
          */
         fun onError(message: String, fatal: Boolean)
 
+        /**
+         * F8 (#5): the recognizer hit a NETWORK-class error
+         * (ERROR_NETWORK / ERROR_NETWORK_TIMEOUT) — the manager may
+         * switch recognition to the offline Vosk fallback. Fires in
+         * addition to [onError].
+         */
+        fun onNetworkError() {}
+
         /** Every queued utterance finished (or speaking was stopped). */
         fun onTtsQueueDrained()
 
@@ -175,6 +183,13 @@ class UniversalVoice(
                 }
             }
             override fun onError(error: Int) {
+                if (error == SpeechRecognizer.ERROR_NETWORK ||
+                    error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT
+                ) {
+                    // F8 (#5): let the manager offer the offline
+                    // Vosk fallback before the generic error path.
+                    listener.onNetworkError()
+                }
                 if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
                     error == SpeechRecognizer.ERROR_CLIENT
                 ) {

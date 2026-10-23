@@ -71,12 +71,13 @@ class DeepIntents(context: Context) {
             "stage: typed — message field holds ${entry?.text?.length ?: 0} chars"
         )
 
-        val send = snapshot.firstOrNull { element ->
-            element.viewId == "com.whatsapp:id/send" ||
-                element.viewId == "com.whatsapp.w4b:id/send" ||
-                element.desc.equals("Send", ignoreCase = true) ||
-                element.text.equals("Send", ignoreCase = true)
-        } ?: reader.findByText("Send", snapshot)?.takeIf { it.clickable || it.desc.contains("send", true) }
+        // F8 (#36): the send control comes from the WhatsApp
+        // playbook now — its primary descriptors ARE the inline
+        // checks this code used before (viewId …:id/send, desc/text
+        // "Send"), so a primary hit behaves identically.
+        val send = Playbooks.find(snapshot, Playbooks.WHATSAPP_PACKAGE, Playbooks.ROLE_SEND_BUTTON)
+            ?: Playbooks.find(snapshot, Playbooks.WHATSAPP_BUSINESS_PACKAGE, Playbooks.ROLE_SEND_BUTTON)
+            ?: reader.findByText("Send", snapshot)?.takeIf { it.clickable || it.desc.contains("send", true) }
 
         if (send == null) {
             // F7: the tree dump belongs in the log, not the reply text.
@@ -199,19 +200,36 @@ class DeepIntents(context: Context) {
             attempt++
         }
         val chosen = pick ?: run {
-            // The screen dump goes to AppLog, NOT the result text —
-            // the user-facing sentence stays clean and complete.
-            AppLog.w(
-                "Hands",
-                "youtube_play: no result after $attempt snapshots " +
-                    "($lastSnapshotSize nodes). Screen: ${reader.serialize(25)}"
-            )
-            return ActionResult(
-                false,
-                "YouTube results opened for \"$cleanQuery\", but no playable video " +
-                    "result appeared after waiting — the results may still be " +
-                    "loading, or YouTube is showing a different layout."
-            )
+            // F8 (#36): last resort — the YouTube playbook's
+            // first-result descriptor (a card whose merged label
+            // carries a view count). Runs ONLY where the positional
+            // picker already failed, so primary behaviour is intact.
+            val lastSnapshot = reader.snapshot()
+            val viaPlaybook = Playbooks.find(
+                lastSnapshot, Playbooks.YOUTUBE_PACKAGE, Playbooks.ROLE_FIRST_RESULT
+            )?.takeIf { it.clickable }
+            if (viaPlaybook != null) {
+                AppLog.i(
+                    "Hands",
+                    "youtube_play: positional picker missed — playbook " +
+                        "first_result hit index=${viaPlaybook.index}"
+                )
+                YoutubePick(viaPlaybook, youtubeTitle(viaPlaybook.label), viaFallback = true)
+            } else {
+                // The screen dump goes to AppLog, NOT the result text —
+                // the user-facing sentence stays clean and complete.
+                AppLog.w(
+                    "Hands",
+                    "youtube_play: no result after $attempt snapshots " +
+                        "($lastSnapshotSize nodes). Screen: ${reader.serialize(25)}"
+                )
+                return ActionResult(
+                    false,
+                    "YouTube results opened for \"$cleanQuery\", but no playable video " +
+                        "result appeared after waiting — the results may still be " +
+                        "loading, or YouTube is showing a different layout."
+                )
+            }
         }
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Playing…")
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
@@ -272,14 +290,20 @@ class DeepIntents(context: Context) {
         HandsActions.waitForPackage(SPOTIFY_PACKAGE, APP_WINDOW_WAIT_MS)
 
         // 1) Search tab (bottom nav) — poll until it shows up.
+        // F8 (#36): the positional primary stays; the Spotify
+        // playbook's search_tab descriptor is the fallback.
         val withTab = HandsActions.waitForSnapshot(SEARCH_TAB_WAIT_MS) { snapshot ->
             snapshot.any { isSpotifySearchTab(it, screenHeight) }
-        } ?: return ActionResult(
-            false,
-            "Spotify opened, but its Search tab never appeared — Spotify " +
-                "may still be loading or showing a prompt."
-        )
-        val tab = withTab.first { isSpotifySearchTab(it, screenHeight) }
+        }
+        val tab = withTab?.first { isSpotifySearchTab(it, screenHeight) }
+            ?: Playbooks.find(
+                reader.snapshot(), Playbooks.SPOTIFY_PACKAGE, Playbooks.ROLE_SEARCH_TAB
+            )?.takeIf { it.clickable }
+            ?: return ActionResult(
+                false,
+                "Spotify opened, but its Search tab never appeared — Spotify " +
+                    "may still be loading or showing a prompt."
+            )
         val tabClick = HandsActions.clickElement(tab.index)
         if (!tabClick.success) {
             return ActionResult(false, "Spotify opened, but the Search tab could not be tapped: ${tabClick.message}")
@@ -299,7 +323,12 @@ class DeepIntents(context: Context) {
         )
         val directField = inputReady.firstOrNull { it.editable }
         if (directField == null) {
+            // F8 (#36): inline search-bar check first (primary), the
+            // playbook's search_field descriptors as its fallback.
             val bar = inputReady.firstOrNull { isSpotifySearchBar(it) }
+                ?: Playbooks.find(
+                    inputReady, Playbooks.SPOTIFY_PACKAGE, Playbooks.ROLE_SEARCH_FIELD
+                )
                 ?: return ActionResult(false, "Spotify's search field could not be found.")
             val barClick = HandsActions.clickElement(bar.index)
             if (!barClick.success) {
@@ -352,11 +381,15 @@ class DeepIntents(context: Context) {
             return ActionResult(true, "Playing '${chosen.title}' on Spotify.")
         }
         val pageSnapshot = reader.snapshot()
+        // F8 (#36): inline Play check is the primary; the playbook's
+        // play_button descriptors back it up.
         val playButton = pageSnapshot.firstOrNull { element ->
             element.clickable &&
                 (element.desc.equals("Play", ignoreCase = true) ||
                     element.text.equals("Play", ignoreCase = true))
-        }
+        } ?: Playbooks.find(
+            pageSnapshot, Playbooks.SPOTIFY_PACKAGE, Playbooks.ROLE_PLAY_BUTTON
+        )?.takeIf { it.clickable }
         if (playButton != null) {
             HandsActions.clickElement(playButton.index)
             if (awaitPauseAffordance(PAUSE_VERIFY_MS)) {
@@ -594,6 +627,28 @@ class DeepIntents(context: Context) {
                 ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 if (canResolve(intent)) return resultForLaunch(intent, "Calculator")
             }
+            // F8 (#15): photos/gallery, files and downloads get real
+            // targets instead of a launcher-label guess.
+            "photos", "gallery" -> {
+                val intent = Intent.makeMainSelectorActivity(
+                    Intent.ACTION_MAIN,
+                    Intent.CATEGORY_APP_GALLERY
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (canResolve(intent)) return resultForLaunch(intent, "Photos")
+            }
+            "files", "filemanager", "myfiles" -> {
+                val launchIntent = appContext.packageManager
+                    .getLaunchIntentForPackage("com.google.android.documentsui")
+                if (launchIntent != null) {
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    return resultForLaunch(launchIntent, "Files")
+                }
+            }
+            "downloads" -> {
+                val intent = Intent("android.intent.action.VIEW_DOWNLOADS")
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (canResolve(intent)) return resultForLaunch(intent, "Downloads")
+            }
         }
 
         val packageName = PACKAGE_MAP[key]
@@ -784,6 +839,125 @@ class DeepIntents(context: Context) {
         } catch (e: Exception) {
             ActionResult(false, "Brightness could not be changed: ${e.message ?: "system denied it"}")
         }
+    }
+
+    // ── F8 (#15) media keys, settings panels, silent mode ─────────────
+
+    /**
+     * Media transport keys via AudioManager.dispatchMediaKeyEvent —
+     * reaches the ACTIVE media session (Spotify/YouTube/…) without
+     * opening anything. [action]: play_pause / play / pause / next /
+     * previous.
+     */
+    fun mediaKey(action: String): ActionResult {
+        val audio = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            ?: return ActionResult(false, "Audio service is unavailable.")
+        val keyCode = when (action.lowercase()) {
+            "play_pause", "playpause", "toggle" -> android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            "play" -> android.view.KeyEvent.KEYCODE_MEDIA_PLAY
+            "pause" -> android.view.KeyEvent.KEYCODE_MEDIA_PAUSE
+            "next" -> android.view.KeyEvent.KEYCODE_MEDIA_NEXT
+            "previous", "prev" -> android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS
+            else -> return ActionResult(false, "Unknown media action: $action")
+        }
+        return try {
+            val down = android.view.KeyEvent(
+                android.view.KeyEvent.ACTION_DOWN, keyCode
+            )
+            val up = android.view.KeyEvent(
+                android.view.KeyEvent.ACTION_UP, keyCode
+            )
+            @Suppress("DEPRECATION")
+            audio.dispatchMediaKeyEvent(down)
+            @Suppress("DEPRECATION")
+            audio.dispatchMediaKeyEvent(up)
+            AppLog.i("Hands", "media key dispatched: $action")
+            ActionResult(true, "Media ${action.replace('_', ' ')} sent.")
+        } catch (e: Exception) {
+            ActionResult(false, "Media key could not be sent: ${e.message ?: "system denied it"}")
+        }
+    }
+
+    /**
+     * Open a system settings panel. Android Q+ forbids apps toggling
+     * Wi-Fi directly, so Wi-Fi lands on the system Wi-Fi panel where
+     * one tap finishes it — the result text says so honestly.
+     * [kind]: wifi / bluetooth / airplane / display.
+     */
+    fun openPanel(kind: String): ActionResult {
+        val intent = when (kind.lowercase()) {
+            "wifi" -> if (android.os.Build.VERSION.SDK_INT >=
+                android.os.Build.VERSION_CODES.Q
+            ) {
+                Intent(Settings.Panel.ACTION_WIFI)
+            } else {
+                Intent(Settings.ACTION_WIFI_SETTINGS)
+            }
+            "bluetooth" -> Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+            "airplane" -> Intent(Settings.ACTION_AIRPLANE_MODE_SETTINGS)
+            "display" -> Intent(Settings.ACTION_DISPLAY_SETTINGS)
+            else -> return ActionResult(false, "Unknown settings panel: $kind")
+        }
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val launched = launch(intent)
+        val label = when (kind.lowercase()) {
+            "wifi" -> "Wi-Fi panel opened — Android doesn't let apps toggle " +
+                "Wi-Fi directly, so flip the switch there."
+            "bluetooth" -> "Bluetooth settings opened."
+            "airplane" -> "Airplane mode settings opened — flip the switch there."
+            else -> "Display settings opened."
+        }
+        return ActionResult(launched, if (launched) label else "The settings panel could not be opened.")
+    }
+
+    /**
+     * Ringer silent/normal. Changing the ringer needs Do-Not-Disturb
+     * policy access on Android 6+; without it the access screen opens
+     * and the result says exactly what's missing.
+     */
+    fun setSilent(on: Boolean): ActionResult {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE)
+                as? android.app.NotificationManager
+            if (nm != null && !nm.isNotificationPolicyAccessGranted) {
+                val intent = Intent(
+                    Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                launch(intent)
+                return ActionResult(
+                    false,
+                    "Silent mode needs Do-Not-Disturb access — I opened " +
+                        "the access screen; allow Jarvis there, then ask again."
+                )
+            }
+        }
+        val audio = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            ?: return ActionResult(false, "Audio service is unavailable.")
+        return try {
+            audio.ringerMode = if (on) {
+                AudioManager.RINGER_MODE_SILENT
+            } else {
+                AudioManager.RINGER_MODE_NORMAL
+            }
+            ActionResult(
+                true,
+                if (on) "Silent mode on." else "Silent mode off — ringer back to normal."
+            )
+        } catch (e: Exception) {
+            ActionResult(false, "Silent mode could not be changed: ${e.message ?: "system denied it"}")
+        }
+    }
+
+    /** Current system brightness as a percentage (0 when unreadable). */
+    fun currentBrightnessPercent(): Int = try {
+        val value = Settings.System.getInt(
+            appContext.contentResolver,
+            Settings.System.SCREEN_BRIGHTNESS,
+            128
+        )
+        (value * 100 / 255).coerceIn(0, 100)
+    } catch (e: Exception) {
+        0
     }
 
     // ── Helpers ────────────────────────────────────────────────────────

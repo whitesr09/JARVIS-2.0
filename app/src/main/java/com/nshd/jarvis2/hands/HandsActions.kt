@@ -74,6 +74,9 @@ object HandsActions {
         "search", "explore", "reels", "profile", "library", "subscriptions"
     )
 
+    /** F8 (#31): scroll-and-search budget for one find. */
+    private const val MAX_SEARCH_SCROLLS = 4
+
     // ── F7 SendPermit ────────────────────────────────────────────────
     //
     // The whatsapp_message tool runs its OWN ConfirmGate (every send
@@ -137,8 +140,32 @@ object HandsActions {
     suspend fun clickText(text: String): ActionResult = serializedLong {
         val service = serviceOrNull() ?: return@serializedLong disabled()
         val reader = service.screenReader()
-        val element = reader.findByText(text)
+        // F8 (#29): the self-healing strategy chain finds the target;
+        // the winning strategy is logged so a layout change at the
+        // app side shows up as a strategy shift, not a silent failure.
+        // F8 (#31): when the target isn't on screen, scroll-and-search
+        // (up to 4 scrolls: down ×3 revealing lower content, then one
+        // back up) re-snapshotting after each scroll.
+        var found = reader.findSmart(text, packageName = reader.currentPackage())
+        var scrollsUsed = 0
+        while (found == null && scrollsUsed < MAX_SEARCH_SCROLLS) {
+            val direction = if (scrollsUsed < 3) "down" else "up"
+            scrollInternal(direction)
+            scrollsUsed++
+            found = reader.findSmart(text, packageName = reader.currentPackage())
+        }
+        if (scrollsUsed > 0) {
+            com.nshd.jarvis2.core.AppLog.i(
+                "Hands",
+                "scroll-search for \"$text\": $scrollsUsed scroll(s) used, " +
+                    if (found != null) "found" else "still not found"
+            )
+        }
+        val element = found?.element
             ?: return@serializedLong ActionResult(false, "No visible element matched \"$text\".")
+        com.nshd.jarvis2.core.AppLog.d(
+            "Hands", "find strategy=${found?.strategy ?: "none"} for \"$text\""
+        )
         sensitiveTapDenial(service, element, text)?.let { return@serializedLong it }
         clickResolved(service, element, "\"${element.label.ifBlank { text }}\"")
     }
@@ -523,7 +550,16 @@ object HandsActions {
     }
 
     suspend fun scroll(direction: String): ActionResult = serialized {
-        val service = serviceOrNull() ?: return@serialized disabled()
+        scrollInternal(direction)
+    }
+
+    /**
+     * F8: the scroll body WITHOUT the mutex — clickText's
+     * scroll-and-search (#31) runs inside serializedLong and the one
+     * HandsActions mutex is not reentrant.
+     */
+    private suspend fun scrollInternal(direction: String): ActionResult {
+        val service = serviceOrNull() ?: return disabled()
         val reader = service.screenReader()
         val before = reader.signature()
         val metrics = service.resources.displayMetrics
@@ -534,10 +570,10 @@ object HandsActions {
             "up" -> listOf(width * 0.50f, height * 0.42f, width * 0.50f, height * 0.60f)
             "left" -> listOf(width * 0.58f, height * 0.50f, width * 0.40f, height * 0.50f)
             "right" -> listOf(width * 0.42f, height * 0.50f, width * 0.60f, height * 0.50f)
-            else -> return@serialized ActionResult(false, "Scroll direction must be up, down, left or right.")
+            else -> return ActionResult(false, "Scroll direction must be up, down, left or right.")
         }
         val dispatched = dispatchSwipe(service, startX, startY, endX, endY, durationMs = 600)
-        if (!dispatched) return@serialized ActionResult(false, "The scroll gesture was not dispatched.")
+        if (!dispatched) return ActionResult(false, "The scroll gesture was not dispatched.")
         // F6: 450 ms → 250 ms — the signature comparison right below
         // is the real change detector; the pause only lets the fling
         // animation start.
@@ -548,6 +584,27 @@ object HandsActions {
             if (changed) "Scrolled ${direction.lowercase()} and the screen changed."
             else "Scroll gesture completed, but the screen did not change (possibly the end of the content)."
         )
+    }
+
+    /**
+     * F8 (#15): lock the screen via the accessibility global action
+     * (API 28+). Older APIs have no service-side lock — fail honestly.
+     */
+    suspend fun lockScreen(): ActionResult = serialized {
+        val service = serviceOrNull() ?: return@serialized disabled()
+        if (android.os.Build.VERSION.SDK_INT <
+            android.os.Build.VERSION_CODES.P
+        ) {
+            return@serialized ActionResult(
+                false,
+                "Locking the screen needs Android 9 or newer."
+            )
+        }
+        val ok = service.performGlobalAction(
+            AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN
+        )
+        com.nshd.jarvis2.core.AppLog.i("Hands", "lock screen (ok=$ok)")
+        ActionResult(ok, if (ok) "Screen locked." else "The lock action was not accepted.")
     }
 
     suspend fun pressKey(key: String): ActionResult = serialized {

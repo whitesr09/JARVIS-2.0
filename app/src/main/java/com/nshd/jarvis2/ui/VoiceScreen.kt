@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -195,6 +196,9 @@ private fun VoiceSessionBody(
     // order changed, corrupting the slot table (the voice crash). Both
     // are hoisted here; the branches below only read them.
     var showDetails by remember { mutableStateOf(false) }
+    // F8 (#1): Live self-diagnosis dialog visibility (hoisted like
+    // showDetails — the F4 conditional-remember lesson).
+    var showLiveDiagnosis by remember { mutableStateOf(false) }
     val shareControl = rememberScreenShareControl()
 
   Column(modifier = modifier) {
@@ -231,6 +235,23 @@ private fun VoiceSessionBody(
                 .align(Alignment.CenterHorizontally)
                 .padding(top = 4.dp)
         )
+    }
+
+    // F8 (#1): "Why?" — after a Live failure (error state, or a
+    // session that switched to Universal), open the self-diagnosis:
+    // the failure explained + the recent Live log + the next step.
+    val switchedToUniversal = captions.any {
+        it.kind == CaptionKind.SYSTEM && it.text.contains("switched to Universal")
+    }
+    if (manager.liveDiagnosis() != null &&
+        (uiState.status == VoiceStatus.ERROR || switchedToUniversal)
+    ) {
+        TextButton(
+            onClick = { showLiveDiagnosis = true },
+            modifier = Modifier.align(Alignment.CenterHorizontally)
+        ) {
+            Text("Why? — Live diagnosis")
+        }
     }
 
     // F7/I: the EFFECTIVE listening language, always visible during a
@@ -443,6 +464,66 @@ private fun VoiceSessionBody(
                 )
             }
         }
+    }
+
+    // F8 (#1): the Live self-diagnosis dialog.
+    if (showLiveDiagnosis) {
+        val diagnosis = manager.liveDiagnosis()
+        AlertDialog(
+            onDismissRequest = { showLiveDiagnosis = false },
+            title = { Text("Why Live failed") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .androidx.compose.foundation.verticalScroll(
+                            androidx.compose.foundation.rememberScrollState()
+                        )
+                ) {
+                    if (diagnosis == null) {
+                        Text("No Live failure has been recorded in this app run.")
+                    } else {
+                        Text(
+                            text = diagnosis.headline,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        if (diagnosis.failedModel.isNotBlank()) {
+                            Text(
+                                text = "Model tried: ${diagnosis.failedModel}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 6.dp)
+                            )
+                        }
+                        if (diagnosis.logLines.isNotEmpty()) {
+                            Text(
+                                text = "Recent Live log:",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(top = 10.dp)
+                            )
+                            Text(
+                                text = diagnosis.logLines.joinToString("\n"),
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                ),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        Text(
+                            text = "Next step: ${diagnosis.nextStep}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(top = 10.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLiveDiagnosis = false }) { Text("Close") }
+            }
+        )
     }
   }
 }

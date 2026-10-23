@@ -1,17 +1,22 @@
 package com.nshd.jarvis2.voice
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Looper
+import android.os.SystemClock
 import com.nshd.jarvis2.CrashLogger
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.AgentPipeline
 import com.nshd.jarvis2.brain.ExecutionLedger
+import com.nshd.jarvis2.brain.ModelDiscovery
 import com.nshd.jarvis2.brain.PersonaPrompts
 import com.nshd.jarvis2.brain.ProviderPresets
 import com.nshd.jarvis2.brain.ProviderStore
 import com.nshd.jarvis2.brain.TaskQueue
 import com.nshd.jarvis2.brain.ToolEvent
 import com.nshd.jarvis2.brain.ToolEventKind
+import com.nshd.jarvis2.hands.DeepIntents
 import com.nshd.jarvis2.hands.TaskState
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.brain.tools.ToolRegistry
@@ -72,6 +77,19 @@ data class VoiceUiState(
     /** F5: device-TTS voice actually in use (Universal mode only). */
     val ttsVoiceName: String = "",
     val errorMessage: String? = null
+)
+
+/**
+ * F8 (#1): Live self-diagnosis for the Voice screen's "Why?" dialog —
+ * the last Live failure, explained in plain language, with the recent
+ * Live log trail and one concrete next step.
+ */
+data class LiveDiagnosis(
+    val headline: String,
+    val rawDetail: String?,
+    val logLines: List<String>,
+    val nextStep: String,
+    val failedModel: String
 )
 
 /**
@@ -160,6 +178,65 @@ object VoiceSessionManager {
     /** F5.1: the one clean-session retry for this session start is spent. */
     @Volatile
     private var liveCleanRetried = false
+
+    // ── F8 (#2) Live model fallback chain ─────────────────────────────
+    // When a Live start fails with a MODEL-class error, the next
+    // candidate model is tried (fresh client/session each) BEFORE the
+    // Universal switch. A working fallback is remembered in-memory
+    // for this app run only — the user's setting is never rewritten.
+
+    /** Model of the CURRENT Live attempt (may be a fallback candidate). */
+    @Volatile
+    private var liveAttemptModel: String = ""
+
+    /** Candidate Live models for this session start, in try order. */
+    @Volatile
+    private var liveCandidates: List<String> = emptyList()
+
+    /** Index into [liveCandidates] of the current attempt. */
+    @Volatile
+    private var liveCandidateIndex = 0
+
+    /** True once setup completed for the current Live attempt. */
+    @Volatile
+    private var liveSetupDone = false
+
+    /** Live model that last connected OK — in-memory, app run only. */
+    @Volatile
+    private var rememberedWorkingLiveModel: String? = null
+
+    // ── F8 (#13) weak-network guard ───────────────────────────────────
+    // A slow setup (> 6 s) or two consecutive network-class Live
+    // failures this app run marks the network as weak: the NEXT fresh
+    // Live start gets a 6 s setup cap (instead of 12 s) so the
+    // Universal switch happens fast instead of hanging.
+
+    @Volatile
+    private var liveConnectStartMs = 0L
+
+    @Volatile
+    private var lastLiveSetupMs = -1L
+
+    @Volatile
+    private var consecutiveLiveNetworkFailures = 0
+
+    /** The current fresh start is running under the weak-network cap. */
+    @Volatile
+    private var liveWeakNetworkStart = false
+
+    // ── F8 (#5) offline STT fallback (Vosk free-form commands) ───────
+
+    private var voskCommands: VoskCommandRecognizer? = null
+
+    @Volatile
+    private var offlineSttActive = false
+
+    /** The session's Universal listener — the Vosk fallback feeds it too. */
+    private var universalListener: UniversalListener? = null
+
+    /** F8 (#18): media pre-warm already fired for this listen cycle. */
+    @Volatile
+    private var prewarmedThisCycle = false
 
     // F3 Live tool-call dedupe: Gemini toolCall ids already processed in
     // this session, mapped to the exact response that was sent. A
@@ -483,6 +560,7 @@ object VoiceSessionManager {
             // listening and speaking.
             if (muted) {
                 uv.stopListening()
+                voskCommands?.stopListening()
                 uv.stopSpeaking()
             } else if (active) {
                 maybeResumeUniversalListening()
@@ -500,8 +578,10 @@ object VoiceSessionManager {
         pulseJob?.cancel()
         pulseJob = null
         teardownLive()
+        stopVoskFallback()
         universal?.shutdown()
         universal = null
+        universalListener = null
         pipelineRunning = false
         ttsSpeaking = false
         userTurn.setLength(0)
@@ -535,6 +615,7 @@ object VoiceSessionManager {
         CrashLogger.stage(TAG, "fail: $message")
         pulseJob?.cancel()
         teardownLive()
+        stopVoskFallback()
         universal?.shutdown()
         universal = null
         active = false
@@ -553,21 +634,48 @@ object VoiceSessionManager {
      * Starts the Native Live engine. [resumeHandle] is non-null ONLY
      * for the in-session goAway reconnect (F5.1) — every fresh start
      * passes null so the setup asks for a brand-new session.
+     * [modelOverride] is set ONLY by the F8 (#2) model fallback chain
+     * advancing to its next candidate.
      */
-    private fun startLive(resumeHandle: String? = null) {
+    private fun startLive(resumeHandle: String? = null, modelOverride: String? = null) {
         val store = providerStore ?: return
         val s = settings ?: return
         val db = memoryDb ?: return
         val gemini = store.loadConfig(ProviderPresets.GEMINI.id)
         val voice = s.customVoiceName.ifBlank { s.voiceName }
         liveFirstFrameLogged = false
-        CrashLogger.stage(TAG, "live: connect begin model=${s.liveModel}")
+        // F8 (#2): a FRESH start (not a reconnect, not a chain step)
+        // rebuilds the candidate list and re-evaluates the #13
+        // weak-network guard for this start.
+        if (resumeHandle == null && modelOverride == null) {
+            liveCandidates = buildLiveCandidates(s)
+            liveCandidateIndex = 0
+            liveWeakNetworkStart =
+                lastLiveSetupMs > WEAK_SETUP_THRESHOLD_MS ||
+                    consecutiveLiveNetworkFailures >= 2
+            if (liveWeakNetworkStart) {
+                AppLog.w(
+                    "Live",
+                    "weak-network guard: lastSetup=${lastLiveSetupMs}ms " +
+                        "consecutiveNetFailures=$consecutiveLiveNetworkFailures — " +
+                        "capping this Live start's setup wait at " +
+                        "${WEAK_SETUP_CAP_MS / 1000}s (was 12s)"
+                )
+            }
+        }
+        val attemptModel = modelOverride
+            ?: liveCandidates.getOrNull(liveCandidateIndex)
+            ?: s.liveModel
+        liveAttemptModel = attemptModel
+        liveSetupDone = false
+        liveConnectStartMs = SystemClock.elapsedRealtime()
+        CrashLogger.stage(TAG, "live: connect begin model=$attemptModel")
 
         _uiState.value = VoiceUiState(
             status = VoiceStatus.CONNECTING,
             mode = VoiceMode.LIVE,
             voiceName = voice,
-            liveModel = s.liveModel,
+            liveModel = attemptModel,
             engineLabel = "LIVE • $voice",
             micMuted = _uiState.value.micMuted
         )
@@ -592,13 +700,19 @@ object VoiceSessionManager {
             // from THIS session's goAway reconnect (resumeHandle).
             val liveClient = GeminiLiveClient(
                 apiKey = gemini.apiKey,
-                model = s.liveModel,
+                model = attemptModel,
                 voiceName = voice,
                 systemPrompt = prompt,
                 resumptionHandle = resumeHandle,
                 toolDeclarations = ToolRegistry.liveFunctionDeclarations(),
                 languageCode = UniversalVoice.liveLanguageCode(s.language),
                 providerBaseUrl = gemini.baseUrl,
+                // F8 (#13): weak-network starts get the 6 s setup cap.
+                setupTimeoutMs = if (liveWeakNetworkStart) {
+                    WEAK_SETUP_CAP_MS
+                } else {
+                    LIVE_SETUP_TIMEOUT_MS
+                },
                 listener = LiveListener()
             )
             client = liveClient
@@ -646,6 +760,118 @@ object VoiceSessionManager {
     }
 
     /**
+     * F8 (#2): the ordered Live-model candidate list for one fresh
+     * session start: [the working model remembered from earlier in
+     * this app run, when it isn't the configured one] → the user's
+     * configured model → other NATIVE_AUDIO models from the Gemini
+     * discovery cache → known alternates. De-duplicated. The chain
+     * itself never exceeds [MAX_LIVE_MODEL_ATTEMPTS] attempts.
+     */
+    private fun buildLiveCandidates(s: JarvisSettings): List<String> {
+        val store = providerStore
+        val discovered = if (store == null) {
+            emptyList()
+        } else {
+            runCatching {
+                store.cachedModelIds(ProviderPresets.GEMINI.id)
+                    .filter {
+                        ModelDiscovery.classify(it) == ModelDiscovery.Kind.NATIVE_AUDIO
+                    }
+            }.getOrDefault(emptyList())
+        }
+        val ordered = LinkedHashSet<String>()
+        val remembered = rememberedWorkingLiveModel
+        if (!remembered.isNullOrBlank() && remembered != s.liveModel) {
+            // It connected earlier in THIS app run while the configured
+            // model didn't — don't waste 12 s re-proving that.
+            ordered += remembered
+        }
+        ordered += s.liveModel
+        ordered += discovered
+        ordered += KNOWN_LIVE_ALTERNATES
+        return ordered.filter { it.isNotBlank() }
+    }
+
+    /**
+     * F8 (#2): is this failure about the MODEL (unknown / unavailable
+     * / unsupported model)? Only model-class failures advance the
+     * fallback chain — key rejections and network failures must not
+     * (trying another model fixes neither). Session rejections are
+     * excluded: they carry their own F5.1 clean-retry.
+     */
+    private fun isModelClassFailure(message: String): Boolean {
+        if (isSessionRejection(message)) return false
+        if (FriendlyErrors.shortReason(message) == "model not found") return true
+        val lower = message.lowercase()
+        if (!lower.contains("model")) return false
+        return lower.contains("not found") ||
+            lower.contains("not_found") ||
+            lower.contains("not available") ||
+            lower.contains("not supported") ||
+            lower.contains("invalid model") ||
+            lower.contains("unknown model")
+    }
+
+    /** F8 (#13): network-class Live failures feed the weak-network guard. */
+    private fun isNetworkClassFailure(message: String): Boolean {
+        val lower = message.lowercase()
+        return lower.contains("unable to resolve") ||
+            lower.contains("setup timeout") ||
+            lower.contains("timed out") ||
+            lower.contains("timeout") ||
+            lower.contains("network") ||
+            lower.contains("socket") ||
+            lower.contains("failed to connect") ||
+            lower.contains("connection reset") ||
+            lower.contains("connection closed")
+    }
+
+    /**
+     * F8 (#1): the Voice screen's "Why?" diagnosis — the last Live
+     * failure explained via FriendlyErrors, the last ~8 "Live" AppLog
+     * lines, and one concrete next step. Null when Live never failed
+     * in this app run.
+     */
+    fun liveDiagnosis(): LiveDiagnosis? {
+        val reason = lastLiveFailureReason ?: return null
+        val mapped = FriendlyErrors.map(reason)
+        val lines = AppLog.entries.value
+            .filter { it.tag == "Live" }
+            .takeLast(8)
+            .map { AppLog.formatLine(it) }
+        val nextStep = when {
+            isModelClassFailure(reason) -> {
+                val next = liveCandidates.getOrNull(liveCandidateIndex + 1)
+                    ?: KNOWN_LIVE_ALTERNATES.firstOrNull { it != liveAttemptModel }
+                if (next != null) {
+                    "Try Live model: $next (Settings → API & Connection → Live model)."
+                } else {
+                    "Pick a different Live model in Settings → API & Connection."
+                }
+            }
+            FriendlyErrors.shortReason(reason) == "API key rejected" ->
+                "Check the Gemini key is an AI Studio key " +
+                    "(Settings → API & Connection) — gateway keys can't run native Live."
+            isSessionRejection(reason) ->
+                "Nothing to fix: Jarvis already retries once with a clean " +
+                    "session. If it repeats, restart the app."
+            isNetworkClassFailure(reason) ->
+                "Check your connection, then tap Retry — Universal voice " +
+                    "keeps working in the meantime."
+            else ->
+                "Tap Retry; if it keeps failing, the full trail is in " +
+                    "Settings → App Logs (tag: Live)."
+        }
+        return LiveDiagnosis(
+            headline = mapped.headline,
+            rawDetail = mapped.rawDetail,
+            logLines = lines,
+            nextStep = nextStep,
+            failedModel = liveAttemptModel
+        )
+    }
+
+    /**
      * Native Live died (setup rejected, socket failure, dead close).
      * First time: tear the Live pieces down and continue the SAME
      * session on the Universal engine with a system note — never a dead
@@ -667,6 +893,15 @@ object VoiceSessionManager {
         // short FriendlyErrors cause so the user can see WHY Live died.
         AppLog.e("Live", "native live failed: $message")
         lastLiveFailureReason = message
+        // F8 (#13): network-class failures feed the weak-network
+        // guard (reset by the next successful setup).
+        if (isNetworkClassFailure(message)) {
+            consecutiveLiveNetworkFailures++
+            AppLog.w(
+                "Live",
+                "network-class Live failure #$consecutiveLiveNetworkFailures this app run"
+            )
+        }
         if (!active || reconnecting) return
         // F5.1: a session/handle rejection means the server refused
         // the resumption handle — not the model, not the key. Retry
@@ -680,8 +915,46 @@ object VoiceSessionManager {
             pulseJob?.cancel()
             _amplitude.value = 0f
             setStatus(VoiceStatus.CONNECTING)
-            startLive()
+            // F8: stay on the SAME candidate model — a plain
+            // startLive() would rebuild the chain from candidate 0.
+            startLive(
+                modelOverride = liveAttemptModel.ifBlank { null }
+            )
             return
+        }
+        // F8 (#2): a MODEL-class failure during setup advances the
+        // fallback chain — the next candidate model gets a fresh
+        // client/session BEFORE Live is given up for Universal. The
+        // F5.1 clean retry above applies per attempt (liveCleanRetried
+        // is per session start, and a session rejection for THIS
+        // attempt still retries clean once).
+        if (!liveSetupDone && isModelClassFailure(message)) {
+            val nextIndex = liveCandidateIndex + 1
+            if (nextIndex < liveCandidates.size &&
+                nextIndex < MAX_LIVE_MODEL_ATTEMPTS
+            ) {
+                val next = liveCandidates[nextIndex]
+                AppLog.w(
+                    "Live",
+                    "model fallback: '$liveAttemptModel' failed " +
+                        "(${FriendlyErrors.shortReason(message)}) — trying '$next' " +
+                        "(attempt ${nextIndex + 1}/" +
+                        "${minOf(liveCandidates.size, MAX_LIVE_MODEL_ATTEMPTS)})"
+                )
+                liveCandidateIndex = nextIndex
+                // F8/F5.1: the clean-session retry applies PER ATTEMPT.
+                liveCleanRetried = false
+                teardownLive()
+                pulseJob?.cancel()
+                _amplitude.value = 0f
+                setStatus(VoiceStatus.CONNECTING)
+                startLive(modelOverride = next)
+                return
+            }
+            AppLog.w(
+                "Live",
+                "model fallback chain exhausted after ${liveCandidateIndex + 1} attempt(s)"
+            )
         }
         if (!liveSwitchedToUniversal && settings != null) {
             liveSwitchedToUniversal = true
@@ -692,7 +965,12 @@ object VoiceSessionManager {
                 VoiceCaption(
                     fromUser = false,
                     text = "Native Live unavailable " +
-                        "(${FriendlyErrors.shortReason(message)}) — switched to Universal",
+                        "(${FriendlyErrors.shortReason(message)}) — switched to Universal" +
+                        if (liveWeakNetworkStart) {
+                            " (weak network suspected — Live was given 6s)"
+                        } else {
+                            ""
+                        },
                     kind = CaptionKind.SYSTEM
                 )
             )
@@ -708,6 +986,34 @@ object VoiceSessionManager {
             CrashLogger.stage(TAG, "live: setupComplete received")
             reconnectAttempts = 0
             reconnecting = false
+            // F8 (#13): record the setup duration + clear the
+            // weak-network failure counter — this start was healthy.
+            liveSetupDone = true
+            if (liveConnectStartMs > 0) {
+                lastLiveSetupMs = SystemClock.elapsedRealtime() - liveConnectStartMs
+                AppLog.i(
+                    "Live",
+                    "setup took ${lastLiveSetupMs}ms (model=$liveAttemptModel)"
+                )
+            }
+            consecutiveLiveNetworkFailures = 0
+            // F8 (#2): a fallback model connected — remember it for
+            // this app run (never persisted over the user's setting)
+            // and SAY SO once via a system caption.
+            val configuredModel = settings?.liveModel
+            if (liveAttemptModel.isNotBlank()) {
+                rememberedWorkingLiveModel = liveAttemptModel
+                if (configuredModel != null && liveAttemptModel != configuredModel) {
+                    addCaption(
+                        VoiceCaption(
+                            fromUser = false,
+                            text = "Live connected with $liveAttemptModel " +
+                                "(your set model $configuredModel didn't respond)",
+                            kind = CaptionKind.SYSTEM
+                        )
+                    )
+                }
+            }
             val captureDevice = AudioCapture(
                 onChunk = { chunk ->
                     if (!_uiState.value.micMuted) client?.sendAudioChunk(chunk)
@@ -981,8 +1287,10 @@ object VoiceSessionManager {
             micMuted = _uiState.value.micMuted
         )
         val ctx = appContext ?: return
+        val listener = UniversalListener()
+        universalListener = listener
         val uv = UniversalVoice(
-            ctx, s.language, UniversalListener(),
+            ctx, s.language, listener,
             // F5.1: TTS tuning providers read the persisted slider
             // values LIVE on every reply, so speed/pitch changes in
             // Settings apply without restarting the session.
@@ -1013,7 +1321,107 @@ object VoiceSessionManager {
         pipelineRunning = false
         setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
         CrashLogger.stage(TAG, "universal: recognizer ready — listening")
-        if (!_uiState.value.micMuted) uv.startListening()
+        if (!_uiState.value.micMuted) {
+            // F8 (#5): device offline at engine start + the Vosk model
+            // present → the offline fallback owns recognition from the
+            // very first cycle (SpeechRecognizer would only error).
+            if (isDeviceOffline(ctx) && VoskModelManager.isModelComplete(ctx)) {
+                startVoskFallback("device offline at engine start")
+            } else {
+                uv.startListening()
+            }
+        }
+    }
+
+    // ── F8 (#5) offline STT fallback plumbing ──────────────────────────
+
+    /** True when the device currently has no internet-capable network. */
+    private fun isDeviceOffline(context: Context): Boolean {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? ConnectivityManager ?: return false
+        val network = cm.activeNetwork ?: return true
+        val caps = cm.getNetworkCapabilities(network) ?: return true
+        return !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    /** Listen on whichever recognizer currently owns the cycle. */
+    private fun startCurrentListening() {
+        if (offlineSttActive) {
+            voskCommands?.startListening()
+        } else {
+            universal?.startListening()
+        }
+    }
+
+    /**
+     * Swap SpeechRecognizer → Vosk free-form command recognition.
+     * Finals/partials feed the session's Universal listener, so the
+     * dispatch pipeline (gates, mis-script logic, quick commands, the
+     * agent loop) is identical to the online path. When the Vosk
+     * model is NOT downloaded there is no fallback: the existing
+     * friendly error stays and a hint points at the wake-model
+     * download (which is the same model file).
+     */
+    private fun startVoskFallback(reason: String) {
+        val ctx = appContext ?: return
+        if (!VoskModelManager.isModelComplete(ctx)) {
+            AppLog.w(
+                "STT",
+                "offline STT fallback unavailable — Vosk model not " +
+                    "downloaded (reason: $reason)"
+            )
+            _uiState.value = _uiState.value.copy(
+                sttHint = "Offline speech needs the wake-word model — " +
+                    "download it in Settings → Wake Word to command Jarvis offline."
+            )
+            return
+        }
+        if (offlineSttActive) {
+            voskCommands?.startListening()
+            return
+        }
+        // One mic consumer at a time: SpeechRecognizer stands down.
+        universal?.stopListening()
+        val recognizer = VoskCommandRecognizer(
+            ctx,
+            object : VoskCommandRecognizer.Listener {
+                override fun onFinalResult(text: String) {
+                    universalListener?.onFinalResult(text)
+                }
+
+                override fun onPartialResult(text: String) {
+                    universalListener?.onPartialResult(text)
+                }
+
+                override fun onError(message: String) {
+                    AppLog.w("STT", "vosk command recognizer error: $message")
+                    stopVoskFallback()
+                    if (active && _uiState.value.mode == VoiceMode.UNIVERSAL &&
+                        !_uiState.value.micMuted
+                    ) {
+                        universal?.startListening()
+                    }
+                }
+
+                override fun onListeningStarted() {
+                    universalListener?.onListeningStarted()
+                }
+            }
+        )
+        voskCommands = recognizer
+        offlineSttActive = true
+        AppLog.i("STT", "offline STT fallback ACTIVE (Vosk free-form) — reason: $reason")
+        _uiState.value = _uiState.value.copy(
+            sttHint = "Offline — on-device voice commands (small vocabulary)."
+        )
+        recognizer.startListening()
+    }
+
+    /** Tear the Vosk fallback down (session end / failure / mute). */
+    private fun stopVoskFallback() {
+        voskCommands?.shutdown()
+        voskCommands = null
+        offlineSttActive = false
     }
 
     private fun shortModelName(model: String): String {
@@ -1047,7 +1455,7 @@ object VoiceSessionManager {
                         "gate #${pending.id} pending during a voice turn — " +
                             "listening for a spoken yes/no"
                     )
-                    universal?.startListening()
+                    startCurrentListening()
                 }
             }
         }
@@ -1116,6 +1524,35 @@ object VoiceSessionManager {
         }
     }
 
+    /**
+     * F8 (#18): partial-result pre-warm. A partial that confidently
+     * names a media target ("play … spotify / youtube / video")
+     * pre-LAUNCHES that app — only the launch, never a search or
+     * playback — so when the final command lands, its deep intent
+     * finds the app already foreground and waitForPackage returns
+     * instantly. At most once per listen cycle; ambiguous partials
+     * (no platform word) never pre-warm. If the final command turns
+     * out different, the only cost is an app sitting open.
+     */
+    private fun maybePrewarm(partial: String) {
+        if (prewarmedThisCycle || pipelineRunning) return
+        if (_uiState.value.mode != VoiceMode.UNIVERSAL) return
+        val normalized = partial.lowercase()
+        if (!normalized.contains("play")) return
+        val app = when {
+            normalized.contains("spotify") -> "Spotify"
+            normalized.contains("youtube") || normalized.contains("video") ->
+                "YouTube"
+            else -> return
+        }
+        prewarmedThisCycle = true
+        val ctx = appContext ?: return
+        AppLog.i("Agent", "prewarm=$app (partial: '${partial.take(40)}')")
+        scope.launch(Dispatchers.IO) {
+            runCatching { DeepIntents(ctx).openApp(app) }
+        }
+    }
+
     /** A final STT result that passed every intercept — run the turn. */
     private fun dispatchUniversalFinal(text: String) {
         guardUsedThisTurn = false
@@ -1131,10 +1568,25 @@ object VoiceSessionManager {
     private class UniversalListener : UniversalVoice.Listener {
         override fun onListeningStarted() {
             if (!active) return
+            // F8 (#18): a new listen cycle re-arms the media pre-warm.
+            prewarmedThisCycle = false
             // F5: a fresh listen cycle buries any stale recognizer hint.
             if (_uiState.value.sttHint != null) {
                 _uiState.value = _uiState.value.copy(sttHint = null)
             }
+        }
+
+        /**
+         * F8 (#5): SpeechRecognizer hit a network error — swap to the
+         * offline Vosk fallback (which restarts the listen cycle
+         * on-device). When the model is missing, startVoskFallback
+         * only shows the hint and the normal error path below continues.
+         */
+        override fun onNetworkError() {
+            if (!active) return
+            if (_uiState.value.mode != VoiceMode.UNIVERSAL) return
+            AppLog.w("STT", "SpeechRecognizer network error — trying Vosk offline fallback")
+            startVoskFallback("SpeechRecognizer network error")
         }
 
         override fun onBeginningOfSpeech() {
@@ -1159,6 +1611,8 @@ object VoiceSessionManager {
                 _uiState.value = _uiState.value.copy(sttHint = null)
             }
             setTurnCaption(fromUser = true, text = text, partial = true)
+            // F8 (#18): a confident media partial pre-launches the app.
+            maybePrewarm(text)
         }
 
         override fun onFinalResult(text: String) {
@@ -1204,7 +1658,7 @@ object VoiceSessionManager {
                             "Gate",
                             "utterance was not a yes/no — still waiting for confirmation"
                         )
-                        universal?.startListening()
+                        startCurrentListening()
                     }
                 }
                 return
@@ -1279,7 +1733,11 @@ object VoiceSessionManager {
                 }
             }
             AppLog.w("STT", "recognizer error: $message")
-            _uiState.value = _uiState.value.copy(sttHint = message)
+            // F8 (#5): under the Vosk fallback the hint belongs to the
+            // fallback ("Offline — on-device commands"), not this error.
+            if (!offlineSttActive) {
+                _uiState.value = _uiState.value.copy(sttHint = message)
+            }
             // One-shot recognizer ended (silence / no match / transient
             // service error) — brief pause, then the loop listens
             // again. F7: the pause dropped 300 ms → 150 ms (the
@@ -1290,6 +1748,7 @@ object VoiceSessionManager {
                 delay(150)
                 if (active && _uiState.value.mode == VoiceMode.UNIVERSAL &&
                     !_uiState.value.micMuted && !mediaListenBlocked &&
+                    !offlineSttActive &&
                     (!pipelineRunning || gateArmed)
                 ) {
                     setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
@@ -1488,7 +1947,7 @@ object VoiceSessionManager {
         if (pipelineRunning || !pipelineDone) return
         if (ttsSpeaking) return // drain callback resumes when speech ends
         setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
-        universal?.startListening()
+        startCurrentListening()
     }
 
     /**
@@ -1623,6 +2082,25 @@ object VoiceSessionManager {
             _captions.value = list
         }
     }
+
+    /** F8 (#2): max Live model attempts per fresh session start. */
+    private const val MAX_LIVE_MODEL_ATTEMPTS = 3
+
+    /** F8 (#2): known native-audio alternates, tried after the cache. */
+    private val KNOWN_LIVE_ALTERNATES = listOf(
+        "gemini-2.5-flash-native-audio-preview-12-2025",
+        "gemini-live-2.5-flash-preview",
+        "gemini-2.0-flash-live-001"
+    )
+
+    /** F8 (#13): a setup slower than this marks the network weak. */
+    private const val WEAK_SETUP_THRESHOLD_MS = 6_000L
+
+    /** F8 (#13): setup-wait cap for starts under the weak-network guard. */
+    private const val WEAK_SETUP_CAP_MS = 6_000L
+
+    /** Default Live setup wait (mirrors GeminiLiveClient's default). */
+    private const val LIVE_SETUP_TIMEOUT_MS = 12_000L
 
     private const val LIVE_PREFS = "jarvis_live_session"
     /** F5.1: retained ONLY so the legacy persisted handle can be removed. */

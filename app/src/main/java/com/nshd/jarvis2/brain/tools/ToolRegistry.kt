@@ -19,6 +19,11 @@ object ToolRegistry {
             schema(properties = JSONObject())
         ),
         ToolSpec(
+            "take_screenshot",
+            "Take a screenshot of the current screen and save it to the app's screenshots folder. Use when the user asks for a screenshot to keep (see_screen is for looking at the screen yourself).",
+            schema(properties = JSONObject())
+        ),
+        ToolSpec(
             "open_app",
             "Open an installed app by common name (for example WhatsApp, YouTube, Instagram, Chrome, Spotify, Telegram, Gmail, Camera, Settings, Maps or Play Store).",
             schema(

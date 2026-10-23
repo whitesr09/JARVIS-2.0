@@ -25,10 +25,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Accessibility
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -93,6 +95,9 @@ fun HandsFreeScreen(
     }
     var screenPreview by remember { mutableStateOf<String?>(null) }
     var torchOn by remember { mutableStateOf(false) }
+    // F8 (#106): self-test results (null = dialog closed).
+    var selfTestResults by remember { mutableStateOf<List<SelfTestResult>?>(null) }
+    var selfTestRunning by remember { mutableStateOf(false) }
 
     val activity = context as? ComponentActivity
     DisposableEffect(activity) {
@@ -455,8 +460,119 @@ fun HandsFreeScreen(
                 }
             }
         }
+        // ── F8 (#106): self-test ───────────────────────────────────────
+        SectionLabel(
+            text = "SELF-TEST",
+            modifier = Modifier.padding(
+                top = JarvisDimens.sectionGap,
+                bottom = JarvisDimens.spaceSm
+            )
+        )
+        GlassCard {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconSquare(icon = Icons.Filled.CheckCircle)
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Run self-test", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        text = "Checks mic, speech, voice, hands, overlay, " +
+                            "provider, offline model and storage — live, " +
+                            "with a Fix link for whatever fails.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                OutlinedButton(
+                    enabled = !selfTestRunning,
+                    onClick = {
+                        selfTestRunning = true
+                        scope.launch {
+                            val results = withContext(Dispatchers.IO) {
+                                SelfTest.run(context, settings)
+                            }
+                            selfTestResults = results
+                            selfTestRunning = false
+                        }
+                    }
+                ) {
+                    Text(if (selfTestRunning) "Running…" else "Run")
+                }
+            }
+        }
         // Bottom clearance so the last card never hides behind the bottom bar (F2).
         Spacer(modifier = Modifier.height(120.dp))
+    }
+
+    if (selfTestResults != null) {
+        val results = selfTestResults ?: emptyList()
+        AlertDialog(
+            onDismissRequest = { selfTestResults = null },
+            title = {
+                Text(
+                    "Self-test — ${results.count { it.passed }}/${results.size} passed"
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    results.forEach { result ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 5.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Icon(
+                                imageVector = if (result.passed) {
+                                    Icons.Filled.CheckCircle
+                                } else {
+                                    Icons.Filled.Warning
+                                },
+                                contentDescription = null,
+                                tint = if (result.passed) {
+                                    JarvisSemanticColors.success
+                                } else {
+                                    MaterialTheme.colorScheme.error
+                                },
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = result.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = result.detail,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (result.fixIntent != null && result.fixLabel != null) {
+                                    TextButton(
+                                        onClick = {
+                                            runCatching {
+                                                context.startActivity(
+                                                    result.fixIntent.addFlags(
+                                                        Intent.FLAG_ACTIVITY_NEW_TASK
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    ) { Text("Fix: ${result.fixLabel}") }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { selfTestResults = null }) { Text("Close") }
+            }
+        )
     }
 
     if (screenPreview != null) {

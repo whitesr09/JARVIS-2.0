@@ -161,11 +161,13 @@ class FloatingOverlayService : Service() {
         running = true
         palette = readPalette()
         createNotificationChannel()
+        createWatchdogChannel()
         startForegroundCompat(buildNotificationText())
         showOverlayIfPermitted()
         applyForegroundVisibility(AppForeground.isForeground())
         AppForeground.addListener(foregroundListener)
         observeState()
+        startAccessibilityWatchdog()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -184,6 +186,8 @@ class FloatingOverlayService : Service() {
         com.nshd.jarvis2.core.AppLog.i("Overlay", "overlay service destroyed")
         running = false
         AppForeground.removeListener(foregroundListener)
+        watchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+        watchdogRunnable = null
         scope.cancel()
         stopPulse()
         pendingSingleTap?.let { mainHandler.removeCallbacks(it) }
@@ -1351,6 +1355,85 @@ class FloatingOverlayService : Service() {
         getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
     }
 
+    // ── F8 (#88): accessibility watchdog ─────────────────────────────
+    //
+    // Vivo/iQOO silently kill sideloaded accessibility services. A
+    // ~60 s Handler heartbeat (this service is persistent while the
+    // overlay is on — no WorkManager, no new infra) checks whether
+    // JarvisAccessibilityService is still connected; when it dies,
+    // ONE high-priority notification offers the one-tap trip back to
+    // Accessibility Settings, re-posted at most once per 6 h, and
+    // cleared the moment the service reconnects.
+
+    private var watchdogRunnable: Runnable? = null
+
+    @Volatile
+    private var a11yWasAlive = true
+
+    @Volatile
+    private var lastWatchdogNotifyMs = 0L
+
+    private fun createWatchdogChannel() {
+        val channel = NotificationChannel(
+            WATCHDOG_CHANNEL_ID,
+            "Jarvis hands alerts",
+            NotificationManager.IMPORTANCE_HIGH
+        )
+        getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+    }
+
+    private fun startAccessibilityWatchdog() {
+        a11yWasAlive = JarvisAccessibilityService.instance != null
+        val runnable = object : Runnable {
+            override fun run() {
+                checkAccessibilityWatchdog()
+                mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+            }
+        }
+        watchdogRunnable = runnable
+        mainHandler.postDelayed(runnable, WATCHDOG_INTERVAL_MS)
+    }
+
+    private fun checkAccessibilityWatchdog() {
+        val alive = JarvisAccessibilityService.instance != null
+        val nm = getSystemService(NotificationManager::class.java) ?: return
+        if (alive) {
+            if (!a11yWasAlive) {
+                a11yWasAlive = true
+                com.nshd.jarvis2.core.AppLog.i(
+                    "Hands", "watchdog: accessibility service reconnected — alert cleared"
+                )
+                runCatching { nm.cancel(WATCHDOG_NOTIFICATION_ID) }
+            }
+            return
+        }
+        // Dead: log the transition once, (re-)post at most once per 6h.
+        if (a11yWasAlive) {
+            a11yWasAlive = false
+            com.nshd.jarvis2.core.AppLog.w(
+                "Hands", "watchdog: accessibility service is DEAD — hands are off"
+            )
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastWatchdogNotifyMs < WATCHDOG_RENOTIFY_MS) return
+        lastWatchdogNotifyMs = now
+        val openSettings = PendingIntent.getActivity(
+            this,
+            3,
+            Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = Notification.Builder(this, WATCHDOG_CHANNEL_ID)
+            .setContentTitle("Jarvis hands are off")
+            .setContentText("Accessibility was switched off — tap to re-enable Jarvis's hands.")
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentIntent(openSettings)
+            .setAutoCancel(true)
+            .setPriority(Notification.PRIORITY_HIGH)
+            .build()
+        runCatching { nm.notify(WATCHDOG_NOTIFICATION_ID, notification) }
+    }
+
     private fun buildNotificationText(): String {
         val goal = TaskState.goal.value
         return if (TaskState.active.value && goal.isNotBlank()) {
@@ -1404,6 +1487,11 @@ class FloatingOverlayService : Service() {
     companion object {
         private const val CHANNEL_ID = "jarvis_overlay"
         private const val NOTIFICATION_ID = 1001
+        /** F8 (#88): watchdog alert channel + notification. */
+        private const val WATCHDOG_CHANNEL_ID = "jarvis_watchdog"
+        private const val WATCHDOG_NOTIFICATION_ID = 1005
+        private const val WATCHDOG_INTERVAL_MS = 60_000L
+        private const val WATCHDOG_RENOTIFY_MS = 6 * 60 * 60_000L
         private const val PREFS_NAME = "jarvis_settings"
         private const val KEY_AVATAR_ID = "avatar_id"
         private const val KEY_ASSISTANT_NAME = "assistant_name"

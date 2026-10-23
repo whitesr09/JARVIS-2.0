@@ -1,6 +1,9 @@
 package com.nshd.jarvis2.brain
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.core.AppLog
@@ -131,6 +134,17 @@ object AgentPipeline {
         if (clean.isBlank()) return@withContext "I didn't catch that — please try again."
         AppLog.d("Agent", "turn received (${clean.length} chars)")
 
+        // ── F8 (#15): stop / cancel — abort the running task. Runs
+        // BEFORE TaskState.begin so TaskState still holds the RUNNING
+        // task's job: abort() cancels that pipeline coroutine and
+        // aborts the whole TaskQueue (queued sub-tasks never run).
+        if (isStopCommand(clean)) {
+            AppLog.i("Agent", "route=quick-stop")
+            TaskState.abort()
+            return@withContext "Stopped — I cancelled the current task " +
+                "and cleared the queue."
+        }
+
         val hudEvent: (ToolEvent) -> Unit = { event ->
             TaskState.step(event.hudText)
             // F6: the running queue item carries the same friendly
@@ -244,6 +258,12 @@ object AgentPipeline {
         ledger: ExecutionLedger,
         onEvent: (ToolEvent) -> Unit
     ): String {
+        // F8 (#15): direct-reply commands (battery / time / date) are
+        // answered locally — no tool, no model, instant.
+        quick.directReply?.let { reply ->
+            onEvent(ToolEvent(ToolEventKind.SUCCESS, quick.toolName, reply))
+            return reply
+        }
         // F7: declare this command's plan for the floating task panel
         // (deep intents advance it phase by phase; ToolExecutor may
         // still replace the whatsapp plan with the send plan).
@@ -774,7 +794,49 @@ object AgentPipeline {
 
     // ── Quick commands ─────────────────────────────────────────────────
 
-    private data class QuickCommand(val toolName: String, val args: JSONObject)
+    private data class QuickCommand(
+        val toolName: String,
+        val args: JSONObject,
+        /** F8 (#15): set for locally-answered commands (no tool runs). */
+        val directReply: String? = null
+    )
+
+    /** F8 (#15): the stop/cancel command family. */
+    private fun isStopCommand(text: String): Boolean =
+        normalizeCommandText(text).lowercase() in STOP_COMMANDS
+
+    /** F8 (#15): battery level + charging state from the sticky intent. */
+    private fun batteryReply(context: Context): String {
+        val intent = context.registerReceiver(
+            null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        ) ?: return "I couldn't read the battery level just now."
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+        if (level < 0 || scale <= 0) return "I couldn't read the battery level just now."
+        val percent = level * 100 / scale
+        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == BatteryManager.BATTERY_STATUS_FULL
+        return "Battery is at $percent%" + if (charging) " and charging." else "."
+    }
+
+    /** F8 (#15): spoken-style local time, e.g. "It's 4:32 PM." */
+    private fun timeReply(): String {
+        val formatted = java.time.LocalTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.ENGLISH))
+        return "It's $formatted."
+    }
+
+    /** F8 (#15): spoken-style local date, e.g. "Today is Friday, 23 October 2026." */
+    private fun dateReply(): String {
+        val formatted = java.time.LocalDate.now()
+            .format(
+                java.time.format.DateTimeFormatter.ofPattern(
+                    "EEEE, d MMMM yyyy", java.util.Locale.ENGLISH
+                )
+            )
+        return "Today is $formatted."
+    }
 
     /**
      * F7 normalization for command matching (chat + Universal STT):
@@ -983,6 +1045,101 @@ object AgentPipeline {
             return QuickCommand("set_volume", JSONObject().put("percent", percent.coerceIn(0, 100)))
         }
 
+        // ── F8 (#15): the 50+ quick-pattern expansion ────────────────
+        // All zero-model: local hardware / intents / direct replies.
+        if (lower == "mute" || lower == "mute volume" || lower == "mute the volume") {
+            return QuickCommand("set_volume", JSONObject().put("percent", 0))
+        }
+        if (lower == "unmute" || lower == "unmute volume") {
+            return QuickCommand("set_volume", JSONObject().put("percent", 50))
+        }
+
+        // Screenshot (the take_screenshot tool saves via a11y/share).
+        if (lower in SCREENSHOT_COMMANDS) {
+            return QuickCommand("take_screenshot", JSONObject())
+        }
+
+        // Battery / time / date — answered locally, no tool at all.
+        if (lower in BATTERY_QUERIES) {
+            return QuickCommand("direct_reply", JSONObject(), directReply = batteryReply(context))
+        }
+        if (lower in TIME_QUERIES) {
+            return QuickCommand("direct_reply", JSONObject(), directReply = timeReply())
+        }
+        if (lower in DATE_QUERIES) {
+            return QuickCommand("direct_reply", JSONObject(), directReply = dateReply())
+        }
+
+        // Media transport (the active session gets the key event).
+        MEDIA_CONTROL_COMMANDS[lower]?.let { action ->
+            return QuickCommand(
+                "media_control", JSONObject().put("action", action)
+            )
+        }
+
+        // Brightness relative steps (set_brightness applies the %).
+        if (lower in BRIGHTNESS_UP_COMMANDS) {
+            val percent = DeepIntents(context).currentBrightnessPercent() + 20
+            return QuickCommand(
+                "set_brightness",
+                JSONObject().put("percent", percent.coerceIn(0, 100))
+            )
+        }
+        if (lower in BRIGHTNESS_DOWN_COMMANDS) {
+            val percent = DeepIntents(context).currentBrightnessPercent() - 20
+            return QuickCommand(
+                "set_brightness",
+                JSONObject().put("percent", percent.coerceIn(0, 100))
+            )
+        }
+
+        // Settings panels — Android won't let apps flip Wi-Fi /
+        // airplane mode directly, so these open the honest panel.
+        if (WIFI_COMMAND_REGEX.matches(lower)) {
+            return QuickCommand("open_panel", JSONObject().put("panel", "wifi"))
+        }
+        if (BLUETOOTH_COMMAND_REGEX.matches(lower)) {
+            return QuickCommand("open_panel", JSONObject().put("panel", "bluetooth"))
+        }
+        if (AIRPLANE_COMMAND_REGEX.matches(lower)) {
+            return QuickCommand("open_panel", JSONObject().put("panel", "airplane"))
+        }
+
+        // Silent mode (DND policy access handled inside the intent).
+        if (lower in SILENT_ON_COMMANDS) {
+            return QuickCommand("set_silent", JSONObject().put("on", true))
+        }
+        if (lower in SILENT_OFF_COMMANDS) {
+            return QuickCommand("set_silent", JSONObject().put("on", false))
+        }
+
+        // Lock screen (a11y global action, API 28+).
+        if (lower in LOCK_COMMANDS) {
+            return QuickCommand("lock_screen", JSONObject())
+        }
+
+        // Navigation keys.
+        if (lower in GO_HOME_COMMANDS) {
+            return QuickCommand("press_key", JSONObject().put("key", "home"))
+        }
+        if (lower in GO_BACK_COMMANDS) {
+            return QuickCommand("press_key", JSONObject().put("key", "back"))
+        }
+
+        // Call <name> — the call_contact tool's own gate rules apply
+        // unchanged (numbers outside Contacts confirm first).
+        Regex("(?i)^call\\s+(.+)$").find(text)?.let { match ->
+            val name = match.groupValues[1].trim()
+            if (name.isNotBlank() &&
+                name.split(Regex("\\s+")).size <= 3 &&
+                !name.contains(" and ", ignoreCase = true)
+            ) {
+                return QuickCommand(
+                    "call_contact", JSONObject().put("contact", name)
+                )
+            }
+        }
+
         Regex("(?i)^open\\s+(.+)$").find(text)?.let { match ->
             val app = match.groupValues[1].trim()
             // Avoid swallowing ordinary model requests that merely begin
@@ -1034,6 +1191,98 @@ object AgentPipeline {
             "if|else|for|while|when|public|private|static|void|int|long|let|const|" +
             "var|new|try|catch|extends|implements|#include|using|namespace)\\b|" +
             "System\\.|console\\.|print\\(|println\\("
+    )
+
+    // ── F8 (#15) quick-pattern tables ────────────────────────────────
+
+    private val STOP_COMMANDS = setOf(
+        "stop", "cancel", "stop it", "cancel it", "abort",
+        "stop task", "cancel task", "stop everything"
+    )
+
+    private val SCREENSHOT_COMMANDS = setOf(
+        "take a screenshot", "take screenshot", "screenshot",
+        "capture screenshot", "take a screen shot", "grab a screenshot"
+    )
+
+    private val BATTERY_QUERIES = setOf(
+        "battery", "battery status", "battery level", "battery percentage",
+        "how much battery", "how much battery is left", "check battery",
+        "battery check", "what is the battery", "what's the battery"
+    )
+
+    private val TIME_QUERIES = setOf(
+        "what time is it", "what's the time", "what is the time",
+        "current time", "tell me the time", "time", "the time"
+    )
+
+    private val DATE_QUERIES = setOf(
+        "what date is it", "what's the date", "what is the date",
+        "today's date", "what day is it", "what is today",
+        "date", "today date"
+    )
+
+    /** Normalized phrase → media_control action. */
+    private val MEDIA_CONTROL_COMMANDS = mapOf(
+        "pause" to "pause",
+        "pause music" to "pause",
+        "pause the music" to "pause",
+        "pause song" to "pause",
+        "pause the song" to "pause",
+        "pause playback" to "pause",
+        "resume" to "play",
+        "resume music" to "play",
+        "resume playback" to "play",
+        "next song" to "next",
+        "next track" to "next",
+        "skip song" to "next",
+        "skip this song" to "next",
+        "previous song" to "previous",
+        "previous track" to "previous",
+        "last song" to "previous"
+    )
+
+    private val BRIGHTNESS_UP_COMMANDS = setOf(
+        "brightness up", "increase brightness", "raise brightness",
+        "brighter", "make it brighter", "turn up brightness"
+    )
+
+    private val BRIGHTNESS_DOWN_COMMANDS = setOf(
+        "brightness down", "decrease brightness", "lower brightness",
+        "dimmer", "make it dimmer", "turn down brightness", "dim the screen"
+    )
+
+    private val WIFI_COMMAND_REGEX =
+        Regex("^(?:turn\\s+(?:on|off)\\s+|open\\s+|show\\s+)?wi-?fi(?:\\s+settings)?$")
+
+    private val BLUETOOTH_COMMAND_REGEX =
+        Regex("^(?:turn\\s+(?:on|off)\\s+|open\\s+|show\\s+)?bluetooth(?:\\s+settings)?$")
+
+    private val AIRPLANE_COMMAND_REGEX =
+        Regex("^(?:turn\\s+(?:on|off)\\s+|open\\s+)?airplane\\s+mode(?:\\s+settings)?$")
+
+    private val SILENT_ON_COMMANDS = setOf(
+        "silent mode on", "turn on silent mode", "enable silent mode",
+        "silent mode", "make it silent", "phone silent", "go silent",
+        "put phone on silent", "silence the phone"
+    )
+
+    private val SILENT_OFF_COMMANDS = setOf(
+        "silent mode off", "turn off silent mode", "disable silent mode",
+        "ring mode", "turn off silent", "unsilent"
+    )
+
+    private val LOCK_COMMANDS = setOf(
+        "lock screen", "lock the screen", "lock my phone",
+        "lock the phone", "lock it"
+    )
+
+    private val GO_HOME_COMMANDS = setOf(
+        "go home", "take me home", "home", "go to home"
+    )
+
+    private val GO_BACK_COMMANDS = setOf(
+        "go back", "press back", "back button"
     )
 
     /** F7: remainders after "spotify …" that are commands, not queries. */

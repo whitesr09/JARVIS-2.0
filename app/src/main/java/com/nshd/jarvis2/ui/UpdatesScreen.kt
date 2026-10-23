@@ -45,6 +45,36 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v1.7.0 — Fast & Solid: Live fallback, offline voice, 50+ instant commands",
+            body = "Live is resilient now: if your set Live model doesn't " +
+                "answer, Jarvis tries the next native-audio models on your " +
+                "API automatically (up to 3, fresh session each) and tells " +
+                "you which one connected — and when Live fails, the Voice " +
+                "screen's new \"Why?\" diagnosis explains it in plain " +
+                "language with the Live log and the exact next step. A " +
+                "weak-network guard notices slow Live setups and stops " +
+                "making you wait the full 12 seconds. No internet? Voice " +
+                "commands fall back to the on-device Vosk engine (download " +
+                "the wake model once) instead of dying. 50+ instant " +
+                "commands now skip the model entirely: flashlight, " +
+                "screenshot, battery, time, date, volume, brightness, " +
+                "media pause/next/previous, Wi-Fi/Bluetooth/airplane " +
+                "panels, silent mode, lock screen, go home/back, call " +
+                "<name>, stop — plus everything from before. Agent steps " +
+                "run on your fastest tested model, screens are sent as " +
+                "compact diffs instead of full dumps, and the hands got " +
+                "smarter: a self-healing element finder, scroll-and-search, " +
+                "per-app playbooks, and a vision fallback that kicks in " +
+                "after two missed taps. A watchdog now warns you if " +
+                "Android silently kills the accessibility service. And in " +
+                "Settings: a one-tap diagnostics pack for sharing exactly " +
+                "what broke (no keys, ever), plus a full self-test that " +
+                "checks mic, speech, voice, hands, overlay, provider, " +
+                "offline model and storage with a Fix link for each failure."
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+
+        InfoCard(
             title = "v1.6.0 — Message sending fixed, floating task panel, direct play routing",
             body = "WhatsApp messages actually send now. The send used to die " +
                 "in a double confirmation: the send tool asked its approval, " +

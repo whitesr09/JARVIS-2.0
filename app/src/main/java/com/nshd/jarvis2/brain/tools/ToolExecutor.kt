@@ -37,6 +37,19 @@ class ToolExecutor(
     private val contactsResolver = ContactsResolver(appContext, memoryDb)
     private val vision = VisionGrounder(appContext)
 
+    // F8 (#21): the previous step's compact screen entries (stable
+    // keys), so step ≥2 of an agent turn sends only what changed.
+    // Per-executor state: one executor serves one agent turn (the
+    // Live path builds one per call, so Live always gets full
+    // summaries — its first-step behaviour, unchanged).
+    private var previousScreenKeys: Set<String>? = null
+    private var previousScreenPackage: String? = null
+
+    // F8 (#30): consecutive element-targeting failures this turn and
+    // the vision assists already spent (hard cap per turn).
+    private var consecutiveTargetFailures = 0
+    private var visionAssistsUsed = 0
+
     suspend fun execute(name: String, args: JSONObject): ToolResult =
         execute(name, args, includeScreenSummary = true)
 
@@ -86,6 +99,14 @@ class ToolExecutor(
         } catch (e: Exception) {
             ToolResult(false, "Tool $name failed safely: ${e.message ?: "unexpected error"}")
         }
+        // F8 (#30): targeting-failure streak for the vision fallback.
+        if (name == "click_element" || name == "click_text") {
+            if (raw.success) {
+                consecutiveTargetFailures = 0
+            } else if (isTargetMiss(raw.message)) {
+                consecutiveTargetFailures++
+            }
+        }
         com.nshd.jarvis2.core.AppLog.d(
             "Agent",
             "tool $name ${if (raw.success) "ok" else "FAILED"} " +
@@ -93,7 +114,8 @@ class ToolExecutor(
         )
         activeLedger?.record(name, args, raw)
         if (!includeScreenSummary || name == "inspect_screen" ||
-            name == "see_screen" || name == "vision_tap"
+            name == "see_screen" || name == "vision_tap" ||
+            name == "take_screenshot"
         ) return raw
         val service = JarvisAccessibilityService.instance ?: return raw
         if (name in UI_MUTATION_TOOLS) {
@@ -108,10 +130,129 @@ class ToolExecutor(
             HandsActions.waitForSettle(900)
         }
         return try {
-            val summary = service.screenReader().serializeCompact()
+            val summary = screenSummaryForStep(service)
             ToolResult(raw.success, raw.message + "\nScreen now:\n" + summary)
         } catch (e: Exception) {
             raw
+        }
+    }
+
+    /**
+     * F8 (#21): step-aware screen summary. The FIRST summary of a turn
+     * (and any summary after the foreground app changes) is the full
+     * compact serialization; later steps send ONLY the entries that
+     * changed vs the previous step — keyed by their serialized line
+     * minus the volatile [#index] prefix, so a label/state change IS
+     * a diff entry. Focused/editable elements are ALWAYS included
+     * (they're where the action is), and brand-new elements (e.g. a
+     * dialog's) arrive as new keys. A diff over [DIFF_ENTRY_CAP]
+     * falls back to the full compact list; inspect_screen always
+     * returns the full serialization, untouched.
+     */
+    private fun screenSummaryForStep(
+        service: JarvisAccessibilityService
+    ): String {
+        val reader = service.screenReader()
+        val (pkg, lines) = reader.compactEntries()
+        val keys = lines.map { screenEntryKey(it) }.toSet()
+        val previous = previousScreenKeys
+        val previousPkg = previousScreenPackage
+        previousScreenKeys = keys
+        previousScreenPackage = pkg
+        if (previous == null || previousPkg != pkg) {
+            com.nshd.jarvis2.core.AppLog.d(
+                "Agent", "screen summary full=${lines.size} diff=full (first/app change)"
+            )
+            if (lines.isEmpty()) {
+                return "App: $pkg\nVisible Elements: (none exposed by accessibility)"
+            }
+            return buildString {
+                append("App: ").append(pkg).append("\nVisible Elements:")
+                lines.forEach { line -> append("\n").append(line) }
+            }
+        }
+        val changed = lines.filter { line ->
+            screenEntryKey(line) !in previous || line.contains("(InputField)")
+        }
+        val unchangedCount = (lines.size - changed.size).coerceAtLeast(0)
+        com.nshd.jarvis2.core.AppLog.d(
+            "Agent", "screen summary full=${lines.size} diff=${changed.size}"
+        )
+        if (changed.size > DIFF_ENTRY_CAP) {
+            return buildString {
+                append("App: ").append(pkg).append("\nVisible Elements:")
+                lines.forEach { line -> append("\n").append(line) }
+            }
+        }
+        return buildString {
+            append("App: ").append(pkg)
+            append("\nVisible Elements (changed only; unchanged: ")
+            append(unchangedCount).append(" elements hidden):")
+            if (changed.isEmpty()) {
+                append("\n(no visible changes)")
+            } else {
+                changed.forEach { line -> append("\n").append(line) }
+            }
+        }
+    }
+
+    /** Stable diff key for one compact entry line: everything after "[#N] ". */
+    private fun screenEntryKey(line: String): String =
+        line.substringAfter("] ", line)
+
+    /** F8 (#30): does this failure mean "the target wasn't there"? */
+    private fun isTargetMiss(message: String): Boolean =
+        message.contains("No visible element matched") ||
+            message.contains("not in the last screen snapshot") ||
+            message.contains("could not be re-found")
+
+    /**
+     * F8 (#30): vision fallback assist. After TWO consecutive
+     * targeting failures in this turn, the next click attempt is
+     * served by vision instead: screenshot → the provider's vision
+     * model grounds the described target → coordinate tap. Returns
+     * null when the assist doesn't apply (streak too short, cap
+     * reached, or no screenshot source — then normal targeting just
+     * proceeds and fails honestly). Hard cap: [MAX_VISION_ASSISTS]
+     * per turn. This is a loop-level assist inside the existing
+     * click tools, NOT a new user-facing tool.
+     */
+    private suspend fun visionAssist(description: String): ToolResult? {
+        if (description.isBlank()) return null
+        if (consecutiveTargetFailures < 2) return null
+        if (visionAssistsUsed >= MAX_VISION_ASSISTS) return null
+        val image = vision.captureImageBase64()
+        if (image == null) {
+            com.nshd.jarvis2.core.AppLog.w(
+                "Hands",
+                "vision-fallback wanted for \"$description\" but no " +
+                    "screenshot source is available — degrading to normal targeting"
+            )
+            return null
+        }
+        visionAssistsUsed++
+        consecutiveTargetFailures = 0
+        com.nshd.jarvis2.core.AppLog.i(
+            "Hands",
+            "vision-fallback used (assist $visionAssistsUsed/$MAX_VISION_ASSISTS) " +
+                "for \"$description\""
+        )
+        return when (val grounded = vision.ground(description, image)) {
+            is GroundingResult.Failed -> ToolResult(
+                false,
+                "Vision fallback could not locate \"$description\": ${grounded.message}"
+            )
+            is GroundingResult.Found -> {
+                val tapped = HandsActions.tapPercent(
+                    grounded.x / 10.0, grounded.y / 10.0
+                )
+                ToolResult(
+                    tapped.success,
+                    "Vision fallback tapped \"$description\" at " +
+                        "(${grounded.x}, ${grounded.y}) via ${grounded.providerLabel} " +
+                        "vision. ${tapped.message}"
+                )
+            }
         }
     }
 
@@ -129,6 +270,19 @@ class ToolExecutor(
 
         return when (name) {
             "inspect_screen" -> inspectScreen()
+            "take_screenshot" -> takeScreenshot()
+            // F8 (#15): internal quick-command tools (not in the model
+            // registry — AgentPipeline's quick router calls them).
+            "media_control" -> args.requiredString("action")?.let {
+                intents.mediaKey(it).toToolResult()
+            } ?: missing("action")
+            "open_panel" -> args.requiredString("panel")?.let {
+                intents.openPanel(it).toToolResult()
+            } ?: missing("panel")
+            "set_silent" -> if (args.has("on")) {
+                intents.setSilent(args.optBoolean("on")).toToolResult()
+            } else missing("on")
+            "lock_screen" -> HandsActions.lockScreen().toToolResult()
             "open_app" -> args.requiredString("app")?.let { app ->
                 intents.openApp(app).toToolResult()
             } ?: missing("app")
@@ -164,6 +318,35 @@ class ToolExecutor(
             "see_screen" -> seeScreen()
             "vision_tap" -> visionTap(args)
             else -> ToolResult(false, "Unknown tool: $name")
+        }
+    }
+
+    /**
+     * F8 (#15): capture the screen and SAVE it (filesDir/screenshots/)
+     * — unlike see_screen, which only shows the image to the model.
+     */
+    private suspend fun takeScreenshot(): ToolResult {
+        val image = vision.captureImageBase64()
+            ?: return ToolResult(
+                false,
+                "No screen image is available. Enable the Accessibility Service " +
+                    "(Permissions → Accessibility) or start Screen Share in Settings, then ask again."
+            )
+        val source = vision.captureSourceName() ?: "screen capture"
+        return try {
+            val bytes = android.util.Base64.decode(image, android.util.Base64.DEFAULT)
+            val dir = java.io.File(appContext.filesDir, "screenshots").apply { mkdirs() }
+            val stamp = java.text.SimpleDateFormat(
+                "yyyyMMdd-HHmmss", java.util.Locale.US
+            ).format(java.util.Date())
+            val file = java.io.File(dir, "jarvis-$stamp.jpg")
+            file.writeBytes(bytes)
+            com.nshd.jarvis2.core.AppLog.i(
+                "Tools", "screenshot saved via $source (${bytes.size} bytes)"
+            )
+            ToolResult(true, "Screenshot taken via $source and saved as ${file.name}.")
+        } catch (e: Exception) {
+            ToolResult(false, "The screenshot was captured but could not be saved: ${e.message ?: "storage error"}")
         }
     }
 
@@ -242,6 +425,8 @@ class ToolExecutor(
         val index = args.optInt("element_id", -1)
         if (index < 0) return ToolResult(false, "element_id must be a non-negative snapshot index.")
         val element = JarvisAccessibilityService.lastSnapshot.getOrNull(index)
+        // F8 (#30): two targeting failures in a row → vision assist.
+        visionAssist(element?.label.orEmpty())?.let { return it }
         val targetText = listOf(element?.label.orEmpty(), element?.text.orEmpty(), element?.desc.orEmpty())
             .joinToString(" ")
         if (isPaymentLike(targetText)) {
@@ -255,6 +440,8 @@ class ToolExecutor(
 
     private suspend fun clickText(args: JSONObject): ToolResult {
         val text = args.requiredString("text") ?: return missing("text")
+        // F8 (#30): two targeting failures in a row → vision assist.
+        visionAssist(text)?.let { return it }
         if (isPaymentLike(text)) {
             val approved = ConfirmGate.confirm(
                 "This tap targets a payment or purchase control: \"$text\". Allow it?"
@@ -591,9 +778,15 @@ class ToolExecutor(
 
     companion object {
         private const val MAX_UNCONFIRMED_BULK = 5
+        /** F8 (#21): a bigger diff than this falls back to full compact. */
+        private const val DIFF_ENTRY_CAP = 40
+        /** F8 (#30): vision assists allowed per agent turn. */
+        private const val MAX_VISION_ASSISTS = 2
         private const val QUICKEDIT_PACKAGE = "com.rhmsoft.edit"
         /** Read-only screen observation — exempt from the F3 ledger. */
-        private val OBSERVATION_TOOLS = setOf("inspect_screen", "see_screen")
+        private val OBSERVATION_TOOLS = setOf(
+            "inspect_screen", "see_screen", "take_screenshot"
+        )
 
         /**
          * Stateful-but-repeatable tools exempt from ledger dedupe.
