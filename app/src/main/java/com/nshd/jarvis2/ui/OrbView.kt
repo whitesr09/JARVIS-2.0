@@ -81,6 +81,19 @@ fun VoiceStatus.toOrbState(): OrbState = when (this) {
     VoiceStatus.ERROR -> OrbState.ERROR
 }
 
+/**
+ * F7: THE orb-state mapping, single source for Home and Voice.
+ * Voice-session states always win; with no live voice state, a
+ * RUNNING task (TaskQueue) shows THINKING — background work is
+ * visible on the Home orb even with no voice session — else IDLE.
+ */
+fun orbStateFor(status: VoiceStatus, taskRunning: Boolean): OrbState =
+    when (status) {
+        VoiceStatus.IDLE ->
+            if (taskRunning) OrbState.THINKING else OrbState.IDLE
+        else -> status.toOrbState()
+    }
+
 // ── Composable ───────────────────────────────────────────────────────
 
 /**

@@ -124,18 +124,39 @@ class UniversalVoice(
     }
 
     // ── Recognition ────────────────────────────────────────────────────
+    //
+    // F7 lifecycle: ONE SpeechRecognizer per engine instance, reused
+    // across listen cycles (cancel between cycles). The pre-F7 code
+    // destroyed + recreated the recognizer on EVERY cycle — create +
+    // service bind cost ~100–300 ms of dead air per turn. The instance
+    // is destroyed and recreated only on ERROR_RECOGNIZER_BUSY /
+    // ERROR_CLIENT (a genuinely wedged recognizer) and at shutdown.
+
+    /** F7/I: one-shot language override for the next listen cycle. */
+    private var languageOverrideTag: String? = null
+
+    /** F7/I: the effective language is logged once per engine start. */
+    private var languageLogged = false
 
     fun startListening() {
         runOnMain { startListeningOnMain() }
     }
 
-    private fun startListeningOnMain() {
-        if (destroyed) return
-        stopListeningOnMain()
-        CrashLogger.stage("universal", "recognizer create")
-        val rec = SpeechRecognizer.createSpeechRecognizer(appContext)
-        recognizer = rec
-        rec.setRecognitionListener(object : RecognitionListener {
+    /**
+     * F7/I: listen once with [tag] instead of the configured language
+     * (the mis-script guard's alternate-English re-listen). The
+     * override is consumed by that one cycle; later cycles return to
+     * the configured language.
+     */
+    fun startListeningWithLanguage(tag: String) {
+        runOnMain {
+            languageOverrideTag = tag
+            startListeningOnMain()
+        }
+    }
+
+    private fun createRecognitionListener(): RecognitionListener =
+        object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() = listener.onBeginningOfSpeech()
             override fun onRmsChanged(rmsdB: Float) = listener.onRms(rmsdB)
@@ -154,20 +175,62 @@ class UniversalVoice(
                 }
             }
             override fun onError(error: Int) {
+                if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
+                    error == SpeechRecognizer.ERROR_CLIENT
+                ) {
+                    // F7: a wedged recognizer is the ONLY mid-session
+                    // destroy — deferred until this callback returns,
+                    // so the next startListening builds a fresh one.
+                    AppLog.w("STT", "recognizer wedged (error $error) — recreating next cycle")
+                    mainHandler.post {
+                        recognizer?.let { runCatching { it.destroy() } }
+                        recognizer = null
+                    }
+                }
                 listener.onError(
                     describeError(error),
                     fatal = error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS
                 )
             }
-        })
+        }
+
+    private fun startListeningOnMain() {
+        if (destroyed) return
+        // F7/I language discipline: the effective tag is RESOLVED,
+        // never omitted — "Auto" maps to en-IN in sttLanguageTag, so
+        // the recognizer can never drift to the device/Google-app
+        // default language (a Malayalam/Hindi system default was
+        // transcribing his English commands into the wrong script).
+        val effectiveTag = languageOverrideTag ?: languageTag
+        languageOverrideTag = null
+        if (!languageLogged) {
+            languageLogged = true
+            AppLog.i(
+                "STT",
+                "recognizer language=$languageTag (setting=$languageName)"
+            )
+        }
+        var rec = recognizer
+        if (rec == null) {
+            CrashLogger.stage("universal", "recognizer create")
+            rec = SpeechRecognizer.createSpeechRecognizer(appContext)
+            rec.setRecognitionListener(createRecognitionListener())
+            recognizer = rec
+        } else {
+            // Reuse: cancel the previous cycle on the same instance.
+            runCatching { rec.cancel() }
+        }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(
                 RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
             )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, languageTag)
-            putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, effectiveTag)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, effectiveTag)
+            // F7/I: was false — the service was free to return a
+            // result in a DIFFERENT language than requested. True pins
+            // results to the requested language where supported.
+            putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, true)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             // Online recognition preferred: the on-device pack mishears
@@ -176,7 +239,7 @@ class UniversalVoice(
         }
         try {
             CrashLogger.stage("universal", "recognizer listening")
-            AppLog.d("STT", "recognizer start lang=$languageTag")
+            AppLog.d("STT", "recognizer start lang=$effectiveTag")
             rec.startListening(intent)
             listener.onListeningStarted()
         } catch (e: Exception) {
@@ -188,7 +251,13 @@ class UniversalVoice(
         runOnMain { stopListeningOnMain() }
     }
 
+    /** F7: cancel only — the instance survives for the next cycle. */
     private fun stopListeningOnMain() {
+        recognizer?.let { runCatching { it.cancel() } }
+    }
+
+    /** Destroy the recognizer instance (shutdown only). */
+    private fun destroyRecognizerOnMain() {
         val rec = recognizer
         recognizer = null
         if (rec != null) {
@@ -400,7 +469,7 @@ class UniversalVoice(
 
     fun shutdown() {
         destroyed = true
-        stopListening()
+        runOnMain { destroyRecognizerOnMain() }
         val engine = tts
         tts = null
         ttsReady = false
@@ -442,6 +511,18 @@ class UniversalVoice(
             "Marathi" -> "mr-IN"
             "Gujarati" -> "gu-IN"
             else -> "en-IN" // "English" and "Auto"
+        }
+
+        /**
+         * F7/I: human label of the EFFECTIVE listening language for
+         * the Voice screen, so a language mismatch is visible at a
+         * glance. "Auto" resolves to en-IN (see sttLanguageTag) and
+         * is labelled as such instead of pretending to be magic.
+         */
+        fun sttDisplayName(language: String): String = when (language) {
+            "Auto" -> "English (India) · Auto"
+            "English" -> "English (India)"
+            else -> language
         }
 
         /**

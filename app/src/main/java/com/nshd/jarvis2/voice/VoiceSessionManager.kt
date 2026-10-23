@@ -213,6 +213,29 @@ object VoiceSessionManager {
     @Volatile
     private var ttsSpeaking = false
 
+    // ── F7 GateHost (c): spoken ConfirmGate confirmations ────────────
+    // While a gate raised by THIS session's own voice turn is pending,
+    // the recognizer listens for a yes/no reply instead of a command.
+    // Gates raised elsewhere (typed chat) never arm this — the
+    // floating overlay's gate card serves those.
+    @Volatile
+    private var gateArmed = false
+
+    private var gateWatcherStarted = false
+
+    // ── F7/I mis-script guard ─────────────────────────────────────────
+    // A final STT result dominated by an Indic script while the
+    // effective language is Latin (en-*/Hinglish) is a recognizer
+    // language slip: re-listen ONCE with the alternate English tag.
+    @Volatile
+    private var guardRetryPending = false
+
+    @Volatile
+    private var guardOriginalText: String? = null
+
+    @Volatile
+    private var guardUsedThisTurn = false
+
     private var pulseJob: Job? = null
 
     /** Screen-share → Live video forwarder (Level 5), Live path only. */
@@ -274,6 +297,14 @@ object VoiceSessionManager {
         synchronized(liveProcessedToolCalls) { liveProcessedToolCalls.clear() }
         liveLedger = ExecutionLedger()
         mediaListenBlocked = false
+        // F7 audit fix: gate/guard state never leaks across sessions —
+        // a stale gateArmed (or a pending mis-script retry) from a
+        // dead session must not intercept the new session's first
+        // utterance.
+        gateArmed = false
+        guardRetryPending = false
+        guardOriginalText = null
+        guardUsedThisTurn = false
         pipelineRunning = false
         pipelineDone = true
         ttsSpeaking = false
@@ -284,6 +315,7 @@ object VoiceSessionManager {
             "session start engine=${settings.voiceEngine} persona=${settings.persona} " +
                 "language=${settings.language}"
         )
+        startGateWatcherIfNeeded()
         // F4.1 mic arbitration handshake: the wake-word service must
         // have FULLY released the microphone (Vosk SpeechService stop
         // is asynchronous) before any engine touches it — two live mic
@@ -990,6 +1022,112 @@ object VoiceSessionManager {
         return if (short.length > 26) short.take(25) + "…" else short
     }
 
+    // ── F7 GateHost (c) + F7/I mis-script guard helpers ──────────────
+
+    /**
+     * Watch ConfirmGate for the lifetime of the process (started once
+     * from startSession). A gate that appears while THIS manager's
+     * Universal pipeline turn is running almost certainly belongs to
+     * that turn (a send waiting for its confirmation): arm the spoken
+     * yes/no intercept and start listening for it.
+     */
+    private fun startGateWatcherIfNeeded() {
+        if (gateWatcherStarted) return
+        gateWatcherStarted = true
+        scope.launch {
+            com.nshd.jarvis2.brain.tools.ConfirmGate.pending.collect { pending ->
+                if (pending == null) {
+                    gateArmed = false
+                } else if (active && _uiState.value.mode == VoiceMode.UNIVERSAL &&
+                    pipelineRunning && !_uiState.value.micMuted
+                ) {
+                    gateArmed = true
+                    AppLog.i(
+                        "Gate",
+                        "gate #${pending.id} pending during a voice turn — " +
+                            "listening for a spoken yes/no"
+                    )
+                    universal?.startListening()
+                }
+            }
+        }
+    }
+
+    private enum class GateReply { APPROVE, DENY, NONE }
+
+    /** Spoken gate replies, normalized (lowercase, trailing punctuation stripped). */
+    private fun classifyGateReply(text: String): GateReply {
+        val normalized = text.trim().lowercase().trimEnd('.', '!', '?', ' ')
+        return when (normalized) {
+            "yes", "yeah", "send", "send it", "ok", "okay", "confirm" ->
+                GateReply.APPROVE
+            "no", "cancel", "stop" -> GateReply.DENY
+            else -> GateReply.NONE
+        }
+    }
+
+    /** Indic Unicode blocks checked by the mis-script guard. */
+    private val INDIC_RANGES = listOf(
+        0x0900..0x097F, // Devanagari
+        0x0980..0x09FF, // Bengali
+        0x0A00..0x0A7F, // Gurmukhi
+        0x0A80..0x0AFF, // Gujarati
+        0x0B80..0x0BFF, // Tamil
+        0x0C00..0x0C7F, // Telugu
+        0x0C80..0x0CFF, // Kannada
+        0x0D00..0x0D7F  // Malayalam
+    )
+
+    /** Share of letters in [text] that fall in an Indic block (0 when no letters). */
+    private fun indicLetterRatio(text: String): Float {
+        var letters = 0
+        var indic = 0
+        for (ch in text) {
+            if (ch.isLetter()) {
+                letters++
+                if (INDIC_RANGES.any { ch.code in it }) indic++
+            }
+        }
+        return if (letters == 0) 0f else indic.toFloat() / letters
+    }
+
+    /**
+     * True when [text] looks like a recognizer language slip: the
+     * effective STT language expects Latin script (en-* or Hinglish)
+     * but the final transcript is >40% Indic-script letters. Once per
+     * command only — the retry's result is always accepted.
+     */
+    private fun misScriptSuspected(text: String): Boolean {
+        if (guardUsedThisTurn) return false
+        val s = settings ?: return false
+        val tag = UniversalVoice.sttLanguageTag(s.language)
+        val latinExpected = tag.startsWith("en") || s.language == "Hinglish"
+        if (!latinExpected) return false
+        return indicLetterRatio(text) > 0.40f
+    }
+
+    /** The other English tag for the guard's one re-listen (en-IN ↔ en-US). */
+    private fun alternateEnglishTag(): String {
+        val s = settings ?: return "en-US"
+        return if (UniversalVoice.sttLanguageTag(s.language) == "en-IN") {
+            "en-US"
+        } else {
+            "en-IN"
+        }
+    }
+
+    /** A final STT result that passed every intercept — run the turn. */
+    private fun dispatchUniversalFinal(text: String) {
+        guardUsedThisTurn = false
+        CrashLogger.stage(TAG, "universal: final result received")
+        AppLog.d("STT", "final result (${text.length} chars): ${text.take(80)}")
+        _uiState.value = _uiState.value.copy(sttHint = null)
+        setTurnCaption(fromUser = true, text = text, partial = false)
+        userCaptionIndex = -1
+        setStatus(VoiceStatus.THINKING)
+        routeUniversalTurn(text)
+    }
+
     private class UniversalListener : UniversalVoice.Listener {
         override fun onListeningStarted() {
             if (!active) return
@@ -1025,13 +1163,89 @@ object VoiceSessionManager {
 
         override fun onFinalResult(text: String) {
             if (!active) return
-            CrashLogger.stage(TAG, "universal: final result received")
-            AppLog.d("STT", "final result (${text.length} chars): ${text.take(80)}")
-            _uiState.value = _uiState.value.copy(sttHint = null)
-            setTurnCaption(fromUser = true, text = text, partial = false)
-            userCaptionIndex = -1
-            setStatus(VoiceStatus.THINKING)
-            routeUniversalTurn(text)
+            // F7 GateHost (c): while a gate from THIS voice turn is
+            // pending, the utterance is its yes/no reply — it must
+            // never be routed as a new command.
+            val pendingGate = com.nshd.jarvis2.brain.tools.ConfirmGate.pending.value
+            if (gateArmed && pendingGate != null) {
+                when (classifyGateReply(text)) {
+                    GateReply.APPROVE -> {
+                        gateArmed = false
+                        AppLog.i("Gate", "spoken reply APPROVED gate #${pendingGate.id}")
+                        addCaption(
+                            VoiceCaption(
+                                fromUser = false,
+                                text = "You confirmed — approved.",
+                                kind = CaptionKind.SYSTEM,
+                                partial = false
+                            )
+                        )
+                        com.nshd.jarvis2.brain.tools.ConfirmGate.complete(
+                            pendingGate.id, approved = true
+                        )
+                    }
+                    GateReply.DENY -> {
+                        gateArmed = false
+                        AppLog.i("Gate", "spoken reply DENIED gate #${pendingGate.id}")
+                        addCaption(
+                            VoiceCaption(
+                                fromUser = false,
+                                text = "You said no — cancelled.",
+                                kind = CaptionKind.SYSTEM,
+                                partial = false
+                            )
+                        )
+                        com.nshd.jarvis2.brain.tools.ConfirmGate.complete(
+                            pendingGate.id, approved = false
+                        )
+                    }
+                    GateReply.NONE -> {
+                        AppLog.d(
+                            "Gate",
+                            "utterance was not a yes/no — still waiting for confirmation"
+                        )
+                        universal?.startListening()
+                    }
+                }
+                return
+            }
+            // F7/I: this final IS the mis-script guard's re-listen —
+            // accept it in whatever script it landed (he may genuinely
+            // be speaking that language) and dispatch it.
+            if (guardRetryPending) {
+                guardRetryPending = false
+                guardOriginalText = null
+                AppLog.i("STT", "mis-script retry accepted (${text.length} chars)")
+                dispatchUniversalFinal(text)
+                return
+            }
+            // F7/I mis-script guard: effective language expects Latin
+            // script but the transcript is Indic-dominated → the
+            // recognizer slipped language. Suppress dispatch, re-listen
+            // ONCE with the alternate English tag; the retry's final
+            // (handled above) replaces this one. A no-match on the
+            // retry falls back to THIS text in onError — a command is
+            // never silently dropped.
+            if (misScriptSuspected(text)) {
+                guardUsedThisTurn = true
+                guardRetryPending = true
+                guardOriginalText = text
+                val altTag = alternateEnglishTag()
+                AppLog.w(
+                    "STT",
+                    "mis-script suspected (>40% Indic letters under a Latin " +
+                        "language) — re-listening once with $altTag"
+                )
+                _uiState.value = _uiState.value.copy(
+                    sttHint = "Heard it in the wrong script — listening again…"
+                )
+                universal?.startListeningWithLanguage(altTag)
+                return
+            }
+            // F7/F: dispatch is immediate — no TTS drain or handler
+            // delay sits between the final result and the pipeline
+            // (playing TTS is stopped by the normal barge-in paths).
+            dispatchUniversalFinal(text)
         }
 
         override fun onRms(rmsDb: Float) {
@@ -1046,14 +1260,37 @@ object VoiceSessionManager {
                 fail(message)
                 return
             }
+            // F7/I: the mis-script guard's re-listen heard nothing —
+            // dispatch the ORIGINAL transcript rather than losing the
+            // command entirely.
+            if (guardRetryPending &&
+                (message == "Didn't catch that" || message == "Didn't hear anything")
+            ) {
+                guardRetryPending = false
+                val original = guardOriginalText
+                guardOriginalText = null
+                if (!original.isNullOrBlank()) {
+                    AppLog.w(
+                        "STT",
+                        "mis-script retry heard nothing — dispatching the original transcript"
+                    )
+                    dispatchUniversalFinal(original)
+                    return
+                }
+            }
             AppLog.w("STT", "recognizer error: $message")
             _uiState.value = _uiState.value.copy(sttHint = message)
             // One-shot recognizer ended (silence / no match / transient
-            // service error) — brief pause, then the loop listens again.
+            // service error) — brief pause, then the loop listens
+            // again. F7: the pause dropped 300 ms → 150 ms (the
+            // recognizer instance is now reused, so restart is cheap).
+            // F7 GateHost: while gateArmed, re-listening for the
+            // confirmation reply is allowed even mid-pipeline-turn.
             scope.launch {
-                delay(300)
+                delay(150)
                 if (active && _uiState.value.mode == VoiceMode.UNIVERSAL &&
-                    !_uiState.value.micMuted && !pipelineRunning && !mediaListenBlocked
+                    !_uiState.value.micMuted && !mediaListenBlocked &&
+                    (!pipelineRunning || gateArmed)
                 ) {
                     setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
                     universal?.startListening()

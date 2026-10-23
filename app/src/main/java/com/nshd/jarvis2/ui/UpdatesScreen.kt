@@ -45,6 +45,39 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v1.6.0 — Message sending fixed, floating task panel, direct play routing",
+            body = "WhatsApp messages actually send now. The send used to die " +
+                "in a double confirmation: the send tool asked its approval, " +
+                "then the tap guard asked AGAIN for the very same Send " +
+                "button — often where no prompt could appear — so the tap " +
+                "timed out and nothing sent. An approved send now carries a " +
+                "one-shot permit for exactly that tap, sends are verified " +
+                "twice (message field cleared AND the sent bubble on screen), " +
+                "and the confirmation itself can now appear EVERYWHERE: in " +
+                "the app, as a card inside the floating panel over any app, " +
+                "or by simply saying \"yes\" / \"send it\" in a voice session. " +
+                "The floating HUD is now a TASK PANEL like a pro assistant: " +
+                "it pops up on its own when a task starts and shows the goal, " +
+                "a live plan checklist (✓ done, spinner running, · waiting), " +
+                "\"2/4 done · 50%\" with a progress bar, and the result line " +
+                "when the task finishes — then tucks itself away. Play is " +
+                "direct: \"play Rathinamo on Spotify\", \"play MrBeast " +
+                "video\", \"watch One Name\" and plain \"play <song>\" " +
+                "(Spotify by default) all skip the slow model loop and go " +
+                "straight to the app — trailing periods from speech no " +
+                "longer break them. The orb is bigger on Home and Voice, " +
+                "and Home's orb now thinks, listens and speaks with live " +
+                "states just like the Voice screen. Voice fixes too: the " +
+                "recognizer is reused instead of rebuilt every turn " +
+                "(150 ms restarts), the listening language is pinned — " +
+                "\"Auto\" means English (India), shown on the Voice " +
+                "screen — and if a transcript ever lands in the wrong " +
+                "script, Jarvis notices and listens once more.\n" +
+                "Plus a self-audit pass — 3 extra fixes under the hood."
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+
+        InfoCard(
             title = "v1.5.0 — Speed round: Spotify fast play, live task HUD, editor delete + code writing",
             body = "Tasks now show on the floating avatar's HUD while they run — " +
                 "every command (chat, voice, quick commands, Live tool turns) " +

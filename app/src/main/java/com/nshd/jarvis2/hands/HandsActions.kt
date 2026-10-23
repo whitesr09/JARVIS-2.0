@@ -74,6 +74,54 @@ object HandsActions {
         "search", "explore", "reels", "profile", "library", "subscriptions"
     )
 
+    // ── F7 SendPermit ────────────────────────────────────────────────
+    //
+    // The whatsapp_message tool runs its OWN ConfirmGate (every send
+    // confirms with recipient + full text — his standing rule). The
+    // deep intent then taps WhatsApp's Send button, whose label
+    // matches the guard's SEND class — so a SECOND gate fired for the
+    // same already-approved send, in a context (WhatsApp foreground,
+    // voice session) where the prompt was often invisible: the 30 s
+    // timeout denied the tap and the message never sent ("it is not
+    // sending messages"). The fix: after the tool's gate approves,
+    // ToolExecutor issues ONE permit; the guard consumes it for
+    // exactly one SEND-class tap in the permitted package. Permits
+    // never cover SOCIAL/DESTRUCTIVE phrases, expire in ~30 s, and a
+    // second send tap gates again as usual.
+
+    /** Packages with a live permit (both WhatsApp variants are granted together). */
+    private val sendPermitPackages = mutableSetOf<String>()
+
+    @Volatile
+    private var sendPermitExpiresAtMs: Long = 0L
+
+    /** Issue the one-shot permit for [packageName] (called post-gate). */
+    @Synchronized
+    fun grantSendPermit(packageName: String, ttlMs: Long = 30_000L) {
+        sendPermitPackages += packageName
+        sendPermitExpiresAtMs = System.currentTimeMillis() + ttlMs
+        com.nshd.jarvis2.core.AppLog.i(
+            "Send",
+            "permit granted for $packageName (one send tap, ${ttlMs / 1000}s)"
+        )
+    }
+
+    /** Consume the permit iff it matches [packageName] and is unexpired. */
+    @Synchronized
+    private fun consumeSendPermit(packageName: String?): Boolean {
+        if (packageName == null || packageName !in sendPermitPackages) return false
+        if (System.currentTimeMillis() > sendPermitExpiresAtMs) {
+            sendPermitPackages.clear()
+            com.nshd.jarvis2.core.AppLog.d("Send", "permit expired unused for $packageName")
+            return false
+        }
+        // One-shot per package: the tap that consumes it is the only
+        // one the permit ever covers.
+        sendPermitPackages -= packageName
+        if (sendPermitPackages.isEmpty()) sendPermitExpiresAtMs = 0L
+        return true
+    }
+
     suspend fun clickElement(index: Int): ActionResult = serializedLong {
         val service = serviceOrNull() ?: return@serializedLong disabled()
         val element = JarvisAccessibilityService.lastSnapshot.getOrNull(index)
@@ -673,6 +721,18 @@ object HandsActions {
         ).joinToString(" ").trim()
         if (labelText.isBlank()) return null
         val phrase = sensitivePhrase(labelText.lowercase()) ?: return null
+        // F7 SendPermit: a SEND-class tap covered by a live permit
+        // (the whatsapp_message tool's own gate already approved THIS
+        // send) passes without a second gate. One-shot — consumed
+        // here; SOCIAL/DESTRUCTIVE phrases never see the permit.
+        if (phrase in SEND_PHRASES && consumeSendPermit(packageName)) {
+            com.nshd.jarvis2.core.AppLog.i(
+                "Send",
+                "permit consumed — approved send tap passed the guard in " +
+                    (packageName ?: "unknown app")
+            )
+            return null
+        }
         val displayLabel = element?.label?.ifBlank { fallbackLabel }
             ?: fallbackLabel.ifBlank { labelText }
         // F5: every guard trigger is a log line (the ConfirmGate prompt

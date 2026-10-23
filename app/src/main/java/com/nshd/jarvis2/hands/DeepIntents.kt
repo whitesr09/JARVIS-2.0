@@ -39,8 +39,14 @@ class DeepIntents(context: Context) {
             else if (isPackageInstalled("com.whatsapp.w4b")) setPackage("com.whatsapp.w4b")
         }
         if (!launch(intent)) {
+            AppLog.w("Send", "stage FAILED: chat could not be opened for $digits")
             return ActionResult(false, "WhatsApp could not be opened for this chat.")
         }
+        AppLog.i("Send", "stage: chat opened for $digits (deep link, text prefilled)")
+        // F7 plan: the deep link opens the chat AND types the text
+        // atomically, so plan steps 1–2 complete here; step 3
+        // ("Confirm & send") stays RUNNING through the tap + verify.
+        com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
 
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
@@ -54,11 +60,16 @@ class DeepIntents(context: Context) {
         var snapshot = reader.snapshot()
         val entry = snapshot.firstOrNull { it.editable }
         if (entry != null && entry.text.isBlank()) {
+            AppLog.w("Send", "stage FAILED: message field empty after open — prefill lost")
             return ActionResult(
                 false,
                 "Aborted: the WhatsApp message field is empty, so Send was not pressed."
             )
         }
+        AppLog.i(
+            "Send",
+            "stage: typed — message field holds ${entry?.text?.length ?: 0} chars"
+        )
 
         val send = snapshot.firstOrNull { element ->
             element.viewId == "com.whatsapp:id/send" ||
@@ -68,34 +79,75 @@ class DeepIntents(context: Context) {
         } ?: reader.findByText("Send", snapshot)?.takeIf { it.clickable || it.desc.contains("send", true) }
 
         if (send == null) {
+            // F7: the tree dump belongs in the log, not the reply text.
+            AppLog.w(
+                "Hands",
+                "whatsapp send: Send control not found. Screen: ${reader.serialize(25)}"
+            )
+            AppLog.w("Send", "stage FAILED: Send control not found on screen")
             return ActionResult(
                 false,
-                "WhatsApp opened with the message typed, but the Send control was not found. Screen: " +
-                    reader.serialize(15)
+                "WhatsApp opened with the message typed, but the Send button " +
+                    "was not found on screen."
             )
         }
 
         val click = HandsActions.clickElement(send.index)
-        if (!click.success) return ActionResult(false, "WhatsApp opened, but Send could not be pressed: ${click.message}")
+        if (!click.success) {
+            AppLog.w("Send", "stage FAILED: send tap failed — ${click.message}")
+            return ActionResult(false, "WhatsApp opened, but Send could not be pressed: ${click.message}")
+        }
+        AppLog.i("Send", "stage: send tapped")
 
+        // F7 verification (Part A3): BOTH proofs required — the
+        // entry cleared AND an outgoing bubble carrying the message
+        // text appeared. (Entry-clear alone was the old rule; the
+        // bubble check ignores the editable entry itself, which of
+        // course still contains the text until the send lands.)
+        val needle = text.trim().take(30)
+        var entryCleared = false
+        var bubbleFound = false
         val deadline = System.currentTimeMillis() + 2_000
-        while (System.currentTimeMillis() < deadline) {
+        while (System.currentTimeMillis() < deadline && !(entryCleared && bubbleFound)) {
             delay(200)
             snapshot = reader.snapshot()
             val currentEntry = snapshot.firstOrNull { it.editable }
             if (currentEntry != null && currentEntry.text.isBlank()) {
-                return ActionResult(true, "WhatsApp message sent and verified (message field is empty).")
+                entryCleared = true
             }
-            // Some WhatsApp builds remove the editor from the exposed tree
-            // after sending; no editable field is also consistent with sent.
+            // Some WhatsApp builds remove the editor from the exposed
+            // tree after sending; no editable field is also consistent
+            // with the entry having cleared.
             if (currentEntry == null && snapshot.none { it.viewId.endsWith("/entry") }) {
-                return ActionResult(true, "WhatsApp message sent (editor cleared).")
+                entryCleared = true
+            }
+            if (needle.isNotEmpty() && snapshot.any { element ->
+                    !element.editable &&
+                        (element.text.contains(needle) || element.label.contains(needle))
+                }
+            ) {
+                bubbleFound = true
             }
         }
-        return ActionResult(
-            false,
-            "Send was pressed, but the message field did not clear within 2 seconds, so sending is unverified."
+        AppLog.i(
+            "Send",
+            "stage: verify — entryCleared=$entryCleared bubbleFound=$bubbleFound"
         )
+        return when {
+            entryCleared && bubbleFound -> ActionResult(
+                true, "Message sent and verified."
+            )
+            entryCleared -> ActionResult(
+                false,
+                "Send was pressed and the message field cleared, but the sent " +
+                    "message bubble was not found, so sending is unverified."
+            )
+            else -> ActionResult(
+                false,
+                "Send was pressed, but the message field did not clear within " +
+                    "2 seconds, so sending is unverified."
+            )
+        }
     }
 
     // ── YouTube ────────────────────────────────────────────────────────
@@ -113,11 +165,14 @@ class DeepIntents(context: Context) {
             }
         }
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Opening YouTube…")
+        // F7 plan phases: 1 Open YouTube → 2 Search → 3 Play first video.
+        com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(1)
         if (!launch(intent)) return ActionResult(false, "YouTube could not be opened.")
 
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(true, "Opened YouTube search results for \"$cleanQuery\". Enable Accessibility to auto-play the first result.")
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Searching '$cleanQuery'…")
+        com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(2)
 
         val reader = service.screenReader()
         val metrics = appContext.resources.displayMetrics
@@ -159,6 +214,7 @@ class DeepIntents(context: Context) {
             )
         }
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Playing…")
+        com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
         val click = HandsActions.clickElement(chosen.element.index)
         if (!click.success) {
             return ActionResult(
@@ -198,6 +254,8 @@ class DeepIntents(context: Context) {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return ActionResult(false, "The Spotify search query is blank.")
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Opening Spotify…")
+        // F7 plan phases: 1 Open Spotify → 2 Search → 3 Play.
+        com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(1)
         val opened = openApp("Spotify")
         if (!opened.success) return opened
 
@@ -231,6 +289,7 @@ class DeepIntents(context: Context) {
         // already focused/editable, then type the query (SET_TEXT —
         // search fields use replace semantics).
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Searching '$cleanQuery'…")
+        com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(2)
         val inputReady = HandsActions.waitForSnapshot(SEARCH_INPUT_WAIT_MS) { snapshot ->
             snapshot.any { it.editable } ||
                 snapshot.any { isSpotifySearchBar(it) }
@@ -277,6 +336,7 @@ class DeepIntents(context: Context) {
             )
         }
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Playing…")
+        com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
         val rowClick = HandsActions.clickElement(chosen.element.index)
         if (!rowClick.success) {
             return ActionResult(

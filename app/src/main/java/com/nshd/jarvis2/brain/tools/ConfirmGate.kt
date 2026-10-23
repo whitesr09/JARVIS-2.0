@@ -9,16 +9,25 @@ import java.util.concurrent.atomic.AtomicLong
 
 data class PendingConfirm(
     val id: Long,
-    val description: String
+    val description: String,
+    /** F7: when the prompt appeared — the renderers' 30 s timer bars read it. */
+    val createdAtMs: Long = System.currentTimeMillis()
 )
 
 /**
  * Native hard-guardrail confirmation gate.
  *
  * Unlike the reference implementation's keyword flag (which trusted the
- * model to ask), tool execution itself suspends here. A dialog bound to
- * [pending] in Chat or Voice completes the request. No response in 30
- * seconds means DENY.
+ * model to ask), tool execution itself suspends here. No response in
+ * 30 seconds means DENY.
+ *
+ * F7 GateHost: [pending] IS the host bus — every renderer observes the
+ * same StateFlow and completes the same request: (a) the in-app
+ * dialog (ConfirmGateDialog in Chat/Voice), (b) the floating overlay's
+ * gate card (FloatingOverlayService) for commands given while another
+ * app is foreground, (c) spoken yes/no replies intercepted by
+ * VoiceSessionManager during Universal voice turns. Whichever surface
+ * the user reaches first wins; [complete] is idempotent per id.
  */
 object ConfirmGate {
     private val nextId = AtomicLong(1)

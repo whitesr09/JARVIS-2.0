@@ -182,6 +182,11 @@ private fun VoiceSessionBody(
     val uiState by manager.uiState.collectAsState()
     val amplitude by manager.amplitude.collectAsState()
     val captions by manager.captions.collectAsState()
+    // F7: same orb-state helper as Home (task activity → THINKING).
+    val queueTasks by com.nshd.jarvis2.brain.TaskQueue.tasks.collectAsState()
+    val taskRunning = queueTasks.any {
+        it.status == com.nshd.jarvis2.brain.TaskStatus.RUNNING
+    }
 
     // F4 crash hardening: every remember in this body sits at the top
     // level, unconditionally. showDetails used to be remembered inside
@@ -197,14 +202,15 @@ private fun VoiceSessionBody(
 
     // ── Orb (tap toggles the mic) ──────────────────────────────────────
     // F4: Canvas JarvisOrb (orb.html port) fed with the live amplitude.
+    // F7: 300dp → 340dp, state via the shared orbStateFor helper.
     JarvisOrb(
-        state = uiState.status.toOrbState(),
+        state = orbStateFor(uiState.status, taskRunning),
         amplitude = amplitude,
         liveAudio = true,
         theme = settings.theme,
         customHex = settings.customBgHex,
         modifier = Modifier
-            .size(300.dp)
+            .size(340.dp)
             .align(Alignment.CenterHorizontally)
             .clickable { manager.setMicMuted(!uiState.micMuted) }
     )
@@ -220,6 +226,21 @@ private fun VoiceSessionBody(
         Text(
             text = hint,
             style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .padding(top = 4.dp)
+        )
+    }
+
+    // F7/I: the EFFECTIVE listening language, always visible during a
+    // session — if transcripts ever land in the wrong script again,
+    // this line shows which language the recognizer is pinned to.
+    if (uiState.status != VoiceStatus.IDLE) {
+        Text(
+            text = "Listening language: " +
+                com.nshd.jarvis2.voice.UniversalVoice.sttDisplayName(settings.language),
+            style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier
                 .align(Alignment.CenterHorizontally)

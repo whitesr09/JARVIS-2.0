@@ -70,6 +70,16 @@ class ToolExecutor(
             )
             return cached
         }
+        // F7: plan bookkeeping for the floating task panel — a real
+        // execution marks the running item as tool-backed (chat-only
+        // turns keep toolsExecuted=false) and drives the generic
+        // 4-step plan's app/action steps.
+        com.nshd.jarvis2.brain.TaskQueue.noteToolExecutedForRunning()
+        if (name == "open_app") {
+            com.nshd.jarvis2.brain.TaskQueue.onGenericToolEvent(openAppLike = true)
+        } else if (name in UI_MUTATION_TOOLS) {
+            com.nshd.jarvis2.brain.TaskQueue.onGenericToolEvent(openAppLike = false)
+        }
         val startedAt = System.currentTimeMillis()
         val raw = try {
             dispatch(name, args)
@@ -326,6 +336,18 @@ class ToolExecutor(
         if (code.isBlank()) {
             return ToolResult(false, "The code to insert was empty after cleanup.")
         }
+        // F7 plan: the editor-code route sets this plan itself; when
+        // the model reaches insert_code through the generic loop, give
+        // the panel the same checklist (insert phase running).
+        val runningItem = com.nshd.jarvis2.brain.TaskQueue.runningItem()
+        if (runningItem != null && runningItem.plan.isEmpty()) {
+            com.nshd.jarvis2.brain.TaskQueue.setPlan(
+                runningItem.id,
+                listOf("Understand goal", "Write the code", "Insert into QuickEdit", "Verify"),
+                kind = "editor"
+            )
+            com.nshd.jarvis2.brain.TaskQueue.advancePlan(runningItem.id, 2)
+        }
         var autoOpened = false
         if (!HandsActions.focusedEditablePresent()) {
             com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Opening QuickEdit…")
@@ -424,13 +446,48 @@ class ToolExecutor(
     private suspend fun whatsappMessage(args: JSONObject): ToolResult {
         val contact = args.requiredString("contact") ?: return missing("contact")
         val message = args.requiredString("message") ?: return missing("message")
+        // F7: the send chain is stage-logged end to end (tag "Send")
+        // so a "not sending" report can be traced to the exact stage:
+        // routed → resolved → gate → opened → typed → tapped → verified.
+        com.nshd.jarvis2.core.AppLog.i(
+            "Send", "routed: whatsapp_message to '$contact' (${message.length} chars)"
+        )
+        // F7 plan: the panel walks these steps; "Confirm & send"
+        // (step 3) is the RUNNING step while the gate waits, so the
+        // user sees WHY the task is paused (see the gate block below).
+        com.nshd.jarvis2.brain.TaskQueue.setPlanForRunning(
+            listOf(
+                "Understand goal",
+                "Open chat with $contact",
+                "Type the message",
+                "Confirm & send"
+            ),
+            kind = "send"
+        )
+        com.nshd.jarvis2.brain.TaskQueue.setPlanStepForRunning(
+            0, com.nshd.jarvis2.brain.PlanStepState.DONE
+        )
+        com.nshd.jarvis2.brain.TaskQueue.setPlanStepForRunning(
+            1, com.nshd.jarvis2.brain.PlanStepState.RUNNING
+        )
         return when (val resolution = contactsResolver.resolve(contact)) {
             is ContactResolution.Found -> {
+                val name = resolution.contact.displayName
+                com.nshd.jarvis2.core.AppLog.i(
+                    "Send", "contact resolved: '$contact' → $name (${resolution.contact.phone})"
+                )
                 // F3: EVERY message send is confirmed, always — the
                 // prompt names the recipient AND shows the full text.
+                com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
+                com.nshd.jarvis2.core.AppLog.i(
+                    "Send", "gate shown: confirm send to $name"
+                )
                 val approved = ConfirmGate.confirm(
-                    "Send WhatsApp message to ${resolution.contact.displayName} " +
+                    "Send WhatsApp message to $name " +
                         "(${resolution.contact.phone})?\n\nMessage: \"$message\""
+                )
+                com.nshd.jarvis2.core.AppLog.i(
+                    "Send", "gate decision: ${if (approved) "approved" else "denied/timeout"}"
                 )
                 if (!approved) {
                     return ToolResult(
@@ -438,10 +495,22 @@ class ToolExecutor(
                         "WhatsApp message was not confirmed, so nothing was sent."
                     )
                 }
+                // F7 SendPermit: THIS approved send's tap on WhatsApp's
+                // Send button must not hit the tap guard's second gate
+                // (the F3 double-gate that stalled sends). One permit
+                // per package variant; the guard consumes exactly one.
+                HandsActions.grantSendPermit("com.whatsapp")
+                HandsActions.grantSendPermit("com.whatsapp.w4b")
                 val result = intents.whatsappMessage(resolution.contact.phone, message)
                 if (result.success) {
-                    ToolResult(true, "WhatsApp message to ${resolution.contact.displayName}: ${result.message}")
+                    com.nshd.jarvis2.core.AppLog.i(
+                        "Send", "verified: message sent to $name"
+                    )
+                    ToolResult(true, "WhatsApp message to $name: ${result.message}")
                 } else {
+                    com.nshd.jarvis2.core.AppLog.w(
+                        "Send", "FAILED after approval: ${result.message}"
+                    )
                     ToolResult(false, result.message)
                 }
             }
@@ -526,8 +595,17 @@ class ToolExecutor(
         /** Read-only screen observation — exempt from the F3 ledger. */
         private val OBSERVATION_TOOLS = setOf("inspect_screen", "see_screen")
 
-        /** F6: stateful-but-repeatable tools exempt from ledger dedupe. */
-        private val REPEATABLE_TOOLS = setOf("edit_text")
+        /**
+         * Stateful-but-repeatable tools exempt from ledger dedupe.
+         * F6 exempted edit_text; F7 (Part G assessment) adds type_text
+         * on the same rationale: both act on the CURRENT field state,
+         * so identical arguments in one turn are legitimate repeated
+         * work (dictating the same word twice, appending the same
+         * chunk to a second field), not an accidental replay of a
+         * one-shot action. One-shot tools (sends, plays, opens) stay
+         * ledgered — the anti-replay protection the ledger exists for.
+         */
+        private val REPEATABLE_TOOLS = setOf("edit_text", "type_text")
         private val UI_MUTATION_TOOLS = setOf(
             "open_app", "click_element", "click_text", "type_text", "scroll",
             "press_key", "tap_percent", "whatsapp_message", "youtube_play",

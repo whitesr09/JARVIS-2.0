@@ -9,6 +9,15 @@ import java.util.concurrent.atomic.AtomicLong
 /** Lifecycle of one queued sub-task (F3 multitask queue). */
 enum class TaskStatus { QUEUED, RUNNING, DONE, FAILED, SKIPPED }
 
+/** F7: lifecycle of one step inside a [TaskItem]'s plan. */
+enum class PlanStepState { PENDING, RUNNING, DONE, FAILED }
+
+/** F7: one row of a task's plan checklist (floating task panel). */
+data class PlanStep(
+    val label: String,
+    val state: PlanStepState = PlanStepState.PENDING
+)
+
 data class TaskItem(
     val id: Long,
     val title: String,
@@ -16,7 +25,20 @@ data class TaskItem(
     val startedAt: Long? = null,
     val endedAt: Long? = null,
     /** F6: live step line for the RUNNING item ("Searching 'One Name'…"). */
-    val step: String = ""
+    val step: String = "",
+    /**
+     * F7: the plan checklist the floating TASK PANEL renders
+     * (✓ / spinner / · / ✗ rows + "x/y done · z%"). Empty when the
+     * producer never declared a plan — the panel then falls back to
+     * the F6 step-line behaviour.
+     */
+    val plan: List<PlanStep> = emptyList(),
+    /** F7: planner tag ("media" / "send" / "editor" / "quick" / "generic" / "chat"). */
+    val planKind: String = "",
+    /** F7: one-line outcome shown under the steps when the task ends. */
+    val resultLine: String = "",
+    /** F7: whether any tool executed under this item (chat-only detection). */
+    val toolsExecuted: Boolean = false
 )
 
 /**
@@ -101,6 +123,143 @@ object TaskQueue {
         runningItem()?.let { setStep(it.id, text) }
     }
 
+    // ── F7 plan API ──────────────────────────────────────────────────
+    //
+    // Producers (pipeline routes, ToolExecutor, DeepIntents) declare
+    // a plan for the RUNNING item and advance it as phases complete.
+    // The floating task panel renders exactly this list; progress is
+    // derived (DONE count / total), never stored separately.
+
+    /** Declare (or replace) the plan of item [id]. All steps start PENDING. */
+    @Synchronized
+    fun setPlan(id: Long, labels: List<String>, kind: String) {
+        _tasks.value = _tasks.value.map { item ->
+            if (item.id == id) {
+                item.copy(
+                    plan = labels.map { PlanStep(it) },
+                    planKind = kind
+                )
+            } else {
+                item
+            }
+        }
+        AppLog.d("Queue", "task #$id plan ($kind): ${labels.joinToString(" → ")}")
+    }
+
+    /** Declare a plan on whichever item is RUNNING right now. */
+    fun setPlanForRunning(labels: List<String>, kind: String) {
+        runningItem()?.let { setPlan(it.id, labels, kind) }
+    }
+
+    /** Set one plan step's state on item [id] (no-op out of range). */
+    @Synchronized
+    fun setPlanStep(id: Long, index: Int, state: PlanStepState) {
+        _tasks.value = _tasks.value.map { item ->
+            if (item.id != id || index !in item.plan.indices) {
+                item
+            } else if (item.plan[index].state == state) {
+                item
+            } else {
+                item.copy(
+                    plan = item.plan.mapIndexed { i, step ->
+                        if (i == index) step.copy(state = state) else step
+                    }
+                )
+            }
+        }
+    }
+
+    /** Set one plan step's state on the RUNNING item. */
+    fun setPlanStepForRunning(index: Int, state: PlanStepState) {
+        runningItem()?.let { setPlanStep(it.id, index, state) }
+    }
+
+    /**
+     * Advance item [id]'s plan to [toIndex]: every step before it is
+     * DONE (a FAILED step stays FAILED), step [toIndex] is RUNNING.
+     */
+    @Synchronized
+    fun advancePlan(id: Long, toIndex: Int) {
+        _tasks.value = _tasks.value.map { item ->
+            if (item.id != id || item.plan.isEmpty()) {
+                item
+            } else {
+                item.copy(
+                    plan = item.plan.mapIndexed { i, step ->
+                        when {
+                            i < toIndex && step.state != PlanStepState.FAILED ->
+                                step.copy(state = PlanStepState.DONE)
+                            i == toIndex && step.state != PlanStepState.FAILED ->
+                                step.copy(state = PlanStepState.RUNNING)
+                            else -> step
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    /** Advance the RUNNING item's plan to [toIndex]. */
+    fun advancePlanForRunning(toIndex: Int) {
+        runningItem()?.let { advancePlan(it.id, toIndex) }
+    }
+
+    /** Record that a tool executed under item [id] (chat-only detection). */
+    @Synchronized
+    fun noteToolExecuted(id: Long) {
+        _tasks.value = _tasks.value.map {
+            if (it.id == id && !it.toolsExecuted) it.copy(toolsExecuted = true) else it
+        }
+    }
+
+    /** Record a tool execution under whichever item is RUNNING. */
+    fun noteToolExecutedForRunning() {
+        runningItem()?.let { noteToolExecuted(it.id) }
+    }
+
+    /**
+     * Generic 4-step plan events (Part B mapping): the first
+     * open_app-style tool completes step 2 ("Open or confirm the
+     * target app") and starts step 3; the first mutating tool just
+     * makes sure step 3 is RUNNING (it completes at turn end).
+     * No-ops for any non-"generic" plan — deep intents drive their
+     * own plans phase by phase.
+     */
+    @Synchronized
+    fun onGenericToolEvent(openAppLike: Boolean) {
+        val running = runningItem() ?: return
+        if (running.planKind != "generic" || running.plan.size < 4) return
+        if (openAppLike) {
+            advancePlan(running.id, 2)
+        } else if (running.plan[2].state == PlanStepState.PENDING) {
+            setPlanStep(running.id, 2, PlanStepState.RUNNING)
+        }
+    }
+
+    /** Store the one-line outcome the panel shows under the steps. */
+    @Synchronized
+    fun setResultLine(id: Long, text: String) {
+        val clean = text.trim().take(120)
+        if (clean.isBlank()) return
+        _tasks.value = _tasks.value.map {
+            if (it.id == id) it.copy(resultLine = clean) else it
+        }
+    }
+
+    /** Store the outcome line on whichever item is RUNNING. */
+    fun setResultLineForRunning(text: String) {
+        runningItem()?.let { setResultLine(it.id, text) }
+    }
+
+    /** DONE plan steps of [item] (FAILED doesn't count as done). */
+    fun planDoneCount(item: TaskItem): Int =
+        item.plan.count { it.state == PlanStepState.DONE }
+
+    /** 0–100 plan completion of [item]; 0 when it has no plan. */
+    fun planPercent(item: TaskItem): Int =
+        if (item.plan.isEmpty()) 0
+        else planDoneCount(item) * 100 / item.plan.size
+
     /** The currently RUNNING item, if any. */
     @Synchronized
     fun runningItem(): TaskItem? =
@@ -115,6 +274,23 @@ object TaskQueue {
     @Synchronized
     fun finishRunning(success: Boolean) {
         val running = runningItem() ?: return
+        // F7: finalize the plan with the task — success completes
+        // every step; failure marks the still-running step FAILED so
+        // the panel's ✗ lands on the step that actually died.
+        if (running.plan.isNotEmpty()) {
+            val finalized = running.plan.map { step ->
+                when {
+                    success && step.state != PlanStepState.FAILED ->
+                        step.copy(state = PlanStepState.DONE)
+                    !success && step.state == PlanStepState.RUNNING ->
+                        step.copy(state = PlanStepState.FAILED)
+                    else -> step
+                }
+            }
+            _tasks.value = _tasks.value.map {
+                if (it.id == running.id) it.copy(plan = finalized) else it
+            }
+        }
         update(running.id, if (success) TaskStatus.DONE else TaskStatus.FAILED)
         val elapsed = running.startedAt?.let { System.currentTimeMillis() - it } ?: -1L
         AppLog.i(

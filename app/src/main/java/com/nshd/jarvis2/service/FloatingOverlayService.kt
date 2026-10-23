@@ -10,6 +10,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.ColorStateList
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -29,7 +31,11 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import com.nshd.jarvis2.MainActivity
+import com.nshd.jarvis2.brain.PlanStepState
 import com.nshd.jarvis2.brain.TaskQueue
+import com.nshd.jarvis2.brain.TaskStatus
+import com.nshd.jarvis2.brain.tools.ConfirmGate
+import com.nshd.jarvis2.brain.tools.PendingConfirm
 import com.nshd.jarvis2.hands.TaskState
 import com.nshd.jarvis2.ui.AppTheme
 import com.nshd.jarvis2.ui.AvatarCatalog
@@ -86,6 +92,35 @@ class FloatingOverlayService : Service() {
     private var hudStatusView: TextView? = null
     private var hudBackground: GradientDrawable? = null
     private var params: WindowManager.LayoutParams? = null
+
+    // ── F7 task-panel views ────────────────────────────────────────────
+    private var panelHeaderRow: LinearLayout? = null
+    private var panelGripView: GripDotsView? = null
+    private var panelGoalView: TextView? = null
+    private var panelStepSpinnerViews: List<ProgressBar> = emptyList()
+    private var panelResultView: TextView? = null
+    private var panelQueueNoteView: TextView? = null
+
+    /** True while the visible panel was auto-shown (vs opened by double-tap). */
+    private var panelAutoShown = false
+    private var panelCollapseRunnable: Runnable? = null
+
+    // ── F7 GateHost overlay card (rendered INSIDE the panel window) ────
+    private var gateSection: LinearLayout? = null
+    private var gateSectionBackground: GradientDrawable? = null
+    private var gateTitleView: TextView? = null
+    private var gateBodyView: TextView? = null
+    private var gateTimerBar: ProgressBar? = null
+    private var gatePrimaryBtn: TextView? = null
+    private var gatePrimaryBackground: GradientDrawable? = null
+    private var gateCancelBackground: GradientDrawable? = null
+
+    @Volatile
+    private var gatePendingId: Long = -1L
+
+    @Volatile
+    private var gateCreatedAtMs: Long = 0L
+    private var gateTicker: Runnable? = null
 
     /** Current theme palette for the HUD (D3) — re-read on every start. */
     private var palette: HudPalette = ThemePalette.hudPalette(AppTheme.DARK, null)
@@ -212,52 +247,116 @@ class FloatingOverlayService : Service() {
         }
     }
 
+    /**
+     * F7: the floating TASK PANEL (his reference screenshot is the
+     * spec): header "JARVIS" + drag grip · goal title · plan-step
+     * checklist (✓ accent / spinner / faint · / ✗ red) · result line ·
+     * progress bar + "<x>/<y> done · <z>%" footer · the F3 "Open
+     * Jarvis app" button. The ConfirmGate card (GateHost renderer b)
+     * renders INSIDE this same window — one window, no z-fighting:
+     * when the panel is up the gate is a section of it; the gate
+     * forces the panel open when it isn't.
+     */
     private fun buildHud(dp: (Int) -> Int): LinearLayout {
         val panelBg = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(16).toFloat()
+            cornerRadius = dp(18).toFloat()
             setColor(palette.background)
             setStroke(dp(1), palette.border)
         }
         hudBackground = panelBg
+        val panelWidth = (resources.displayMetrics.widthPixels * 0.86f).toInt()
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = panelBg // The HUD is a panel — its card is allowed.
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            layoutParams = FrameLayout.LayoutParams(dp(264), FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            background = panelBg // The panel is a card — its background is allowed.
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            layoutParams = FrameLayout.LayoutParams(panelWidth, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(62)
             }
         }
-        // Header: "<AssistantName> • Tasks"
+
+        // ── Header row: "JARVIS" bold + drag grip (drag by header) ────
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
         val header = TextView(this).apply {
+            text = "JARVIS"
             textSize = 13f
             setTextColor(palette.textPrimary)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
+            letterSpacing = 0.14f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            )
         }
-        panel.addView(header)
+        val grip = GripDotsView(this, palette.textSecondary)
+        grip.layoutParams = LinearLayout.LayoutParams(dp(14), dp(20))
+        headerRow.addView(header)
+        headerRow.addView(grip)
+        headerRow.setOnTouchListener { _, event -> handlePanelTouch(event) }
+        panel.addView(headerRow)
+        panelHeaderRow = headerRow
+        panelGripView = grip
         hudHeaderView = header
-        hudGoalView = header // legacy alias: header replaced the goal line
 
-        // Task rows: up to MAX_HUD_TASKS, glyph + 1-line ellipsized title.
+        // ── Goal title (current task, ≤2 lines, semibold) ─────────────
+        val goal = TextView(this).apply {
+            textSize = 15f
+            setTextColor(palette.textPrimary)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(6) }
+        }
+        panel.addView(goal)
+        panelGoalView = goal
+        hudGoalView = goal
+
+        // ── Checklist rows: [glyph|spinner slot][label] ───────────────
         val glyphs = mutableListOf<TextView>()
+        val spinners = mutableListOf<ProgressBar>()
         val titles = mutableListOf<TextView>()
         val rows = mutableListOf<LinearLayout>()
         repeat(MAX_HUD_TASKS) {
             val glyph = TextView(this).apply {
-                textSize = 12f
+                textSize = 13f
+                gravity = Gravity.CENTER
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
-                layoutParams = LinearLayout.LayoutParams(dp(18), LinearLayout.LayoutParams.WRAP_CONTENT)
+                layoutParams = FrameLayout.LayoutParams(dp(22), dp(22))
+            }
+            val spinner = ProgressBar(
+                this, null, android.R.attr.progressBarStyleSmall
+            ).apply {
+                isIndeterminate = true
+                indeterminateTintList = ColorStateList.valueOf(palette.accent)
+                visibility = View.GONE
+                layoutParams = FrameLayout.LayoutParams(dp(16), dp(16)).apply {
+                    gravity = Gravity.CENTER
+                }
+            }
+            val slot = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(22), dp(22))
+                addView(glyph)
+                addView(spinner)
             }
             val title = TextView(this).apply {
-                textSize = 12f
+                textSize = 13f
                 setTextColor(palette.textPrimary)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
                 layoutParams = LinearLayout.LayoutParams(
                     0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-                )
+                ).apply { leftMargin = dp(6) }
             }
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -265,16 +364,18 @@ class FloatingOverlayService : Service() {
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { topMargin = dp(4) }
-                addView(glyph)
+                ).apply { topMargin = dp(5) }
+                addView(slot)
                 addView(title)
             }
             glyphs += glyph
+            spinners += spinner
             titles += title
             rows += row
             panel.addView(row)
         }
         hudTaskGlyphViews = glyphs
+        panelStepSpinnerViews = spinners
         hudTaskTitleViews = titles
         hudTaskRowViews = rows
 
@@ -286,12 +387,13 @@ class FloatingOverlayService : Service() {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(3); leftMargin = dp(18) }
+            ).apply { topMargin = dp(3); leftMargin = dp(28) }
         }
         panel.addView(more)
         hudMoreView = more
 
-        // Current task's last 3 steps (small text).
+        // F6 fallback step lines (current task's live step text when
+        // no plan exists — e.g. a Live tool turn).
         val steps = mutableListOf<TextView>()
         repeat(MAX_HUD_STEPS) {
             val stepView = TextView(this).apply {
@@ -302,14 +404,29 @@ class FloatingOverlayService : Service() {
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { topMargin = dp(3); leftMargin = dp(18) }
+                ).apply { topMargin = dp(3); leftMargin = dp(28) }
             }
             steps += stepView
             panel.addView(stepView)
         }
         hudStepViews = steps
 
-        // Footer: overall progress bar + "X of Y done" status line.
+        // ── Result line (Part D completion recognition) ───────────────
+        val result = TextView(this).apply {
+            textSize = 12f
+            setTextColor(palette.accent)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(7) }
+        }
+        panel.addView(result)
+        panelResultView = result
+
+        // ── Progress bar ───────────────────────────────────────────────
         val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
             isIndeterminate = true
@@ -319,20 +436,39 @@ class FloatingOverlayService : Service() {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(8) }
+            ).apply { topMargin = dp(9) }
         }
         panel.addView(progress)
         hudProgressBar = progress
-        val status = TextView(this).apply {
-            textSize = 11f
-            setTextColor(palette.accent)
+
+        // ── Footer: "<x>/<y> done · <z>%" left, "Task i of n" right ───
+        val footerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(4) }
         }
-        panel.addView(status)
+        val status = TextView(this).apply {
+            textSize = 11f
+            setTextColor(palette.accent)
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            )
+        }
+        val queueNote = TextView(this).apply {
+            textSize = 11f
+            setTextColor(palette.textSecondary)
+        }
+        footerRow.addView(status)
+        footerRow.addView(queueNote)
+        panel.addView(footerRow)
         hudStatusView = status
+        panelQueueNoteView = queueNote
+
+        // ── GateHost card (Part A2b): inside the panel window ─────────
+        panel.addView(buildGateSection(dp))
 
         // The ONLY overlay element allowed to launch MainActivity (F3).
         val openBg = GradientDrawable().apply {
@@ -363,6 +499,130 @@ class FloatingOverlayService : Service() {
         return panel
     }
 
+    /**
+     * F7 GateHost renderer (b): the ConfirmGate card hosted INSIDE the
+     * panel window. Title = the gate's first line ("Send WhatsApp
+     * message to Mom (+91…)?"), body = the rest (the full message
+     * text), a draining 30 s timer bar, and [Send]/[Allow] + [Cancel]
+     * buttons that complete the SAME ConfirmGate request the in-app
+     * dialog and the voice intercept race to answer.
+     */
+    private fun buildGateSection(dp: (Int) -> Int): LinearLayout {
+        val sectionBg = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(12).toFloat()
+            setColor(palette.progressTrack)
+            setStroke(dp(1), palette.border)
+        }
+        gateSectionBackground = sectionBg
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = sectionBg
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(9) }
+        }
+        val title = TextView(this).apply {
+            textSize = 13f
+            setTextColor(palette.textPrimary)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        section.addView(title)
+        gateTitleView = title
+        val body = TextView(this).apply {
+            textSize = 12f
+            setTextColor(palette.textSecondary)
+            maxLines = 4
+            ellipsize = TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(3) }
+        }
+        section.addView(body)
+        gateBodyView = body
+        val timer = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progress = 100
+            isIndeterminate = false
+            progressTintList = ColorStateList.valueOf(palette.accent)
+            progressBackgroundTintList = ColorStateList.valueOf(palette.background)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(7) }
+        }
+        section.addView(timer)
+        gateTimerBar = timer
+
+        val primaryBg = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(9).toFloat()
+            setColor(palette.accent)
+        }
+        gatePrimaryBackground = primaryBg
+        val cancelBg = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(9).toFloat()
+            setColor(palette.background)
+            setStroke(dp(1), palette.border)
+        }
+        gateCancelBackground = cancelBg
+        val buttons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+        }
+        val primary = TextView(this).apply {
+            text = "Allow"
+            textSize = 13f
+            setTextColor(0xFFFFFFFF.toInt())
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            background = primaryBg
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            )
+            setOnClickListener {
+                val id = gatePendingId
+                if (id != -1L) ConfirmGate.complete(id, approved = true)
+            }
+        }
+        val cancel = TextView(this).apply {
+            text = "Cancel"
+            textSize = 13f
+            setTextColor(palette.textPrimary)
+            gravity = Gravity.CENTER
+            background = cancelBg
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            ).apply { leftMargin = dp(8) }
+            setOnClickListener {
+                val id = gatePendingId
+                if (id != -1L) ConfirmGate.complete(id, approved = false)
+            }
+        }
+        buttons.addView(primary)
+        buttons.addView(cancel)
+        section.addView(buttons)
+        gatePrimaryBtn = primary
+        gateSection = section
+        return section
+    }
+
     /** HUD-button-only app launch (F3) — never used from the tap path. */
     private fun openJarvisApp() {
         val intent = Intent(this, MainActivity::class.java).apply {
@@ -376,6 +636,9 @@ class FloatingOverlayService : Service() {
     }
 
     private fun removeOverlay() {
+        stopGateTicker()
+        cancelPanelCollapse()
+        gatePendingId = -1L
         val view = rootView ?: return
         try {
             windowManager?.removeView(view)
@@ -390,6 +653,20 @@ class FloatingOverlayService : Service() {
         hudTaskGlyphViews = emptyList()
         hudTaskTitleViews = emptyList()
         hudTaskRowViews = emptyList()
+        panelHeaderRow = null
+        panelGripView = null
+        panelGoalView = null
+        panelStepSpinnerViews = emptyList()
+        panelResultView = null
+        panelQueueNoteView = null
+        gateSection = null
+        gateSectionBackground = null
+        gateTitleView = null
+        gateBodyView = null
+        gateTimerBar = null
+        gatePrimaryBtn = null
+        gatePrimaryBackground = null
+        gateCancelBackground = null
     }
 
     // ── State observation ──────────────────────────────────────────────
@@ -422,62 +699,57 @@ class FloatingOverlayService : Service() {
         scope.launch {
             VoiceSessionManager.uiState.collect { updatePulse() }
         }
-    }
-
-    /** One display row in the HUD task list (queue item or fallback). */
-    private data class HudRow(val glyph: String, val glyphColor: Int, val title: String, val running: Boolean)
-
-    private fun glyphFor(statusName: String): Pair<String, Int> = when (statusName) {
-        "DONE" -> "✓" to GLYPH_DONE
-        "RUNNING" -> "▶" to palette.accent
-        "FAILED" -> "✕" to GLYPH_FAILED
-        "SKIPPED" -> "•" to palette.textSecondary
-        else -> "•" to palette.textSecondary // QUEUED and anything new
-    }
-
-    private fun refreshHud() {
-        hudHeaderView?.text = "${assistantName()} • Tasks"
-        val queue = TaskQueue.tasks.value
-        val rows: List<HudRow>
-        val total: Int
-        val done: Int
-        val overallProgress: Float // -1f = indeterminate
-        if (queue.isNotEmpty()) {
-            rows = queue.take(MAX_HUD_TASKS).map { item ->
-                val (glyph, color) = glyphFor(item.status.name)
-                HudRow(glyph, color, item.title, item.status.name == "RUNNING")
-            }
-            total = queue.size
-            done = queue.count { it.status.name == "DONE" }
-            overallProgress = if (total > 0) done.toFloat() / total else -1f
-            val extra = queue.size - MAX_HUD_TASKS
-            hudMoreView?.let { more ->
-                more.text = if (extra > 0) "…and $extra more" else ""
-                more.visibility = if (extra > 0) View.VISIBLE else View.GONE
-            }
-        } else if (TaskState.goal.value.isNotBlank() || TaskState.active.value) {
-            // Fallback (old behaviour): the single TaskState task as one row.
-            val goal = TaskState.goal.value.ifBlank { "Task" }
-            val running = TaskState.active.value
-            val failed = !running && TaskState.lastOutcome.value?.startsWith("❌") == true
-            val (glyph, color) = when {
-                running -> glyphFor("RUNNING")
-                failed -> glyphFor("FAILED")
-                !running && TaskState.lastOutcome.value != null -> glyphFor("DONE")
-                else -> glyphFor("QUEUED")
-            }
-            rows = listOf(HudRow(glyph, color, goal, running))
-            total = 1
-            done = if (!running && !failed && TaskState.lastOutcome.value != null) 1 else 0
-            overallProgress = TaskState.progress.value
-            hudMoreView?.visibility = View.GONE
-        } else {
-            rows = emptyList()
-            total = 0
-            done = 0
-            overallProgress = -1f
-            hudMoreView?.visibility = View.GONE
+        // F7: the panel footer shows "Task i of n" for compound queues.
+        scope.launch {
+            TaskQueue.currentIndex.collect { refreshHud() }
         }
+        // F7 GateHost renderer (b): ConfirmGate requests render in
+        // the panel's gate section (see onGateChanged).
+        scope.launch {
+            ConfirmGate.pending.collect { pending -> onGateChanged(pending) }
+        }
+    }
+
+    /** One checklist row in the F7 task panel. */
+    private data class PanelRow(
+        val glyph: String,
+        val glyphColor: Int,
+        val label: String,
+        val labelColor: Int,
+        val spinner: Boolean,
+        val bold: Boolean
+    )
+
+    private fun glyphFor(status: TaskStatus): Pair<String, Int> = when (status) {
+        TaskStatus.DONE -> "✓" to GLYPH_DONE
+        TaskStatus.RUNNING -> "▶" to palette.accent
+        TaskStatus.FAILED -> "✕" to GLYPH_FAILED
+        TaskStatus.SKIPPED -> "•" to palette.textSecondary
+        TaskStatus.QUEUED -> "·" to palette.textSecondary
+    }
+
+    /** Plan-step → row: DONE ✓ accent-green, RUNNING spinner, PENDING faint ·, FAILED ✗ red. */
+    private fun rowForPlanStep(step: com.nshd.jarvis2.brain.PlanStep): PanelRow =
+        when (step.state) {
+            PlanStepState.DONE -> PanelRow(
+                "✓", GLYPH_DONE, step.label, palette.textPrimary,
+                spinner = false, bold = false
+            )
+            PlanStepState.RUNNING -> PanelRow(
+                "", palette.accent, step.label, palette.textPrimary,
+                spinner = true, bold = true
+            )
+            PlanStepState.FAILED -> PanelRow(
+                "✗", GLYPH_FAILED, step.label, palette.textPrimary,
+                spinner = false, bold = false
+            )
+            PlanStepState.PENDING -> PanelRow(
+                "·", palette.textSecondary, step.label, palette.textSecondary,
+                spinner = false, bold = false
+            )
+        }
+
+    private fun renderRows(rows: List<PanelRow>) {
         hudTaskRowViews.forEachIndexed { index, rowView ->
             val row = rows.getOrNull(index)
             rowView.visibility = if (row == null) View.GONE else View.VISIBLE
@@ -485,23 +757,35 @@ class FloatingOverlayService : Service() {
                 hudTaskGlyphViews.getOrNull(index)?.let { glyph ->
                     glyph.text = row.glyph
                     glyph.setTextColor(row.glyphColor)
+                    glyph.visibility = if (row.spinner) View.GONE else View.VISIBLE
                 }
+                panelStepSpinnerViews.getOrNull(index)?.visibility =
+                    if (row.spinner) View.VISIBLE else View.GONE
                 hudTaskTitleViews.getOrNull(index)?.let { title ->
-                    title.text = row.title
-                    title.setTextColor(palette.textPrimary)
+                    title.text = row.label
+                    title.setTextColor(row.labelColor)
+                    title.setTypeface(
+                        title.typeface,
+                        if (row.bold) {
+                            android.graphics.Typeface.BOLD
+                        } else {
+                            android.graphics.Typeface.NORMAL
+                        }
+                    )
                 }
             }
         }
-        // Current task's last 3 steps (TaskState), small text. F6:
-        // when TaskState has no step lines (e.g. a Live voice tool
-        // turn, which registers in TaskQueue without the pipeline's
-        // event feed), fall back to the RUNNING queue item's live
-        // step text so the panel never looks idle mid-task.
+    }
+
+    private fun renderFallbackSteps(queue: List<com.nshd.jarvis2.brain.TaskItem>) {
+        // F6 behaviour, kept for plan-less tasks: the TaskState step
+        // lines, else the RUNNING item's live step text — the panel
+        // never looks idle mid-task.
         val stateSteps = TaskState.steps.value.takeLast(MAX_HUD_STEPS)
         val steps = if (stateSteps.isNotEmpty()) {
             stateSteps
         } else {
-            queue.firstOrNull { it.status.name == "RUNNING" }
+            queue.firstOrNull { it.status == TaskStatus.RUNNING }
                 ?.step?.takeIf { it.isNotBlank() }
                 ?.let { listOf(it) }
                 ?: emptyList()
@@ -511,20 +795,245 @@ class FloatingOverlayService : Service() {
             view.text = step.orEmpty()
             view.visibility = if (step == null) View.GONE else View.VISIBLE
         }
-        hudProgressBar?.let { bar ->
-            if (overallProgress < 0f) {
-                bar.isIndeterminate = TaskState.active.value ||
-                    queue.any { it.status.name == "RUNNING" }
-                if (!bar.isIndeterminate) bar.progress = 0
-            } else {
-                bar.isIndeterminate = false
-                bar.progress = (overallProgress * 100).toInt().coerceIn(0, 100)
+    }
+
+    // ── F7 panel visibility (auto-expand / auto-collapse) ─────────────
+
+    private fun showPanel(auto: Boolean) {
+        val hud = hudPanel ?: return
+        cancelPanelCollapse()
+        if (auto) panelAutoShown = true
+        if (hud.visibility != View.VISIBLE) {
+            hud.visibility = View.VISIBLE
+            com.nshd.jarvis2.core.AppLog.d(
+                "Overlay", "task panel shown (${if (auto) "auto" else "manual"})"
+            )
+            refreshHud()
+        }
+    }
+
+    private fun hidePanel() {
+        cancelPanelCollapse()
+        panelAutoShown = false
+        hudPanel?.visibility = View.GONE
+    }
+
+    /** Collapse an AUTO-shown panel ~6 s after the task settles. */
+    private fun schedulePanelCollapse() {
+        if (!panelAutoShown || hudPanel?.visibility != View.VISIBLE) return
+        cancelPanelCollapse()
+        val runnable = Runnable {
+            panelCollapseRunnable = null
+            hidePanel()
+        }
+        panelCollapseRunnable = runnable
+        mainHandler.postDelayed(runnable, PANEL_AUTO_COLLAPSE_MS)
+    }
+
+    private fun cancelPanelCollapse() {
+        panelCollapseRunnable?.let { mainHandler.removeCallbacks(it) }
+        panelCollapseRunnable = null
+    }
+
+    // ── F7 GateHost renderer (b) ───────────────────────────────────────
+
+    private fun onGateChanged(pending: PendingConfirm?) {
+        if (pending == null) {
+            gatePendingId = -1L
+            gateSection?.visibility = View.GONE
+            stopGateTicker()
+            refreshHud() // re-run auto-collapse bookkeeping
+            return
+        }
+        com.nshd.jarvis2.core.AppLog.i(
+            "Gate", "overlay gate card shown for request #${pending.id}"
+        )
+        gatePendingId = pending.id
+        gateCreatedAtMs = pending.createdAtMs
+        val lines = pending.description.lines()
+        gateTitleView?.text = lines.firstOrNull()?.trim()
+            ?.takeIf { it.isNotBlank() } ?: "Confirm this action"
+        val bodyText = lines.drop(1).joinToString("\n").trim()
+        gateBodyView?.text = bodyText
+        gateBodyView?.visibility = if (bodyText.isBlank()) View.GONE else View.VISIBLE
+        gatePrimaryBtn?.text =
+            if (pending.description.startsWith("Send")) "Send" else "Allow"
+        gateSection?.visibility = View.VISIBLE
+        showPanel(auto = true)
+        startGateTicker()
+    }
+
+    /** Drain the gate's 30 s timer bar (the gate itself enforces the timeout). */
+    private fun startGateTicker() {
+        stopGateTicker()
+        val ticker = object : Runnable {
+            override fun run() {
+                if (gatePendingId == -1L) return
+                val elapsed = System.currentTimeMillis() - gateCreatedAtMs
+                val remaining = (GATE_TIMEOUT_MS - elapsed).coerceIn(0L, GATE_TIMEOUT_MS)
+                gateTimerBar?.progress = (remaining * 100 / GATE_TIMEOUT_MS).toInt()
+                if (remaining > 0L) mainHandler.postDelayed(this, 200L)
             }
         }
-        hudStatusView?.text = when {
-            total > 0 -> "$done of $total done"
-            TaskState.lastOutcome.value != null -> TaskState.lastOutcome.value
-            else -> "0 of 0 done — idle"
+        gateTicker = ticker
+        mainHandler.post(ticker)
+    }
+
+    private fun stopGateTicker() {
+        gateTicker?.let { mainHandler.removeCallbacks(it) }
+        gateTicker = null
+    }
+
+    // ── F7 panel rendering ─────────────────────────────────────────────
+
+    private fun refreshHud() {
+        hudHeaderView?.text = assistantName().uppercase()
+        val queue = TaskQueue.tasks.value
+        val runningItem = queue.firstOrNull { it.status == TaskStatus.RUNNING }
+        val displayItem = runningItem
+            ?: queue.lastOrNull {
+                it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED
+            }
+            ?: queue.lastOrNull()
+        val anyRunning = runningItem != null || TaskState.active.value
+
+        var statusText = "Idle"
+        var progressValue = 0
+        var progressIndeterminate = false
+        var resultText: String? = null
+        var resultFailed = false
+        var overflowText: String? = null
+
+        when {
+            // ── Plan mode: the screenshot's checklist ─────────────────
+            displayItem != null && displayItem.plan.isNotEmpty() -> {
+                panelGoalView?.text = displayItem.title
+                renderRows(displayItem.plan.take(MAX_HUD_TASKS).map { rowForPlanStep(it) })
+                val extra = displayItem.plan.size - MAX_HUD_TASKS
+                overflowText = if (extra > 0) "…and $extra more steps" else null
+                hudStepViews.forEach { it.visibility = View.GONE }
+                val doneCount = TaskQueue.planDoneCount(displayItem)
+                val totalSteps = displayItem.plan.size
+                val percent = TaskQueue.planPercent(displayItem)
+                statusText = "$doneCount/$totalSteps done · $percent%"
+                progressValue = percent
+                if (displayItem.status == TaskStatus.DONE ||
+                    displayItem.status == TaskStatus.FAILED
+                ) {
+                    resultText = displayItem.resultLine.ifBlank { null }
+                    resultFailed = displayItem.status == TaskStatus.FAILED
+                }
+            }
+            // ── Queue mode: several sub-tasks, none with a plan ───────
+            queue.size > 1 -> {
+                panelGoalView?.text = displayItem?.title ?: "Tasks"
+                renderRows(
+                    queue.take(MAX_HUD_TASKS).map { item ->
+                        val (glyph, color) = glyphFor(item.status)
+                        PanelRow(
+                            glyph, color, item.title,
+                            labelColor = palette.textPrimary,
+                            spinner = item.status == TaskStatus.RUNNING,
+                            bold = item.status == TaskStatus.RUNNING
+                        )
+                    }
+                )
+                val extra = queue.size - MAX_HUD_TASKS
+                overflowText = if (extra > 0) "…and $extra more" else null
+                renderFallbackSteps(queue)
+                val doneCount = queue.count { it.status == TaskStatus.DONE }
+                val percent = if (queue.isEmpty()) 0 else doneCount * 100 / queue.size
+                statusText = "$doneCount of ${queue.size} done · $percent%"
+                progressValue = percent
+                progressIndeterminate = anyRunning && doneCount == 0
+            }
+            // ── Single plan-less task (Live turns, wake commands) ─────
+            displayItem != null -> {
+                panelGoalView?.text = displayItem.title
+                val (glyph, color) = glyphFor(displayItem.status)
+                val label = when {
+                    displayItem.status == TaskStatus.RUNNING &&
+                        displayItem.step.isNotBlank() -> displayItem.step
+                    displayItem.status == TaskStatus.RUNNING -> "Working…"
+                    displayItem.status == TaskStatus.DONE -> "Done"
+                    displayItem.status == TaskStatus.FAILED -> "Failed"
+                    else -> "Queued"
+                }
+                renderRows(
+                    listOf(
+                        PanelRow(
+                            glyph, color, label,
+                            labelColor = palette.textPrimary,
+                            spinner = displayItem.status == TaskStatus.RUNNING,
+                            bold = displayItem.status == TaskStatus.RUNNING
+                        )
+                    )
+                )
+                renderFallbackSteps(queue)
+                statusText = label
+                progressIndeterminate = displayItem.status == TaskStatus.RUNNING
+                progressValue = if (displayItem.status == TaskStatus.DONE) 100 else 0
+                if (displayItem.status == TaskStatus.DONE ||
+                    displayItem.status == TaskStatus.FAILED
+                ) {
+                    resultText = displayItem.resultLine.ifBlank { null }
+                        ?: TaskState.lastOutcome.value
+                    resultFailed = displayItem.status == TaskStatus.FAILED
+                }
+            }
+            // ── Empty queue: TaskState fallback / idle ────────────────
+            else -> {
+                panelGoalView?.text = TaskState.goal.value
+                    .ifBlank { "${assistantName()} is idle" }
+                renderRows(emptyList())
+                renderFallbackSteps(queue)
+                val outcome = TaskState.lastOutcome.value
+                statusText = outcome ?: "Idle"
+                progressIndeterminate = TaskState.active.value
+                progressValue = (TaskState.progress.value * 100).toInt().coerceIn(0, 100)
+                resultText = outcome
+            }
+        }
+
+        hudMoreView?.let { more ->
+            more.text = overflowText.orEmpty()
+            more.visibility = if (overflowText != null) View.VISIBLE else View.GONE
+        }
+        panelResultView?.let { result ->
+            result.text = resultText.orEmpty()
+            result.setTextColor(if (resultFailed) GLYPH_FAILED else palette.accent)
+            result.visibility = if (resultText != null) View.VISIBLE else View.GONE
+        }
+        hudProgressBar?.let { bar ->
+            bar.isIndeterminate = progressIndeterminate
+            if (!progressIndeterminate) {
+                bar.progress = progressValue.coerceIn(0, 100)
+            }
+        }
+        hudStatusView?.text = statusText
+        // Compound queues: "Task i of n" beside the footer counts
+        // (currentIndex is -1 when no queue position is active).
+        val currentIndex = TaskQueue.currentIndex.value
+        panelQueueNoteView?.text = if (queue.size > 1 && currentIndex >= 0) {
+            "Task ${currentIndex + 1} of ${queue.size}"
+        } else {
+            ""
+        }
+
+        // ── Auto-behaviour ─────────────────────────────────────────────
+        // A running task (or a pending gate) pulls the panel up over
+        // whatever app is foreground; when everything settles, an
+        // auto-shown panel lingers ~6 s on its final state (Part D)
+        // and collapses back to the avatar. A manually opened panel
+        // (double-tap) is never auto-collapsed.
+        if (anyRunning || gatePendingId != -1L) {
+            cancelPanelCollapse()
+            if (hudPanel?.visibility != View.VISIBLE) showPanel(auto = true)
+        } else {
+            val anyFinished = queue.any {
+                it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED
+            } || TaskState.lastOutcome.value != null
+            if (anyFinished) schedulePanelCollapse()
         }
     }
 
@@ -675,11 +1184,62 @@ class FloatingOverlayService : Service() {
 
     private fun toggleHud() {
         val hud = hudPanel ?: return
-        hud.visibility = if (hud.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         if (hud.visibility == View.VISIBLE) {
-            com.nshd.jarvis2.core.AppLog.d("Overlay", "HUD opened")
-            refreshHud()
+            hidePanel()
+        } else {
+            // Manual open: not auto-shown, so it never auto-collapses.
+            panelAutoShown = false
+            com.nshd.jarvis2.core.AppLog.d("Overlay", "task panel opened (double-tap)")
+            showPanel(auto = false)
         }
+    }
+
+    /**
+     * F7: drag the whole overlay by the panel's header (same window
+     * math as the bubble drag); a clean tap on the header collapses
+     * the panel back to the avatar.
+     */
+    private fun handlePanelTouch(event: MotionEvent): Boolean {
+        val lp = params ?: return false
+        val wm = windowManager ?: return false
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downRawX = event.rawX
+                downRawY = event.rawY
+                startParamX = lp.x
+                startParamY = lp.y
+                downAtMs = System.currentTimeMillis()
+                dragging = false
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = event.rawX - downRawX
+                val dy = event.rawY - downRawY
+                if (!dragging && (abs(dx) > TOUCH_SLOP_PX || abs(dy) > TOUCH_SLOP_PX)) {
+                    dragging = true
+                }
+                if (dragging) {
+                    lp.x = startParamX + dx.toInt()
+                    lp.y = startParamY + dy.toInt()
+                    try {
+                        wm.updateViewLayout(rootView, lp)
+                    } catch (e: Exception) {
+                        // Window detached mid-drag.
+                    }
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (dragging) {
+                    dragging = false
+                    snapToEdge()
+                } else if (System.currentTimeMillis() - downAtMs < TAP_MAX_MS) {
+                    hidePanel()
+                }
+                return true
+            }
+        }
+        return false
     }
 
     private fun snapToEdge() {
@@ -753,6 +1313,28 @@ class FloatingOverlayService : Service() {
             bar.progressTintList = ColorStateList.valueOf(newPalette.accent)
             bar.indeterminateTintList = ColorStateList.valueOf(newPalette.accent)
             bar.progressBackgroundTintList = ColorStateList.valueOf(newPalette.progressTrack)
+        }
+        // F7 panel views follow the palette too.
+        panelGripView?.setDotColor(newPalette.textSecondary)
+        panelQueueNoteView?.setTextColor(newPalette.textSecondary)
+        panelResultView?.setTextColor(newPalette.accent)
+        panelStepSpinnerViews.forEach {
+            it.indeterminateTintList = ColorStateList.valueOf(newPalette.accent)
+        }
+        gatePrimaryBackground?.setColor(newPalette.accent)
+        gateCancelBackground?.let { bg ->
+            bg.setColor(newPalette.background)
+            bg.setStroke(dp(1), newPalette.border)
+        }
+        gateTimerBar?.let { bar ->
+            bar.progressTintList = ColorStateList.valueOf(newPalette.accent)
+            bar.progressBackgroundTintList = ColorStateList.valueOf(newPalette.background)
+        }
+        gateTitleView?.setTextColor(newPalette.textPrimary)
+        gateBodyView?.setTextColor(newPalette.textSecondary)
+        gateSectionBackground?.let { bg ->
+            bg.setColor(newPalette.progressTrack)
+            bg.setStroke(dp(1), newPalette.border)
         }
         // Glyph colours that follow the palette (▶/•) re-derive on the
         // next refresh; force one now so a theme change recolours rows
@@ -831,6 +1413,10 @@ class FloatingOverlayService : Service() {
         private const val MAX_HUD_STEPS = 3
         private const val GLYPH_DONE = 0xFF43A047.toInt()
         private const val GLYPH_FAILED = 0xFFE53935.toInt()
+        /** F7: how long the finished panel lingers before auto-collapse. */
+        private const val PANEL_AUTO_COLLAPSE_MS = 6_000L
+        /** F7: mirrors ConfirmGate's 30 s prompt timeout (timer bar only). */
+        private const val GATE_TIMEOUT_MS = 30_000L
         private const val TOUCH_SLOP_PX = 14f
         private const val TAP_MAX_MS = 350L
         private const val DOUBLE_TAP_MS = 320L
@@ -847,5 +1433,35 @@ class FloatingOverlayService : Service() {
 
         @Volatile
         private var running = false
+    }
+}
+
+/**
+ * F7: the panel header's drag grip — six dots in two columns, drawn
+ * directly (plain Views have no vector-icon story, and a font glyph
+ * for "⋮⋮" is not guaranteed to exist on every device font).
+ */
+private class GripDotsView(context: Context, dotColor: Int) : View(context) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = dotColor
+        style = Paint.Style.FILL
+    }
+
+    fun setDotColor(color: Int) {
+        paint.color = color
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        if (width == 0 || height == 0) return
+        val radius = minOf(width, height) / 7f
+        val columns = floatArrayOf(width * 0.32f, width * 0.68f)
+        val rows = floatArrayOf(height * 0.22f, height * 0.5f, height * 0.78f)
+        for (y in rows) {
+            for (x in columns) {
+                canvas.drawCircle(x, y, radius, paint)
+            }
+        }
     }
 }

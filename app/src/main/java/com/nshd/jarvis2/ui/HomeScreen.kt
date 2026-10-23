@@ -69,6 +69,14 @@ fun HomeScreen(
 ) {
     // The Home orb + status pill mirror the live voice session state.
     val voiceState by VoiceSessionManager.uiState.collectAsState()
+    // F7: the Home orb is a LIVE orb — amplitude from the process-wide
+    // session (a background/overlay session listening shows here too)
+    // and a RUNNING task shows THINKING via orbStateFor.
+    val voiceAmplitude by VoiceSessionManager.amplitude.collectAsState()
+    val queueTasks by com.nshd.jarvis2.brain.TaskQueue.tasks.collectAsState()
+    val taskRunning = queueTasks.any {
+        it.status == com.nshd.jarvis2.brain.TaskStatus.RUNNING
+    }
     var showLanguageDialog by remember { mutableStateOf(false) }
 
     Column(
@@ -140,14 +148,28 @@ fun HomeScreen(
         // mapped from the live voice session via toOrbState()
         // (CONNECTING renders as THINKING, UNIVERSAL_ACTIVE as
         // LISTENING); the legacy `listening` flag still forces LISTENING.
-        JarvisOrb(
-            state = if (listening) OrbState.LISTENING else voiceState.status.toOrbState(),
-            theme = settings.theme,
-            customHex = settings.customBgHex,
-            modifier = Modifier
-                .size(330.dp)
-                .clickable(onClick = onOpenVoice)
-        )
+        // F7: BIGGER (min(screenWidth × 0.92, 420dp)) and state via
+        // the single orbStateFor helper — task activity shows as
+        // THINKING, background listening/speaking pulse with the live
+        // amplitude, exactly like the Voice screen.
+        androidx.compose.foundation.layout.BoxWithConstraints {
+            val orbSize = minOf(maxWidth * 0.92f, 420.dp)
+            JarvisOrb(
+                state = if (listening) {
+                    OrbState.LISTENING
+                } else {
+                    orbStateFor(voiceState.status, taskRunning)
+                },
+                amplitude = voiceAmplitude,
+                liveAudio = voiceState.status != VoiceStatus.IDLE,
+                theme = settings.theme,
+                customHex = settings.customBgHex,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(orbSize)
+                    .clickable(onClick = onOpenVoice)
+            )
+        }
 
         Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
         StatusPill(

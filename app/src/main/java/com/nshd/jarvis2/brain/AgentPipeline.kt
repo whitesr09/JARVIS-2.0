@@ -70,6 +70,26 @@ object AgentPipeline {
             }
             val success = !result.startsWith("I couldn't") &&
                 !result.startsWith("Please configure")
+            // F7: panel outcome line + chat-only plan collapse. A
+            // "generic" plan whose item never executed a tool was a
+            // chat answer, not an action — render the honest 2-step
+            // plan ["Understand goal","Answer"] instead of pretending
+            // four action steps ran (screenshot spec, Part B).
+            TaskQueue.runningItem()?.let { running ->
+                if (running.planKind == "generic" && !running.toolsExecuted) {
+                    TaskQueue.setPlan(
+                        running.id,
+                        listOf("Understand goal", "Answer"),
+                        kind = "chat"
+                    )
+                    TaskQueue.setPlanStep(running.id, 0, PlanStepState.DONE)
+                    TaskQueue.setPlanStep(running.id, 1, PlanStepState.DONE)
+                }
+                TaskQueue.setResultLine(
+                    running.id,
+                    result.lineSequence().firstOrNull().orEmpty()
+                )
+            }
             TaskQueue.finishRunning(success)
             AppLog.i(
                 "Queue",
@@ -147,7 +167,14 @@ object AgentPipeline {
         }
 
         // ── Deterministic quick commands (work with no API key) ────────
+        // F7 ORDER GUARANTEE: the quick router runs FIRST in dispatch
+        // — before the editor-code route, before the splitter, before
+        // the generic loop — for chat AND Universal voice (both funnel
+        // into handleUserText; Live is excluded by design). Quick
+        // results are TERMINAL: runQuick returns the tool's own result
+        // sentence as the reply, no extra model summary call.
         quickCommand(context, clean)?.let { quick ->
+            AppLog.i("Agent", "route=quick-${quick.toolName}")
             return@withContext runQuick(context, quick, memoryDb, ExecutionLedger(), hudEvent)
         }
 
@@ -158,6 +185,7 @@ object AgentPipeline {
         // fast paths: after deterministic quick commands, before the
         // compound splitter and the generic agent loop.
         if (isEditorCodeRequest(clean)) {
+            AppLog.i("Agent", "route=code")
             return@withContext runEditorCodeRoute(
                 context, clean, settings, memoryDb, providerStore,
                 codeMode, hudEvent
@@ -165,9 +193,31 @@ object AgentPipeline {
         }
 
         // ── Multitask queue (F3): compound request → ordered sub-tasks ─
+        // F7 SPLITTER DISCIPLINE: the LLM splitter call may ONLY run
+        // when the message genuinely looks compound (long, or with an
+        // explicit sequence conjunction). Everything else takes the
+        // instant regex/no-split path — a model round-trip was being
+        // spent splitting requests that were never compound.
         if (looksCompound(clean)) {
-            val titles = splitTasks(clean, providerStore)
+            val lowerClean = clean.lowercase()
+            val llmSplitAllowed = clean.length > 120 ||
+                lowerClean.contains(" and then ") ||
+                lowerClean.contains(" then ") ||
+                lowerClean.contains(" also ")
+            val titles: List<String>
+            val usedLlm: Boolean
+            if (llmSplitAllowed) {
+                titles = splitTasks(clean, providerStore)
+                usedLlm = true
+            } else {
+                titles = regexSplit(clean)
+                usedLlm = false
+            }
             if (titles.size >= 2) {
+                AppLog.i(
+                    "Agent",
+                    "route=${if (usedLlm) "split-llm" else "split-regex"} tasks=${titles.size}"
+                )
                 return@withContext runTaskQueue(
                     context, titles, settings, memoryDb, providerStore,
                     codeMode, job, hudEvent, onAssistantDelta
@@ -175,9 +225,11 @@ object AgentPipeline {
             }
             // Splitter could not separate it — fall through and let the
             // agent loop handle the request as a single task.
+            AppLog.d("Agent", "compound suspected but <2 sub-tasks — single agent turn")
         }
 
         // ── Model + tools (single task) ────────────────────────────────
+        AppLog.i("Agent", "route=loop")
         runAgentTurn(
             context, clean, settings, memoryDb, providerStore,
             codeMode, hudEvent, onAssistantDelta, ExecutionLedger()
@@ -192,6 +244,19 @@ object AgentPipeline {
         ledger: ExecutionLedger,
         onEvent: (ToolEvent) -> Unit
     ): String {
+        // F7: declare this command's plan for the floating task panel
+        // (deep intents advance it phase by phase; ToolExecutor may
+        // still replace the whatsapp plan with the send plan).
+        TaskQueue.runningItem()?.let { item ->
+            if (item.plan.isEmpty()) {
+                val (labels, kind) = planForQuick(quick)
+                TaskQueue.setPlan(item.id, labels, kind)
+                TaskQueue.setPlanStep(item.id, 0, PlanStepState.DONE)
+                if (labels.size > 1) {
+                    TaskQueue.setPlanStep(item.id, 1, PlanStepState.RUNNING)
+                }
+            }
+        }
         val executor = ToolExecutor(context, memoryDb, ledger)
         onEvent(ToolEvent(ToolEventKind.STARTED, quick.toolName))
         val result = executor.execute(
@@ -207,6 +272,53 @@ object AgentPipeline {
             )
         )
         return result.message
+    }
+
+    /**
+     * F7: the floating-panel plan for a deterministic quick command.
+     * Labels quote the user's own query/recipient so the checklist
+     * reads like his reference screenshot ("Search 'Rathinamo'").
+     */
+    private fun planForQuick(quick: QuickCommand): Pair<List<String>, String> {
+        return when (quick.toolName) {
+            "spotify_play" -> {
+                val q = quick.args.optString("query").ifBlank { "song" }
+                listOf(
+                    "Understand goal", "Open Spotify",
+                    "Search '$q'", "Play '$q'"
+                ) to "media"
+            }
+            "youtube_play" -> {
+                val q = quick.args.optString("query").ifBlank { "video" }
+                listOf(
+                    "Understand goal", "Open YouTube",
+                    "Search '$q'", "Play first video"
+                ) to "media"
+            }
+            "whatsapp_message" -> {
+                val c = quick.args.optString("contact").ifBlank { "contact" }
+                listOf(
+                    "Understand goal", "Open chat with $c",
+                    "Type the message", "Confirm & send"
+                ) to "send"
+            }
+            "insert_code" -> listOf(
+                "Understand goal", "Write the code",
+                "Insert into QuickEdit", "Verify"
+            ) to "editor"
+            else -> {
+                val action = when (quick.toolName) {
+                    "open_app" ->
+                        "Open ${quick.args.optString("app").ifBlank { "app" }}"
+                    "toggle_torch" -> "Toggle the torch"
+                    "set_volume" -> "Set the volume"
+                    "set_brightness" -> "Set the brightness"
+                    "take_screenshot" -> "Take a screenshot"
+                    else -> ToolEvent.prettyTool(quick.toolName).ifBlank { "Do it" }
+                }
+                listOf("Understand goal", action, "Verify") to "quick"
+            }
+        }
     }
 
     /** The model + tools agent loop for exactly one user goal. */
@@ -234,6 +346,27 @@ object AgentPipeline {
             messages += ChatMsg("user", userText)
         }
         val executor = ToolExecutor(context, memoryDb, ledger)
+        // F7: the generic agent loop runs the screenshot's generic
+        // 4-step plan. ToolExecutor hooks advance it (open_app →
+        // step 2 done; first mutating tool → step 3 running; turn
+        // end finalizes). Chat-only turns collapse to a 2-step plan
+        // in handleUserText (toolsExecuted stays false).
+        TaskQueue.runningItem()?.let { item ->
+            if (item.plan.isEmpty()) {
+                TaskQueue.setPlan(
+                    item.id,
+                    listOf(
+                        "Understand goal",
+                        "Open or confirm the target app",
+                        "Perform the requested action",
+                        "Verify the resulting state"
+                    ),
+                    kind = "generic"
+                )
+                TaskQueue.setPlanStep(item.id, 0, PlanStepState.DONE)
+                TaskQueue.setPlanStep(item.id, 1, PlanStepState.RUNNING)
+            }
+        }
         return FailoverRouter(
             configsInOrder = providerStore.orderedConfigs(),
             toolExecutor = executor,
@@ -466,6 +599,14 @@ object AgentPipeline {
             )
         )
         TaskQueue.setStepForRunning("Writing the code…")
+        // F7 plan: [Understand goal ✓, Write the code (running),
+        // Insert into QuickEdit, Verify].
+        TaskQueue.setPlanForRunning(
+            listOf("Understand goal", "Write the code", "Insert into QuickEdit", "Verify"),
+            kind = "editor"
+        )
+        TaskQueue.setPlanStepForRunning(0, PlanStepState.DONE)
+        TaskQueue.setPlanStepForRunning(1, PlanStepState.RUNNING)
         val facts = memoryDb.allFacts(null, null)
         val systemPrompt = PersonaPrompts.build(settings, facts, codeMode) +
             EDITOR_CODE_INSTRUCTION
@@ -507,6 +648,7 @@ object AgentPipeline {
                             "fenced=${harvested.fenced}) — inserting"
                     )
                     TaskQueue.setStepForRunning("Inserting the code into QuickEdit…")
+                    TaskQueue.advancePlanForRunning(2)
                     onEvent(ToolEvent(ToolEventKind.STARTED, "insert_code"))
                     val result = ToolExecutor(
                         context, memoryDb, ExecutionLedger()
@@ -634,18 +776,57 @@ object AgentPipeline {
 
     private data class QuickCommand(val toolName: String, val args: JSONObject)
 
+    /**
+     * F7 normalization for command matching (chat + Universal STT):
+     * trim, collapse whitespace runs, strip trailing sentence
+     * punctuation [.!?…]+. STT appends periods, and the anchored
+     * quick patterns silently MISSED "play rathinamo on spotify."
+     * before this — matching runs on the normalized string; captured
+     * groups keep their original casing for the query/contact/message.
+     */
+    private fun normalizeCommandText(raw: String): String =
+        raw.trim()
+            .replace(Regex("\\s+"), " ")
+            .trimEnd('.', '!', '?', '…', ' ')
+            .trim()
+
+    /** Drop a trailing " video" from a YouTube query ("mr beast video" → "mr beast"). */
+    private fun stripVideoSuffix(query: String): String {
+        val trimmed = query.trim()
+        return if (trimmed.lowercase().endsWith(" video")) {
+            trimmed.dropLast(" video".length).trim()
+        } else {
+            trimmed
+        }
+    }
+
     private fun quickCommand(context: Context, rawText: String): QuickCommand? {
-        val text = rawText.trim().trimEnd('.', '!', '?')
+        val text = normalizeCommandText(rawText)
         val lower = text.lowercase()
 
-        Regex("(?i)^whatsapp\\s+(.+?):\\s*(.+)$").find(text)?.let { match ->
-            return QuickCommand(
-                "whatsapp_message",
-                JSONObject()
-                    .put("contact", match.groupValues[1].trim())
-                    .put("message", match.groupValues[2].trim())
-            )
-        }
+        // ── WhatsApp sends (F7 expanded). Every hit still runs the
+        // whatsapp_message tool, whose own ConfirmGate confirms with
+        // recipient + full text — his standing rule is untouched.
+        Regex("(?i)^send\\s+(?:a\\s+)?(?:message|whatsapp\\s+message)\\s+to\\s+(.+?)\\s+(?:saying|that\\s+says)\\s+(.+)$")
+            .find(text)?.let { match ->
+                AppLog.d("Send", "route hit: send-to-saying pattern")
+                return QuickCommand(
+                    "whatsapp_message",
+                    JSONObject()
+                        .put("contact", match.groupValues[1].trim())
+                        .put("message", match.groupValues[2].trim())
+                )
+            }
+        Regex("(?i)^send\\s+(?:a\\s+)?(?:message|whatsapp\\s+message)\\s+to\\s+(.+?):\\s*(.+)$")
+            .find(text)?.let { match ->
+                AppLog.d("Send", "route hit: send-to-colon pattern")
+                return QuickCommand(
+                    "whatsapp_message",
+                    JSONObject()
+                        .put("contact", match.groupValues[1].trim())
+                        .put("message", match.groupValues[2].trim())
+                )
+            }
         Regex("(?i)^(?:send\\s+(?:a\\s+)?)?whatsapp\\s+(?:message\\s+)?to\\s+(.+?)\\s+saying\\s+(.+)$")
             .find(text)?.let { match ->
                 return QuickCommand(
@@ -655,11 +836,72 @@ object AgentPipeline {
                         .put("message", match.groupValues[2].trim())
                 )
             }
+        Regex("(?i)^send\\s+(.+?)\\s+(?:a\\s+)?(?:message|whatsapp)(?:\\s+saying)?\\s*[: ]\\s*(.+)$")
+            .find(text)?.let { match ->
+                val contactGuess = match.groupValues[1].trim()
+                // "send a message to X" (no body) would mis-parse with
+                // contact "a" — that shape is P1's job above; never let
+                // the article become a contact name.
+                if (!contactGuess.equals("a", ignoreCase = true)) {
+                    AppLog.d("Send", "route hit: send-<name>-message pattern")
+                    return QuickCommand(
+                        "whatsapp_message",
+                        JSONObject()
+                            .put("contact", contactGuess)
+                            .put("message", match.groupValues[2].trim())
+                    )
+                }
+            }
+        Regex("(?i)^whatsapp\\s+(.+?):\\s*(.+)$").find(text)?.let { match ->
+            return QuickCommand(
+                "whatsapp_message",
+                JSONObject()
+                    .put("contact", match.groupValues[1].trim())
+                    .put("message", match.groupValues[2].trim())
+            )
+        }
+        Regex("(?i)^whatsapp\\s+(.+?)\\s+[: ]\\s*(.+)$").find(text)?.let { match ->
+            AppLog.d("Send", "route hit: whatsapp-<name> pattern")
+            return QuickCommand(
+                "whatsapp_message",
+                JSONObject()
+                    .put("contact", match.groupValues[1].trim())
+                    .put("message", match.groupValues[2].trim())
+            )
+        }
+        Regex("(?i)^message\\s+(.+?)\\s+[: ]\\s*(.+)$").find(text)?.let { match ->
+            AppLog.d("Send", "route hit: message-<name> pattern")
+            return QuickCommand(
+                "whatsapp_message",
+                JSONObject()
+                    .put("contact", match.groupValues[1].trim())
+                    .put("message", match.groupValues[2].trim())
+            )
+        }
 
-        Regex("(?i)^play\\s+(.+?)\\s+on\\s+youtube$").find(text)?.let { match ->
+        // ── Media fast paths (F6 + F7 expansion) ─────────────────────
+        Regex("(?i)^play\\s+(.+?)\\s+(?:on|in)\\s+youtube$").find(text)?.let { match ->
+            return QuickCommand(
+                "youtube_play",
+                JSONObject().put("query", stripVideoSuffix(match.groupValues[1]))
+            )
+        }
+        Regex("(?i)^open\\s+youtube\\s+and\\s+play\\s+(.+)$").find(text)?.let { match ->
+            return QuickCommand(
+                "youtube_play",
+                JSONObject().put("query", stripVideoSuffix(match.groupValues[1]))
+            )
+        }
+        Regex("(?i)^play\\s+(.+?)\\s+video$").find(text)?.let { match ->
             return QuickCommand(
                 "youtube_play",
                 JSONObject().put("query", match.groupValues[1].trim())
+            )
+        }
+        Regex("(?i)^watch\\s+(.+)$").find(text)?.let { match ->
+            return QuickCommand(
+                "youtube_play",
+                JSONObject().put("query", stripVideoSuffix(match.groupValues[1]))
             )
         }
 
@@ -680,7 +922,31 @@ object AgentPipeline {
                 JSONObject().put("query", match.groupValues[1].trim())
             )
         }
-        Regex("(?i)^play\\s+(.+?)\\s+(?:on|in)\\s+spotify$").find(text)?.let { match ->
+        Regex("(?i)^play\\s+(.+?)\\s+(?:on|in)\\s+spotify(?:\\s+app)?$").find(text)?.let { match ->
+            return QuickCommand(
+                "spotify_play",
+                JSONObject().put("query", match.groupValues[1].trim())
+            )
+        }
+        // "spotify <query>" — only when the remainder is a query, not
+        // another command ("spotify pause" stays a model request).
+        Regex("(?i)^spotify\\s+(.+)$").find(text)?.let { match ->
+            val query = match.groupValues[1].trim()
+            val queryLower = query.lowercase()
+            val startsWithCommand = SPOTIFY_COMMAND_STARTS.any {
+                queryLower == it || queryLower.startsWith("$it ")
+            }
+            if (query.isNotBlank() && !startsWithCommand) {
+                return QuickCommand(
+                    "spotify_play",
+                    JSONObject().put("query", query)
+                )
+            }
+        }
+        // F7: bare "play <query>" — DEFAULT music app = Spotify
+        // (his standing media app; "play mr beast video" and explicit
+        // platform mentions are already claimed above).
+        Regex("(?i)^play\\s+(.+)$").find(text)?.let { match ->
             return QuickCommand(
                 "spotify_play",
                 JSONObject().put("query", match.groupValues[1].trim())
@@ -768,6 +1034,12 @@ object AgentPipeline {
             "if|else|for|while|when|public|private|static|void|int|long|let|const|" +
             "var|new|try|catch|extends|implements|#include|using|namespace)\\b|" +
             "System\\.|console\\.|print\\(|println\\("
+    )
+
+    /** F7: remainders after "spotify …" that are commands, not queries. */
+    private val SPOTIFY_COMMAND_STARTS = listOf(
+        "play", "open", "pause", "stop", "next", "previous", "skip",
+        "resume", "shuffle", "repeat", "volume"
     )
 
     private val NUMBERED_ITEM_REGEX = Regex("\\d+[.)]\\s+\\S")
