@@ -150,7 +150,7 @@ private fun TextSegment(text: String, textColor: Color) {
             lines[i + 1].contains("---")
         if (isTableStart) {
             if (paragraph.isNotEmpty()) {
-                blocks += paragraph.toString()
+                blocks.add(paragraph.toString())
                 paragraph.clear()
             }
             val tableLines = mutableListOf(line, lines[i + 1])
@@ -159,14 +159,14 @@ private fun TextSegment(text: String, textColor: Color) {
                 tableLines += lines[i]
                 i++
             }
-            blocks += tableLines
+            blocks.add(tableLines)
         } else {
             if (paragraph.isNotEmpty()) paragraph.append("\n")
             paragraph.append(line)
             i++
         }
     }
-    if (paragraph.isNotEmpty()) blocks += paragraph.toString()
+    if (paragraph.isNotEmpty()) blocks.add(paragraph.toString())
     blocks.forEach { block ->
         when (block) {
             is String -> if (block.isNotBlank()) {

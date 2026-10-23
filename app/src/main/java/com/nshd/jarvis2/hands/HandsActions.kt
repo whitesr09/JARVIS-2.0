@@ -756,7 +756,7 @@ object HandsActions {
             val args = Bundle().apply {
                 putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE, value)
             }
-            val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_PROGRESS, args)
+            val ok = node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.id, args)
             com.nshd.jarvis2.core.AppLog.d("Hands", "slider set_progress $target% (ok=$ok)")
             if (ok) return@serialized ActionResult(true, "Slider set to $target%.")
         }
