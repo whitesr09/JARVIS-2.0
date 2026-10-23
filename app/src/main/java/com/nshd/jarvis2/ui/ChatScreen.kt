@@ -139,11 +139,10 @@ fun ChatScreen(
     ) { uri ->
         if (uri != null) {
             scope.launch {
+                // Null on failure — the attach chip simply never
+                // appears, and the user can pick again.
                 pendingImage = withContext(Dispatchers.IO) {
                     encodeImageForChat(context, uri)
-                }
-                if (pendingImage == null) {
-                    hint = "Couldn't read that image"
                 }
             }
         }
@@ -269,19 +268,6 @@ fun ChatScreen(
                         id = stored.id
                     )
                 )
-            }
-        }
-    }
-
-    // v2.0.0 (#51): consume an injected command (due-draft "Send
-    // now") once the pipeline is free — the StateFlow holds it until
-    // then, and `sending` as a key re-runs this when a turn ends.
-    val chatTextRequested by AppNavRequests.chatTextRequested
-        .collectAsState()
-    LaunchedEffect(chatTextRequested, sending) {
-        if (!sending) {
-            AppNavRequests.consumeChatTextRequest()?.let { injected ->
-                sendInjected(injected)
             }
         }
     }
@@ -492,6 +478,21 @@ fun ChatScreen(
         val lastUser = messages.lastOrNull { it.fromUser && !it.isTool }?.text
             ?: return
         launchPipeline(lastUser)
+    }
+
+    // v2.0.0 (#51): consume an injected command (due-draft "Send
+    // now") once the pipeline is free — the StateFlow holds it until
+    // then, and `sending` as a key re-runs this when a turn ends.
+    // (Declared after sendInjected: local functions must precede
+    // their use sites in source order.)
+    val chatTextRequested by AppNavRequests.chatTextRequested
+        .collectAsState()
+    LaunchedEffect(chatTextRequested, sending) {
+        if (!sending) {
+            AppNavRequests.consumeChatTextRequest()?.let { injected ->
+                sendInjected(injected)
+            }
+        }
     }
 
     /** #65: read a bubble aloud with a lazy standalone TTS (main thread). */

@@ -287,7 +287,7 @@ object AgentPipeline {
         // commands. Order inside the block matters and is deliberate.
         val brainReply = brainRoutes(
             context, clean, settings, memoryDb, providerStore,
-            codeMode, job, hudEvent, onAssistantDelta, depth
+            codeMode, hudEvent, onAssistantDelta, depth
         )
         if (brainReply != null) return@withContext brainReply
 

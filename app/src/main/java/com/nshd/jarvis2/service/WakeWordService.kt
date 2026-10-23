@@ -446,7 +446,7 @@ class WakeWordService : Service(), RecognitionListener {
         if (started) {
             // v2.0.0 (#115): on-wake routines (e.g. a morning greeting
             // routine) fire alongside the session start.
-            com.nshd.jarvis2.brain.RoutineRunner
+            com.nshd.jarvis2.core.RoutineRunner
                 .maybeRunOnWake(applicationContext)
         }
         if (!started) {
