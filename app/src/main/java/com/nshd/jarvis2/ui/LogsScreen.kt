@@ -110,6 +110,9 @@ fun LogsScreen(onBack: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var confirmClear by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf<String?>(null) }
+    // v1.9.0 insights (#81 usage, #99 slowest, #100 storage).
+    var showInsights by remember { mutableStateOf(false) }
+    var storageRows by remember { mutableStateOf<List<StorageRow>>(emptyList()) }
     var fileSizeBytes by remember { mutableStateOf(0L) }
     val expandedKeys = remember { mutableStateOf(setOf<Long>()) }
 
@@ -333,6 +336,110 @@ fun LogsScreen(onBack: () -> Unit) {
             )
         }
 
+        // ── v1.9.0 insights: usage meter (#81), slowest commands
+        // (#99), storage manager (#100) ───────────────────────────────
+        OutlinedButton(
+            onClick = {
+                showInsights = !showInsights
+                if (showInsights) {
+                    scope.launch {
+                        storageRows = withContext(Dispatchers.IO) {
+                            computeStorageRows(context)
+                        }
+                    }
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp)
+        ) {
+            Text(if (showInsights) "Hide insights" else "Insights — usage · slowest · storage")
+        }
+        if (showInsights) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+            ) {
+                Text(
+                    text = "Usage per provider (from API log lines; tokens are a rough estimate)",
+                    style = MaterialTheme.typography.titleSmall
+                )
+                val usage = remember(liveEntries) {
+                    com.nshd.jarvis2.core.UsageMeter.summarize(liveEntries)
+                }
+                if (usage.isEmpty()) {
+                    Text(
+                        text = "No provider calls in the current log yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    usage.forEach { row ->
+                        Text(
+                            text = "${row.providerId}: ${row.requestsToday} requests today · " +
+                                "${row.requestsWeek} this week · " +
+                                "≈${row.estTokensToday / 1000}k tokens today · " +
+                                "≈${row.estTokensWeek / 1000}k this week",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Slowest commands (from turn timings)",
+                    style = MaterialTheme.typography.titleSmall
+                )
+                val slowest = remember(liveEntries) { slowestCommands(liveEntries) }
+                if (slowest.isEmpty()) {
+                    Text(
+                        text = "No completed turns in the current log yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    slowest.forEach { (title, ms) ->
+                        Text(
+                            text = "• $title — ${ms / 1000.0}s",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Storage",
+                    style = MaterialTheme.typography.titleSmall
+                )
+                storageRows.forEach { row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${row.label}: ${formatBytes(row.bytes)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (row.action != null && row.bytes > 0) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            runStorageCleanup(context, row.action)
+                                        }
+                                        storageRows = withContext(Dispatchers.IO) {
+                                            computeStorageRows(context)
+                                        }
+                                        statusText = "Cleaned ${row.label}"
+                                    }
+                                }
+                            ) { Text("Clean") }
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Entries (newest at the bottom, pinned live) ────────────────
         if (filtered.isEmpty()) {
             // #96: shared friendly empty state; with filters active the
@@ -513,6 +620,84 @@ private fun LogEntryRow(
         }
         Spacer(modifier = Modifier.height(2.dp))
     }
+}
+
+/** v1.9.0 (#100): one storage bucket in the Storage manager. */
+private data class StorageRow(
+    val label: String,
+    val bytes: Long,
+    /** Cleanup action id, or null when the bucket isn't cleanable here. */
+    val action: String?
+)
+
+private fun dirSize(dir: java.io.File?): Long {
+    if (dir == null || !dir.exists()) return 0L
+    if (dir.isFile) return dir.length()
+    return dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+}
+
+private fun computeStorageRows(context: android.content.Context): List<StorageRow> =
+    listOf(
+        StorageRow(
+            "App logs",
+            com.nshd.jarvis2.core.AppLog.totalFileSizeBytes(),
+            null
+        ),
+        StorageRow(
+            "Memory + chat database",
+            context.getDatabasePath("jarvis_memory.db")?.length() ?: 0L,
+            null
+        ),
+        StorageRow(
+            "Cache",
+            dirSize(context.cacheDir),
+            "cache"
+        ),
+        StorageRow(
+            "Saved screenshots",
+            dirSize(java.io.File(context.filesDir, "screenshots")),
+            "screenshots"
+        ),
+        StorageRow(
+            "Tap-failure screenshots",
+            dirSize(java.io.File(context.filesDir, "tapshots")),
+            "tapshots"
+        )
+    )
+
+private fun runStorageCleanup(context: android.content.Context, action: String?) {
+    when (action) {
+        "cache" -> context.cacheDir?.listFiles()?.forEach {
+            runCatching { it.deleteRecursively() }
+        }
+        "screenshots" -> java.io.File(context.filesDir, "screenshots")
+            .listFiles()?.forEach { runCatching { it.delete() } }
+        "tapshots" -> java.io.File(context.filesDir, "tapshots")
+            .listFiles()?.forEach { runCatching { it.delete() } }
+    }
+}
+
+/**
+ * v1.9.0 (#99): slowest completed turns, from the pipeline's
+ * "turn '…' finished in Nms" log lines (tag "Queue"). Grouped by
+ * command title, worst average first, top 5.
+ */
+private fun slowestCommands(
+    entries: List<com.nshd.jarvis2.core.AppLog.Entry>
+): List<Pair<String, Long>> {
+    val line = Regex("turn '(.+?)' finished in (\\d+)ms")
+    val totals = linkedMapOf<String, Pair<Long, Int>>() // title → (totalMs, runs)
+    entries.filter { it.tag == "Queue" }.forEach { entry ->
+        val match = line.find(entry.message) ?: return@forEach
+        val title = match.groupValues[1]
+        val ms = match.groupValues[2].toLongOrNull() ?: return@forEach
+        val (total, runs) = totals[title] ?: (0L to 0)
+        totals[title] = (total + ms) to (runs + 1)
+    }
+    return totals.entries
+        .map { (title, agg) -> title to (agg.first / agg.second.coerceAtLeast(1)) }
+        .sortedByDescending { it.second }
+        .take(5)
 }
 
 private fun formatBytes(bytes: Long): String = when {

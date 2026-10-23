@@ -25,7 +25,21 @@ object AvatarCatalog {
         Avatar("ghost", "Ghost", R.drawable.avatar_ghost),
         Avatar("hexagon", "Hexagon", R.drawable.avatar_hexagon),
         Avatar("mech", "Mech", R.drawable.avatar_mech),
-        Avatar("pebble", "Pebble", R.drawable.avatar_pebble)
+        Avatar("pebble", "Pebble", R.drawable.avatar_pebble),
+        // v1.9.0 (#92): avatar pack #2 — same rules (figure only,
+        // generated art on transparency, no background plate).
+        Avatar("star", "Star", R.drawable.avatar_star),
+        Avatar("moon", "Moon", R.drawable.avatar_moon),
+        Avatar("sun", "Sun", R.drawable.avatar_sun),
+        Avatar("leaf", "Leaf", R.drawable.avatar_leaf),
+        Avatar("bolt", "Bolt", R.drawable.avatar_bolt),
+        Avatar("owl", "Owl", R.drawable.avatar_owl),
+        Avatar("fox", "Fox", R.drawable.avatar_fox),
+        Avatar("panda", "Panda", R.drawable.avatar_panda),
+        Avatar("rocket", "Rocket", R.drawable.avatar_rocket),
+        Avatar("heart", "Heart", R.drawable.avatar_heart),
+        Avatar("mushroom", "Mushroom", R.drawable.avatar_mushroom),
+        Avatar("whale", "Whale", R.drawable.avatar_whale)
     )
 
     const val DEFAULT_ID = "droid"

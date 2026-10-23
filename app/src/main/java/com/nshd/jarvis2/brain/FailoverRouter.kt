@@ -176,8 +176,19 @@ class FailoverRouter(
                             JSONObject()
                         }
                         val toolStartedAt = System.currentTimeMillis()
+                        // v1.9.0 (#27): action batching — when one
+                        // model response carries several tool calls,
+                        // they execute back-to-back as one batch: only
+                        // the LAST call pays the settle + screen
+                        // summary; the earlier ones run raw against the
+                        // live screen (each still guard-checked and
+                        // ledger-recorded inside ToolExecutor).
+                        val isLastCall = call === reply.toolCalls.last()
                         val result: ToolResult = try {
-                            executor.execute(call.name, args)
+                            executor.execute(
+                                call.name, args,
+                                includeScreenSummary = isLastCall
+                            )
                         } catch (e: Exception) {
                             ToolResult(
                                 false,

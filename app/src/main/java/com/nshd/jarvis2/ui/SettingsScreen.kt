@@ -153,6 +153,9 @@ fun SettingsScreen(
     // section can never reshuffle the slot table mid-composition.
     var info by remember { mutableStateOf<InfoDialog?>(null) }
     var showPersona by remember { mutableStateOf(false) }
+    // v1.9.0 (#77): custom-persona builder test state (hoisted, F4 rule).
+    var personaTestReply by remember { mutableStateOf<String?>(null) }
+    var personaTesting by remember { mutableStateOf(false) }
     var showLanguage by remember { mutableStateOf(false) }
     var showVoiceEngine by remember { mutableStateOf(false) }
     // Plan v1.8.0 dialogs: barge-in (#4), TTS voice picker (#7),
@@ -861,6 +864,80 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.outlineVariant,
                 modifier = Modifier.padding(start = 58.dp)
             )
+            // v1.9.0 (#87): DND respect toggle.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconSquare(icon = Icons.Filled.VolumeOff)
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Respect Do-Not-Disturb",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = "While your phone is on DND, voice sessions stay silent (chime only)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = settings.dndRespect,
+                    onCheckedChange = { onSettingsChange(settings.copy(dndRespect = it)) },
+                    colors = SwitchDefaults.colors(
+                        checkedTrackColor = MaterialTheme.colorScheme.primary,
+                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                        checkedBorderColor = MaterialTheme.colorScheme.primary,
+                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        uncheckedBorderColor = MaterialTheme.colorScheme.outline
+                    )
+                )
+            }
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant,
+                modifier = Modifier.padding(start = 58.dp)
+            )
+            // v1.9.0 (#14): push-to-talk toggle.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconSquare(icon = Icons.Filled.Mic)
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Hold-to-talk (push-to-talk)",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = "On the Voice screen, hold the orb to talk and release to send — best for noisy places",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = settings.pttMode,
+                    onCheckedChange = { onSettingsChange(settings.copy(pttMode = it)) },
+                    colors = SwitchDefaults.colors(
+                        checkedTrackColor = MaterialTheme.colorScheme.primary,
+                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                        checkedBorderColor = MaterialTheme.colorScheme.primary,
+                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        uncheckedBorderColor = MaterialTheme.colorScheme.outline
+                    )
+                )
+            }
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant,
+                modifier = Modifier.padding(start = 58.dp)
+            )
             GlassRow(
                 icon = Icons.Filled.RecordVoiceOver,
                 title = "Gemini Live Voice",
@@ -1291,7 +1368,7 @@ fun SettingsScreen(
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "JARVIS • v1.8.0",
+                text = "JARVIS • v1.9.0",
                 style = MaterialTheme.typography.labelMedium.copy(
                     letterSpacing = 1.2.sp
                 ),
@@ -1324,7 +1401,7 @@ fun SettingsScreen(
             onDismissRequest = { showPersona = false },
             title = { Text("AI Persona & Voice") },
             text = {
-                Column {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                     PersonaOption(
                         name = "Girlfriend Mode",
                         desc = "Jealous, clingy, flirting, attached, loving, sarcastic — mood swings included.",
@@ -1335,6 +1412,113 @@ fun SettingsScreen(
                         desc = "Witty, strategic, calm under pressure. The default operator mode.",
                         selected = settings.persona == "Jarvis Pro"
                     ) { onSettingsChange(settings.copy(persona = "Jarvis Pro")) }
+                    // v1.9.0 (#77): his own persona.
+                    PersonaOption(
+                        name = if (settings.customPersonaName.isNotBlank()) {
+                            "Custom — ${settings.customPersonaName}"
+                        } else {
+                            "Custom"
+                        },
+                        desc = if (settings.customPersonaPrompt.isNotBlank()) {
+                            "Your own persona prompt (written below)."
+                        } else {
+                            "Write your own persona prompt below to enable this."
+                        },
+                        selected = settings.persona ==
+                            com.nshd.jarvis2.brain.PersonaPrompts.PERSONA_CUSTOM
+                    ) {
+                        if (settings.customPersonaPrompt.isNotBlank()) {
+                            onSettingsChange(
+                                settings.copy(
+                                    persona = com.nshd.jarvis2.brain
+                                        .PersonaPrompts.PERSONA_CUSTOM
+                                )
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Build your own persona",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = settings.customPersonaName,
+                        onValueChange = {
+                            onSettingsChange(settings.copy(customPersonaName = it))
+                        },
+                        label = { Text("Persona name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = settings.customPersonaPrompt,
+                        onValueChange = {
+                            onSettingsChange(settings.copy(customPersonaPrompt = it))
+                        },
+                        label = { Text("Persona prompt — personality, tone, rules") },
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            if (personaTesting) return@OutlinedButton
+                            personaTesting = true
+                            personaTestReply = null
+                            val snapshot = latestSettings.copy(
+                                persona = com.nshd.jarvis2.brain
+                                    .PersonaPrompts.PERSONA_CUSTOM
+                            )
+                            settingsScope.launch {
+                                val outcome = runCatching {
+                                    com.nshd.jarvis2.brain.FailoverRouter(
+                                        configsInOrder = providerStore.orderedConfigs(),
+                                        toolExecutor = null,
+                                        store = providerStore
+                                    ).chat(
+                                        messages = listOf(
+                                            com.nshd.jarvis2.brain.ChatMsg(
+                                                "system",
+                                                com.nshd.jarvis2.brain.PersonaPrompts
+                                                    .build(snapshot, emptyList(), false)
+                                            ),
+                                            com.nshd.jarvis2.brain.ChatMsg(
+                                                "user",
+                                                "Say hello and introduce yourself in " +
+                                                    "one or two lines."
+                                            )
+                                        ),
+                                        preferReasoningModel = false
+                                    )
+                                }.getOrNull()
+                                personaTestReply = when (outcome) {
+                                    is com.nshd.jarvis2.brain.ChatOutcome.Success ->
+                                        outcome.reply
+                                    is com.nshd.jarvis2.brain.ChatOutcome.AllFailed ->
+                                        "Test failed: ${outcome.summary}"
+                                    else ->
+                                        "Configure an API provider first (Settings → API & Connection)."
+                                }
+                                personaTesting = false
+                            }
+                        },
+                        enabled = settings.customPersonaPrompt.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (personaTesting) "Testing…" else "Test this persona")
+                    }
+                    personaTestReply?.let { reply ->
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = reply,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "Persona prompts drive both Chat and the Gemini Live " +
@@ -1459,6 +1643,54 @@ fun SettingsScreen(
                     Text(
                         text = "Chat messages stored: $privacyChatCount",
                         style = MaterialTheme.typography.bodyMedium
+                    )
+                    // v1.9.0 (#103): what Jarvis stores & where, in
+                    // plain language, plus the log-redaction self-test.
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "What Jarvis stores & where",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "• Memories + chat history: the on-device " +
+                            "database jarvis_memory.db (this app only).\n" +
+                            "• API keys: encrypted on-device storage, " +
+                            "never written to logs or exports.\n" +
+                            "• App logs: files/logs inside this app's " +
+                            "private folder, rotated at ~1 MB, with API " +
+                            "keys and auth headers stripped before " +
+                            "anything is written.\n" +
+                            "• Screenshots you ask for: this app's " +
+                            "private screenshots folder.\n" +
+                            "• Voice: audio goes to your chosen AI " +
+                            "provider to answer you; Jarvis itself keeps " +
+                            "no audio recordings (wake-word samples you " +
+                            "enrolled stay on-device).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val redactionProbe = "api_key=sk-test123456789 " +
+                        "Authorization: Bearer abc.def-123 " +
+                        "https://x.test/?key=AIzaTESTKEY"
+                    val redacted = com.nshd.jarvis2.core.AppLog.sanitize(redactionProbe)
+                    val redactionPass = !redacted.contains("sk-test123456789") &&
+                        !redacted.contains("abc.def-123") &&
+                        !redacted.contains("AIzaTESTKEY")
+                    Text(
+                        text = "Log redaction self-test: " +
+                            if (redactionPass) {
+                                "PASS — sample keys, tokens and URL keys are masked"
+                            } else {
+                                "FAIL — a sample secret survived redaction"
+                            },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (redactionPass) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        }
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     OutlinedButton(
@@ -1980,6 +2212,61 @@ private fun WakeWordControls(
         }
 
         if (settings.wakeAlwaysOn) {
+            // ── v1.9.0 (#9): sensitivity + recent wake events ─────────
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "Wake sensitivity",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "Low = fewer false wakes (needs a very clear \"Hey Jarvis\"), " +
+                    "High = wakes on almost anything close.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                listOf("LOW", "NORMAL", "HIGH").forEach { level ->
+                    val selected = settings.wakeSensitivity == level
+                    val label = when (level) {
+                        "LOW" -> "Low"
+                        "HIGH" -> "High"
+                        else -> "Normal"
+                    }
+                    if (selected) {
+                        Button(
+                            onClick = { onSettingsChange(settings.copy(wakeSensitivity = level)) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text(label) }
+                    } else {
+                        OutlinedButton(
+                            onClick = { onSettingsChange(settings.copy(wakeSensitivity = level)) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text(label) }
+                    }
+                }
+            }
+            val wakeEvents = com.nshd.jarvis2.core.WakeEvents.recent(context)
+            if (wakeEvents.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Recent wake events",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                wakeEvents.forEach { event ->
+                    Text(
+                        text = "• $event",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
             // ── Offline model ──────────────────────────────────────────
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),

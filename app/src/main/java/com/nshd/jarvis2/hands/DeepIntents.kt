@@ -991,6 +991,469 @@ class DeepIntents(context: Context) {
         0
     }
 
+    // ── v1.9.0: messaging & platform powers ──────────────────────────
+    //
+    // Every SEND below is called only AFTER ToolExecutor's ConfirmGate
+    // approved recipient + full text (the standing rule), and each one
+    // grants the one-shot SendPermit for its app package before the
+    // send tap, exactly like whatsapp_message (F7).
+
+    /**
+     * #43: share the most recent gallery photo into the WhatsApp chat
+     * with [phone] (jid-preselected share intent), then press the
+     * share screen's Send button and verify the chat opened.
+     */
+    suspend fun whatsappShareLatestPhoto(phone: String): ActionResult {
+        val digits = ContactsResolver.normalizePhone(phone)
+        if (digits.length < 10) {
+            return ActionResult(false, "The WhatsApp number looks incomplete.")
+        }
+        val photo = latestPhotoUri()
+            ?: return ActionResult(
+                false,
+                "No photo was found in the gallery to send."
+            )
+        val pkg = when {
+            isPackageInstalled("com.whatsapp") -> "com.whatsapp"
+            isPackageInstalled("com.whatsapp.w4b") -> "com.whatsapp.w4b"
+            else -> return ActionResult(false, "WhatsApp is not installed.")
+        }
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "image/*"
+            setPackage(pkg)
+            putExtra(Intent.EXTRA_STREAM, photo)
+            putExtra("jid", "${digits}@s.whatsapp.net")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            appContext.grantUriPermission(
+                pkg, photo, Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (e: Exception) {
+            // The intent flag usually suffices; the explicit grant is a bonus.
+        }
+        if (!launch(intent)) {
+            return ActionResult(false, "WhatsApp could not be opened for the photo share.")
+        }
+        AppLog.i("Send", "stage: photo share opened for $digits")
+        HandsActions.waitForPackage(pkg, 3_000)
+        HandsActions.waitForSettle(1_500)
+        TaskState.throwIfStopRequested()
+        val service = JarvisAccessibilityService.instance
+            ?: return ActionResult(
+                true,
+                "WhatsApp opened with the photo ready — tap Send to send it."
+            )
+        val reader = service.screenReader()
+        val snapshot = reader.snapshot()
+        val send = Playbooks.find(snapshot, pkg, Playbooks.ROLE_SEND_BUTTON)
+            ?: reader.findByText("Send", snapshot)
+                ?.takeIf { it.clickable || it.desc.contains("send", true) }
+            ?: return ActionResult(
+                true,
+                "WhatsApp opened with the photo attached — tap Send to send it " +
+                    "(the Send button was not found automatically)."
+            )
+        val click = HandsActions.clickElement(send.index)
+        if (!click.success) {
+            return ActionResult(
+                false, "The photo share opened, but Send could not be pressed: ${click.message}"
+            )
+        }
+        AppLog.i("Send", "stage: photo send tapped for $digits")
+        return ActionResult(true, "Photo sent to the WhatsApp chat.")
+    }
+
+    /** The newest image in the device gallery, or null. */
+    private fun latestPhotoUri(): Uri? = try {
+        val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        appContext.contentResolver.query(
+            collection,
+            arrayOf(MediaStore.Images.Media._ID),
+            null, null,
+            "${MediaStore.Images.Media.DATE_ADDED} DESC"
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val id = cursor.getLong(0)
+                android.content.ContentUris.withAppendedId(collection, id)
+            } else {
+                null
+            }
+        }
+    } catch (e: Exception) {
+        AppLog.w("Hands", "latest photo lookup failed: ${e.message}")
+        null
+    }
+
+    /**
+     * #44 helper: the title of the chat currently open in
+     * [packageName] (top-of-screen heuristic), or null when that app
+     * isn't foreground with a chat open. ToolExecutor reads this
+     * BEFORE the gate so the confirm prompt can name the recipient.
+     */
+    fun currentChatTitle(packageName: String): String? {
+        val service = JarvisAccessibilityService.instance ?: return null
+        val reader = service.screenReader()
+        if (reader.currentPackage() != packageName) return null
+        val metrics = appContext.resources.displayMetrics
+        val topLimit = metrics.heightPixels * 0.22f
+        return reader.snapshot()
+            .filter { element ->
+                !element.editable && element.text.isNotBlank() &&
+                    element.bounds.top < topLimit && element.bounds.top >= 0 &&
+                    element.text.length in 2..40
+            }
+            .minByOrNull { it.bounds.top }
+            ?.text
+            ?.trim()
+    }
+
+    /**
+     * Type [message] into the chat currently open in [packageName]
+     * and press its Send button (playbook first). The caller already
+     * gated the send; the SendPermit for the package is granted by
+     * ToolExecutor before this runs.
+     */
+    suspend fun typeAndSendInOpenChat(
+        packageName: String,
+        message: String
+    ): ActionResult {
+        val service = JarvisAccessibilityService.instance
+            ?: return ActionResult(
+                false,
+                "Accessibility is not enabled, so the message can't be typed or sent."
+            )
+        val reader = service.screenReader()
+        if (reader.currentPackage() != packageName) {
+            return ActionResult(false, "The chat is no longer open in the foreground.")
+        }
+        var snapshot = reader.snapshot()
+        val entry = snapshot.firstOrNull { it.editable }
+            ?: return ActionResult(false, "No message field was found in the open chat.")
+        val tapped = HandsActions.clickElement(entry.index)
+        if (!tapped.success) {
+            return ActionResult(false, "The message field could not be focused: ${tapped.message}")
+        }
+        val typed = HandsActions.setTextOnFocused(message)
+        if (!typed.success) {
+            return ActionResult(false, "The message could not be typed: ${typed.message}")
+        }
+        TaskState.throwIfStopRequested()
+        HandsActions.waitForSettle(600)
+        snapshot = reader.snapshot()
+        val send = Playbooks.find(snapshot, packageName, Playbooks.ROLE_SEND_BUTTON)
+            ?: reader.findByText("Send", snapshot)
+                ?.takeIf { it.clickable || it.desc.contains("send", true) }
+            ?: return ActionResult(
+                true,
+                "The message was typed into the chat — tap Send to send it " +
+                    "(the Send button was not found automatically)."
+            )
+        val click = HandsActions.clickElement(send.index)
+        if (!click.success) {
+            return ActionResult(false, "Send could not be pressed: ${click.message}")
+        }
+        // Verify like whatsapp_message: the entry must clear.
+        val deadline = System.currentTimeMillis() + 2_000
+        var cleared = false
+        while (System.currentTimeMillis() < deadline && !cleared) {
+            delay(200)
+            val current = reader.snapshot().firstOrNull { it.editable }
+            if (current == null || current.text.isBlank()) cleared = true
+        }
+        return if (cleared) {
+            ActionResult(true, "Message sent and verified.")
+        } else {
+            ActionResult(
+                false,
+                "Send was pressed, but the message field did not clear, so sending is unverified."
+            )
+        }
+    }
+
+    /**
+     * #45: Instagram DM — open Instagram, go to the inbox, search the
+     * contact, open the thread, type + send (gate already approved by
+     * ToolExecutor; permit granted there too). Best-effort staged
+     * automation: every stage failure says exactly where it stopped.
+     */
+    suspend fun instagramDm(contactQuery: String, message: String): ActionResult {
+        val pkg = Playbooks.INSTAGRAM_PACKAGE
+        if (!isPackageInstalled(pkg)) {
+            return ActionResult(false, "Instagram is not installed.")
+        }
+        val opened = openApp("Instagram")
+        if (!opened.success) return opened
+        HandsActions.waitForPackage(pkg, 3_000)
+        HandsActions.waitForSettle(1_200)
+        // Inbox entry: the Direct/messenger control.
+        val inbox = HandsActions.clickText("Messages").takeIf { it.success }
+            ?: HandsActions.clickText("Direct")
+        if (inbox == null || !inbox.success) {
+            // Fall through: some builds land on the inbox directly.
+            AppLog.d("Hands", "instagram: inbox control not tapped — continuing")
+        }
+        HandsActions.waitForSettle(1_000)
+        TaskState.throwIfStopRequested()
+        // Search for the contact inside the inbox.
+        val service = JarvisAccessibilityService.instance
+            ?: return ActionResult(false, "Accessibility is not enabled.")
+        val reader = service.screenReader()
+        val searchField = Playbooks.find(
+            reader.snapshot(), pkg, Playbooks.ROLE_SEARCH_FIELD
+        ) ?: reader.snapshot().firstOrNull { it.editable }
+        if (searchField != null) {
+            HandsActions.clickElement(searchField.index)
+            HandsActions.setTextOnFocused(contactQuery)
+            HandsActions.waitForSettle(1_200)
+        }
+        val row = reader.findByText(contactQuery)
+            ?: return ActionResult(
+                false,
+                "Instagram opened, but no chat matching \"$contactQuery\" was found."
+            )
+        val tappedRow = HandsActions.clickElement(row.index)
+        if (!tappedRow.success) {
+            return ActionResult(false, "The Instagram chat row could not be opened.")
+        }
+        HandsActions.waitForSettle(1_200)
+        TaskState.throwIfStopRequested()
+        return typeAndSendInOpenChat(pkg, message)
+    }
+
+    /** #46: Telegram message — same staged pattern as Instagram. */
+    suspend fun telegramMessage(contactQuery: String, message: String): ActionResult {
+        val pkg = "org.telegram.messenger"
+        if (!isPackageInstalled(pkg)) {
+            return ActionResult(false, "Telegram is not installed.")
+        }
+        val opened = openApp("Telegram")
+        if (!opened.success) return opened
+        HandsActions.waitForPackage(pkg, 3_000)
+        HandsActions.waitForSettle(1_200)
+        val service = JarvisAccessibilityService.instance
+            ?: return ActionResult(false, "Accessibility is not enabled.")
+        val reader = service.screenReader()
+        val search = reader.snapshot().firstOrNull {
+            it.desc.contains("search", ignoreCase = true) && it.clickable
+        }
+        if (search != null) {
+            HandsActions.clickElement(search.index)
+            HandsActions.waitForSettle(800)
+            val field = reader.snapshot().firstOrNull { it.editable }
+            if (field != null) {
+                HandsActions.clickElement(field.index)
+                HandsActions.setTextOnFocused(contactQuery)
+                HandsActions.waitForSettle(1_200)
+            }
+        }
+        val row = reader.findByText(contactQuery)
+            ?: return ActionResult(
+                false,
+                "Telegram opened, but no chat matching \"$contactQuery\" was found."
+            )
+        val tappedRow = HandsActions.clickElement(row.index)
+        if (!tappedRow.success) {
+            return ActionResult(false, "The Telegram chat row could not be opened.")
+        }
+        HandsActions.waitForSettle(1_200)
+        TaskState.throwIfStopRequested()
+        return typeAndSendInOpenChat(pkg, message)
+    }
+
+    /**
+     * #47: SMS via the default SMS app's compose intent (recipient +
+     * body prefilled), then the Send tap (permit for whatever package
+     * owns the composer). If the tap can't be completed, the composer
+     * stays open with everything filled in — stated honestly.
+     */
+    suspend fun smsSend(phone: String, message: String): ActionResult {
+        val digits = ContactsResolver.normalizePhone(phone)
+        if (digits.length < 7) {
+            return ActionResult(false, "The phone number looks incomplete.")
+        }
+        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$digits")).apply {
+            putExtra("sms_body", message)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (!launch(intent)) {
+            return ActionResult(false, "No SMS app could be opened.")
+        }
+        HandsActions.waitForSettle(1_500)
+        val service = JarvisAccessibilityService.instance
+            ?: return ActionResult(
+                true,
+                "The SMS composer is open with the message ready — tap Send there."
+            )
+        val pkg = service.screenReader().currentPackage()
+        if (pkg != null) HandsActions.grantSendPermit(pkg)
+        val tapped = HandsActions.clickText("Send")
+        return if (tapped.success) {
+            ActionResult(true, "SMS sent via the default SMS app.")
+        } else {
+            ActionResult(
+                true,
+                "The SMS composer is open with the message typed — tap Send " +
+                    "in the SMS app to send it."
+            )
+        }
+    }
+
+    /**
+     * #48: Gmail compose via intent (To/Subject/Body prefilled), then
+     * the Send tap with a permit for Gmail. Falls back to "compose is
+     * open" honesty like the SMS path.
+     */
+    suspend fun gmailSend(to: String, subject: String, body: String): ActionResult {
+        val pkg = Playbooks.GMAIL_PACKAGE
+        if (!isPackageInstalled(pkg)) {
+            return ActionResult(false, "Gmail is not installed.")
+        }
+        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")).apply {
+            setPackage(pkg)
+            putExtra(Intent.EXTRA_EMAIL, arrayOf(to))
+            putExtra(Intent.EXTRA_SUBJECT, subject)
+            putExtra(Intent.EXTRA_TEXT, body)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (!launch(intent)) {
+            return ActionResult(false, "Gmail compose could not be opened.")
+        }
+        HandsActions.waitForPackage(pkg, 3_000)
+        HandsActions.waitForSettle(1_500)
+        HandsActions.grantSendPermit(pkg)
+        val tapped = HandsActions.clickText("Send")
+        return if (tapped.success) {
+            ActionResult(true, "Email sent via Gmail.")
+        } else {
+            ActionResult(
+                true,
+                "Gmail compose is open with the email filled in — tap Send " +
+                    "in Gmail to send it."
+            )
+        }
+    }
+
+    /** #107: alarm via the Clock intent (no UI automation needed). */
+    fun setAlarm(hour: Int, minute: Int, label: String): ActionResult {
+        if (hour !in 0..23 || minute !in 0..59) {
+            return ActionResult(false, "That alarm time doesn't look valid.")
+        }
+        val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+            putExtra(AlarmClock.EXTRA_HOUR, hour)
+            putExtra(AlarmClock.EXTRA_MINUTES, minute)
+            if (label.isNotBlank()) putExtra(AlarmClock.EXTRA_MESSAGE, label)
+            putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return if (launch(intent)) {
+            val ampm = if (hour < 12) "AM" else "PM"
+            val h12 = when {
+                hour == 0 -> 12
+                hour > 12 -> hour - 12
+                else -> hour
+            }
+            ActionResult(true, "Alarm set for $h12:${minute.toString().padStart(2, '0')} $ampm.")
+        } else {
+            ActionResult(false, "No clock app accepted the alarm.")
+        }
+    }
+
+    /** #107: countdown timer via the Clock intent. */
+    fun setTimer(seconds: Int, label: String): ActionResult {
+        if (seconds <= 0) return ActionResult(false, "The timer length must be positive.")
+        val intent = Intent(AlarmClock.ACTION_SET_TIMER).apply {
+            putExtra(AlarmClock.EXTRA_LENGTH, seconds)
+            if (label.isNotBlank()) putExtra(AlarmClock.EXTRA_MESSAGE, label)
+            putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return if (launch(intent)) {
+            ActionResult(true, "Timer started for ${formatDuration(seconds)}.")
+        } else {
+            ActionResult(false, "No clock app accepted the timer.")
+        }
+    }
+
+    private fun formatDuration(seconds: Int): String = when {
+        seconds % 3600 == 0 -> "${seconds / 3600} hour(s)"
+        seconds % 60 == 0 -> "${seconds / 60} minute(s)"
+        seconds > 90 -> "${seconds / 60} minute(s) ${seconds % 60} second(s)"
+        else -> "$seconds second(s)"
+    }
+
+    /**
+     * #108: calendar event via the insert intent — the calendar app
+     * shows the prefilled draft and the user confirms there (the
+     * doc's "confirm shows the draft" rule), so no tap automation.
+     */
+    fun calendarAddEvent(title: String, beginMs: Long, endMs: Long): ActionResult {
+        val intent = Intent(Intent.ACTION_INSERT).apply {
+            data = android.provider.CalendarContract.Events.CONTENT_URI
+            putExtra(android.provider.CalendarContract.EXTRA_EVENT_BEGIN_TIME, beginMs)
+            putExtra(android.provider.CalendarContract.EXTRA_EVENT_END_TIME, endMs)
+            putExtra(android.provider.CalendarContract.Events.TITLE, title)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return if (launch(intent)) {
+            ActionResult(
+                true,
+                "Calendar opened with the event draft \"$title\" — review it and tap Save there."
+            )
+        } else {
+            ActionResult(false, "No calendar app could be opened.")
+        }
+    }
+
+    /**
+     * #110: share the latest Jarvis screenshot (or take one now) via
+     * the system share sheet — the user picks the target app there.
+     */
+    suspend fun shareScreenshot(): ActionResult {
+        val service = JarvisAccessibilityService.instance
+        val screenshotsDir = java.io.File(appContext.filesDir, "screenshots")
+        var latest = screenshotsDir.listFiles()
+            ?.filter { it.isFile }
+            ?.maxByOrNull { it.lastModified() }
+        if (latest == null) {
+            val encoded = try {
+                service?.captureScreenshotBase64()
+            } catch (e: Exception) {
+                null
+            } ?: return ActionResult(
+                false,
+                "No screenshot is available to share. Enable the Accessibility " +
+                    "Service or start Screen Share, then ask again."
+            )
+            val bytes = android.util.Base64.decode(encoded, android.util.Base64.DEFAULT)
+            screenshotsDir.mkdirs()
+            latest = java.io.File(screenshotsDir, "jarvis-share.jpg")
+            latest.writeBytes(bytes)
+        }
+        // The FileProvider only exposes cacheDir — copy, then share.
+        val cacheCopy = java.io.File(appContext.cacheDir, "jarvis-share.jpg")
+        latest.copyTo(cacheCopy, overwrite = true)
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            appContext, "${appContext.packageName}.fileprovider", cacheCopy
+        )
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "image/*"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = Intent.createChooser(intent, "Share screenshot").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        return if (launch(chooser)) {
+            ActionResult(true, "Share sheet opened with the screenshot — pick where to send it.")
+        } else {
+            ActionResult(false, "The share sheet could not be opened.")
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────
 
     private fun resultForLaunch(intent: Intent, label: String): ActionResult {

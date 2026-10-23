@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -51,6 +52,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
@@ -209,6 +211,19 @@ private fun VoiceSessionBody(
     // ── Orb (tap toggles the mic) ──────────────────────────────────────
     // F4: Canvas JarvisOrb (orb.html port) fed with the live amplitude.
     // F7: 300dp → 340dp, state via the shared orbStateFor helper.
+    // v1.9.0 (#14): in push-to-talk mode the orb is hold-to-talk —
+    // press and hold to talk, release to send — instead of tap-to-mute.
+    val orbGesture = if (settings.pttMode) {
+        Modifier.pointerInput(Unit) {
+            detectTapGestures(onPress = {
+                manager.pttDown()
+                tryAwaitRelease()
+                manager.pttUp()
+            })
+        }
+    } else {
+        Modifier.clickable { manager.setMicMuted(!uiState.micMuted) }
+    }
     JarvisOrb(
         state = orbStateFor(uiState.status, taskRunning),
         amplitude = amplitude,
@@ -218,7 +233,7 @@ private fun VoiceSessionBody(
         modifier = Modifier
             .size(340.dp)
             .align(Alignment.CenterHorizontally)
-            .clickable { manager.setMicMuted(!uiState.micMuted) }
+            .then(orbGesture)
     )
 
     Text(
@@ -268,6 +283,31 @@ private fun VoiceSessionBody(
             modifier = Modifier
                 .align(Alignment.CenterHorizontally)
                 .padding(top = 4.dp)
+        )
+    }
+
+    // v1.9.0 (#12): which microphone is actually capturing — phone
+    // mic vs a Bluetooth/wired headset (communication device).
+    if (uiState.status != VoiceStatus.IDLE) {
+        Text(
+            text = "Mic: " + micSourceLabel(LocalContext.current),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .padding(top = 2.dp)
+        )
+    }
+
+    // v1.9.0 (#14): hold-to-talk explainer while PTT mode is on.
+    if (settings.pttMode && uiState.status != VoiceStatus.IDLE) {
+        Text(
+            text = "Hold-to-talk ON — hold the orb to talk, release to send.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .padding(top = 2.dp)
         )
     }
 
@@ -699,6 +739,32 @@ private fun PermissionDenied(
         Spacer(modifier = Modifier.height(8.dp))
         OutlinedButton(onClick = onOpenSettings) { Text("Open Settings") }
     }
+}
+
+/**
+ * v1.9.0 (#12): the active communication microphone — a Bluetooth or
+ * wired headset when one owns the comms route, else the phone mic.
+ */
+private fun micSourceLabel(context: android.content.Context): String {
+    val am = context.getSystemService(android.content.Context.AUDIO_SERVICE)
+        as? android.media.AudioManager ?: return "Phone mic"
+    if (android.os.Build.VERSION.SDK_INT >=
+        android.os.Build.VERSION_CODES.S
+    ) {
+        val device = runCatching { am.communicationDevice }.getOrNull()
+        if (device != null) {
+            return when (device.type) {
+                android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                android.media.AudioDeviceInfo.TYPE_BLE_HEADSET -> "Bluetooth headset"
+                android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "Wired headset"
+                android.media.AudioDeviceInfo.TYPE_USB_HEADSET -> "USB headset"
+                else -> "Phone mic"
+            }
+        }
+    }
+    @Suppress("DEPRECATION")
+    return if (am.isBluetoothScoOn) "Bluetooth headset" else "Phone mic"
 }
 
 private fun statusText(status: VoiceStatus, assistantName: String, micMuted: Boolean): String =

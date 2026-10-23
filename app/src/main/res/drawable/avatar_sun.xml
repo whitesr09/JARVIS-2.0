@@ -1,0 +1,28 @@
+<!-- Sun — round face with rays, character only, no backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M24,3.5 V9 M24,39 v5.5 M3.5,24 H9 M39,24 h5.5 M9.5,9.5 l3.9,3.9 M34.6,34.6 l3.9,3.9 M38.5,9.5 l-3.9,3.9 M13.4,34.6 l-3.9,3.9"
+        android:strokeWidth="3"
+        android:strokeColor="#FFFFB340"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#FFFFB340"
+        android:pathData="M14.5,24 a9.5,9.5 0 1,0 19,0 a9.5,9.5 0 1,0 -19,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M19.2,22.8 a1.6,1.6 0 1,0 3.2,0 a1.6,1.6 0 1,0 -3.2,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M25.6,22.8 a1.6,1.6 0 1,0 3.2,0 a1.6,1.6 0 1,0 -3.2,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M20.5,27 q3.5,3 7,0"
+        android:strokeWidth="2"
+        android:strokeColor="#FF2F3542"
+        android:strokeLineCap="round" />
+</vector>

@@ -94,10 +94,56 @@ class ToolExecutor(
             com.nshd.jarvis2.brain.TaskQueue.onGenericToolEvent(openAppLike = false)
         }
         val startedAt = System.currentTimeMillis()
+        // v1.9.0 (#41): capture the focused field's text BEFORE a text
+        // mutation so undo can restore it exactly.
+        val preEditFieldText = if (name == "edit_text" || name == "insert_code") {
+            HandsActions.focusedFieldText()
+        } else {
+            null
+        }
         val raw = try {
             dispatch(name, args)
         } catch (e: Exception) {
             ToolResult(false, "Tool $name failed safely: ${e.message ?: "unexpected error"}")
+        }
+        // v1.9.0 (#41): record the honest inverses of reversible
+        // successes. Sends/plays are never recorded (they cannot be
+        // undone and the undo tool must not pretend otherwise).
+        if (raw.success) {
+            when (name) {
+                "type_text" -> HandsActions.pushUndo(
+                    HandsActions.UndoEntry(
+                        label = "Typed text",
+                        kind = "delete_chars",
+                        payload = args.optString("text").length.toString()
+                    )
+                )
+                "edit_text" -> if (preEditFieldText != null) {
+                    HandsActions.pushUndo(
+                        HandsActions.UndoEntry(
+                            label = "Text edit",
+                            kind = "restore_text",
+                            payload = preEditFieldText
+                        )
+                    )
+                }
+                "insert_code" -> if (preEditFieldText != null) {
+                    HandsActions.pushUndo(
+                        HandsActions.UndoEntry(
+                            label = "Code insert",
+                            kind = "restore_text",
+                            payload = preEditFieldText
+                        )
+                    )
+                }
+                "open_app" -> HandsActions.pushUndo(
+                    HandsActions.UndoEntry(
+                        label = "Opened app",
+                        kind = "press_back",
+                        payload = ""
+                    )
+                )
+            }
         }
         // F8 (#30): targeting-failure streak for the vision fallback.
         if (name == "click_element" || name == "click_text") {
@@ -115,7 +161,8 @@ class ToolExecutor(
         activeLedger?.record(name, args, raw)
         if (!includeScreenSummary || name == "inspect_screen" ||
             name == "see_screen" || name == "vision_tap" ||
-            name == "take_screenshot"
+            name == "take_screenshot" || name == "read_page" ||
+            name == "clipboard_get"
         ) return raw
         val service = JarvisAccessibilityService.instance ?: return raw
         if (name in UI_MUTATION_TOOLS) {
@@ -127,7 +174,22 @@ class ToolExecutor(
             // COMPACT serialization — the old 15 full-length labels
             // (an editor's whole content could ride along) were pure
             // prompt weight on every step.
-            HandsActions.waitForSettle(900)
+            // v1.9.0 (#28): per-app settle profiles — media/chat apps
+            // settle FAST (500 ms cap), banking/payment apps get the
+            // cautious profile (1 500 ms), everything else the
+            // standard 900 ms.
+            val pkg = service.screenReader().currentPackage().orEmpty()
+            val settleMs = when {
+                pkg in FAST_SETTLE_PACKAGES -> 500L
+                pkg.contains("bank", ignoreCase = true) ||
+                    pkg.contains("pay", ignoreCase = true) ||
+                    pkg.contains("upi", ignoreCase = true) -> 1_500L
+                else -> 900L
+            }
+            com.nshd.jarvis2.core.AppLog.d(
+                "Agent", "settle profile ${settleMs}ms for ${pkg.ifBlank { "unknown app" }}"
+            )
+            HandsActions.waitForSettle(settleMs)
         }
         return try {
             val summary = screenSummaryForStep(service)
@@ -317,6 +379,71 @@ class ToolExecutor(
             "call_contact" -> callContact(args)
             "see_screen" -> seeScreen()
             "vision_tap" -> visionTap(args)
+            // ── v1.9.0 "More Powers" ────────────────────────────────
+            "long_press" -> if (args.has("x") && args.has("y")) {
+                HandsActions.longPressPercent(
+                    args.optDouble("x", -1.0), args.optDouble("y", -1.0)
+                ).toToolResult()
+            } else missing("x/y")
+            "double_tap" -> if (args.has("x") && args.has("y")) {
+                HandsActions.doubleTapPercent(
+                    args.optDouble("x", -1.0), args.optDouble("y", -1.0)
+                ).toToolResult()
+            } else missing("x/y")
+            "drag" -> if (args.has("from_x") && args.has("from_y") &&
+                args.has("to_x") && args.has("to_y")
+            ) {
+                HandsActions.dragPercent(
+                    args.optDouble("from_x", -1.0), args.optDouble("from_y", -1.0),
+                    args.optDouble("to_x", -1.0), args.optDouble("to_y", -1.0)
+                ).toToolResult()
+            } else missing("from_x/from_y/to_x/to_y")
+            "pinch_zoom" -> args.requiredString("direction")?.let {
+                HandsActions.pinch(it.equals("in", ignoreCase = true)).toToolResult()
+            } ?: missing("direction")
+            "set_slider" -> if (args.has("percent")) {
+                HandsActions.setSliderPercent(args.optInt("percent")).toToolResult()
+            } else missing("percent")
+            "read_page" -> readPage()
+            "undo_action" -> HandsActions.undoLast().toToolResult()
+            "clipboard_get" -> clipboardGet()
+            "clipboard_set" -> args.requiredString("text")?.let {
+                if (HandsActions.setClipboardText(it)) {
+                    com.nshd.jarvis2.core.AppLog.d(
+                        "Hands", "clipboard set (${it.length} chars)"
+                    )
+                    ToolResult(true, "Copied to the clipboard.")
+                } else {
+                    ToolResult(false, "The clipboard is unavailable right now.")
+                }
+            } ?: missing("text")
+            "copy_selection" -> HandsActions.copySelection().toToolResult()
+            "paste_clipboard" -> HandsActions.pasteIntoFocused().toToolResult()
+            "whatsapp_photo" -> whatsappPhoto(args)
+            "whatsapp_reply_current" -> whatsappReplyCurrent(args)
+            "instagram_message" -> instagramMessage(args)
+            "telegram_message" -> telegramMessage(args)
+            "sms_message" -> smsMessage(args)
+            "gmail_send" -> gmailSend(args)
+            "set_alarm" -> if (args.has("hour") && args.has("minute")) {
+                intents.setAlarm(
+                    args.optInt("hour"), args.optInt("minute"),
+                    args.optString("label")
+                ).toToolResult()
+            } else missing("hour/minute")
+            "set_timer" -> if (args.has("seconds")) {
+                intents.setTimer(
+                    args.optInt("seconds"), args.optString("label")
+                ).toToolResult()
+            } else missing("seconds")
+            "calendar_event" -> calendarEvent(args)
+            "share_screenshot" -> intents.shareScreenshot().toToolResult()
+            "save_note" -> args.requiredString("text")?.let {
+                memoryDb.addFact(
+                    com.nshd.jarvis2.memory.MemoryCategories.NOTES, it
+                )
+                ToolResult(true, "Note saved to Memory Core.")
+            } ?: missing("text")
             else -> ToolResult(false, "Unknown tool: $name")
         }
     }
@@ -569,6 +696,28 @@ class ToolExecutor(
                 )
             }
         }
+        // v1.9.0 (#64): inserting over a SELECTION replaces text the
+        // user can see — show a compact before/after diff in the
+        // confirm gate first. A plain cursor insert (no selection)
+        // stays gate-free, as before.
+        val selection = HandsActions.focusedSelectionText()
+        if (!selection.isNullOrBlank()) {
+            val beforePreview = selection.lines().take(5)
+                .joinToString("\n") { "- $it" }
+            val afterPreview = code.lines().take(5)
+                .joinToString("\n") { "+ $it" }
+            val approved = ConfirmGate.confirm(
+                "Replace the selected ${selection.lines().size} line(s) " +
+                    "in the editor with ${code.lines().size} new line(s)?\n\n" +
+                    "Before:\n$beforePreview\n\nAfter:\n$afterPreview"
+            )
+            if (!approved) {
+                return ToolResult(
+                    false,
+                    "Code insert was not confirmed — the selection is unchanged."
+                )
+            }
+        }
         val result = HandsActions.insertCodeIntoFocused(code)
         val lineCount = code.trimEnd('\n').lines().size
         com.nshd.jarvis2.core.AppLog.i(
@@ -714,6 +863,180 @@ class ToolExecutor(
         }
     }
 
+    // ── v1.9.0 tool implementations ──────────────────────────────────
+
+    /** #39: the current screen's readable text (SAFE read, tag "Hands"). */
+    private fun readPage(): ToolResult {
+        val service = JarvisAccessibilityService.instance
+            ?: return ToolResult(
+                false,
+                "Accessibility is not enabled. Enable Jarvis Digital Hands in Permissions → Accessibility Service first."
+            )
+        val text = service.screenReader().pageText()
+        com.nshd.jarvis2.core.AppLog.i(
+            "Hands", "read_page: ${text.length} chars from ${service.screenReader().currentPackage()}"
+        )
+        if (text.isBlank()) {
+            return ToolResult(false, "No readable text was found on this screen.")
+        }
+        return ToolResult(true, "Page text:\n$text")
+    }
+
+    /** #42: clipboard read (SAFE read, tag "Hands"). */
+    private fun clipboardGet(): ToolResult {
+        val text = HandsActions.clipboardText()
+        com.nshd.jarvis2.core.AppLog.d(
+            "Hands", "clipboard_get: ${text?.length ?: 0} chars"
+        )
+        return if (text.isNullOrBlank()) {
+            ToolResult(false, "The clipboard is empty (or holds no text).")
+        } else {
+            ToolResult(true, "Clipboard: \"$text\"")
+        }
+    }
+
+    /** #43: send the latest gallery photo on WhatsApp — gated like every send. */
+    private suspend fun whatsappPhoto(args: JSONObject): ToolResult {
+        val contact = args.requiredString("contact") ?: return missing("contact")
+        return when (val resolution = contactsResolver.resolve(contact)) {
+            is ContactResolution.Found -> {
+                val name = resolution.contact.displayName
+                val approved = ConfirmGate.confirm(
+                    "Send your most recent gallery photo on WhatsApp to " +
+                        "$name (${resolution.contact.phone})?"
+                )
+                if (!approved) {
+                    return ToolResult(false, "Photo send was not confirmed, so nothing was sent.")
+                }
+                HandsActions.grantSendPermit("com.whatsapp")
+                HandsActions.grantSendPermit("com.whatsapp.w4b")
+                intents.whatsappShareLatestPhoto(resolution.contact.phone).toToolResult()
+            }
+            is ContactResolution.Ambiguous -> ToolResult(
+                false,
+                "I found multiple contacts matching \"$contact\": " +
+                    resolution.candidates.joinToString(", ") { it.displayName } +
+                    ". Ask the user to pick one — nothing was sent."
+            )
+            ContactResolution.NotFound -> ToolResult(
+                false,
+                "No contact matched \"$contact\". Nothing was sent."
+            )
+        }
+    }
+
+    /** #44: reply inside the WhatsApp chat currently open on screen. */
+    private suspend fun whatsappReplyCurrent(args: JSONObject): ToolResult {
+        val message = args.requiredString("message") ?: return missing("message")
+        val pkg = listOf("com.whatsapp", "com.whatsapp.w4b")
+            .firstOrNull { intents.currentChatTitle(it) != null }
+            ?: return ToolResult(
+                false,
+                "No WhatsApp chat is open on screen right now. Open the chat " +
+                    "(e.g. from its notification), then ask again."
+            )
+        val title = intents.currentChatTitle(pkg) ?: "the open chat"
+        val approved = ConfirmGate.confirm(
+            "Reply on WhatsApp to $title?\n\nMessage: \"$message\""
+        )
+        if (!approved) {
+            return ToolResult(false, "Reply was not confirmed, so nothing was sent.")
+        }
+        HandsActions.grantSendPermit(pkg)
+        return intents.typeAndSendInOpenChat(pkg, message).toToolResult()
+    }
+
+    /** #45: Instagram DM — always-confirm rule, same as WhatsApp. */
+    private suspend fun instagramMessage(args: JSONObject): ToolResult {
+        val contact = args.requiredString("contact") ?: return missing("contact")
+        val message = args.requiredString("message") ?: return missing("message")
+        val approved = ConfirmGate.confirm(
+            "Send Instagram DM to $contact?\n\nMessage: \"$message\""
+        )
+        if (!approved) {
+            return ToolResult(false, "Instagram DM was not confirmed, so nothing was sent.")
+        }
+        HandsActions.grantSendPermit("com.instagram.android")
+        return intents.instagramDm(contact, message).toToolResult()
+    }
+
+    /** #46: Telegram message — always-confirm rule, same as WhatsApp. */
+    private suspend fun telegramMessage(args: JSONObject): ToolResult {
+        val contact = args.requiredString("contact") ?: return missing("contact")
+        val message = args.requiredString("message") ?: return missing("message")
+        val approved = ConfirmGate.confirm(
+            "Send Telegram message to $contact?\n\nMessage: \"$message\""
+        )
+        if (!approved) {
+            return ToolResult(false, "Telegram message was not confirmed, so nothing was sent.")
+        }
+        HandsActions.grantSendPermit("org.telegram.messenger")
+        return intents.telegramMessage(contact, message).toToolResult()
+    }
+
+    /** #47: SMS via the default SMS app — resolved contact + gate first. */
+    private suspend fun smsMessage(args: JSONObject): ToolResult {
+        val contact = args.requiredString("contact") ?: return missing("contact")
+        val message = args.requiredString("message") ?: return missing("message")
+        if (ContactsResolver.looksLikePhone(contact)) {
+            val number = ContactsResolver.normalizePhone(contact)
+            val approved = ConfirmGate.confirm(
+                "Send SMS to $number?\n\nMessage: \"$message\""
+            )
+            if (!approved) {
+                return ToolResult(false, "SMS was not confirmed, so nothing was sent.")
+            }
+            return intents.smsSend(number, message).toToolResult()
+        }
+        return when (val resolution = contactsResolver.resolve(contact)) {
+            is ContactResolution.Found -> {
+                val name = resolution.contact.displayName
+                val approved = ConfirmGate.confirm(
+                    "Send SMS to $name (${resolution.contact.phone})?\n\nMessage: \"$message\""
+                )
+                if (!approved) {
+                    return ToolResult(false, "SMS was not confirmed, so nothing was sent.")
+                }
+                intents.smsSend(resolution.contact.phone, message).toToolResult()
+            }
+            is ContactResolution.Ambiguous -> ToolResult(
+                false,
+                "I found multiple contacts matching \"$contact\": " +
+                    resolution.candidates.joinToString(", ") { it.displayName } +
+                    ". Ask the user to pick one — nothing was sent."
+            )
+            ContactResolution.NotFound -> ToolResult(
+                false,
+                "No contact matched \"$contact\". Nothing was sent."
+            )
+        }
+    }
+
+    /** #48: Gmail send — gate shows recipient + subject + body. */
+    private suspend fun gmailSend(args: JSONObject): ToolResult {
+        val to = args.requiredString("to") ?: return missing("to")
+        val subject = args.requiredString("subject") ?: return missing("subject")
+        val body = args.requiredString("body") ?: return missing("body")
+        val approved = ConfirmGate.confirm(
+            "Send email via Gmail to $to?\n\nSubject: $subject\n\n$body"
+        )
+        if (!approved) {
+            return ToolResult(false, "Email was not confirmed, so nothing was sent.")
+        }
+        return intents.gmailSend(to, subject, body).toToolResult()
+    }
+
+    /** #108: calendar draft via intent (the calendar app confirms). */
+    private fun calendarEvent(args: JSONObject): ToolResult {
+        val title = args.requiredString("title") ?: return missing("title")
+        if (!args.has("start_in_minutes")) return missing("start_in_minutes")
+        val startIn = args.optInt("start_in_minutes").coerceAtLeast(0)
+        val duration = args.optInt("duration_minutes", 60).coerceAtLeast(5)
+        val begin = System.currentTimeMillis() + startIn * 60_000L
+        return intents.calendarAddEvent(title, begin, begin + duration * 60_000L)
+            .toToolResult()
+    }
+
     private suspend fun callContact(args: JSONObject): ToolResult {
         val contact = args.requiredString("contact") ?: return missing("contact")
         // A raw number bypasses name resolution, so check Contacts here:
@@ -785,7 +1108,16 @@ class ToolExecutor(
         private const val QUICKEDIT_PACKAGE = "com.rhmsoft.edit"
         /** Read-only screen observation — exempt from the F3 ledger. */
         private val OBSERVATION_TOOLS = setOf(
-            "inspect_screen", "see_screen", "take_screenshot"
+            "inspect_screen", "see_screen", "take_screenshot",
+            // v1.9.0: SAFE reads (page text / clipboard) — always fresh.
+            "read_page", "clipboard_get"
+        )
+
+        /** v1.9.0 (#28): apps whose transitions settle fast. */
+        private val FAST_SETTLE_PACKAGES = setOf(
+            "com.spotify.music", "com.google.android.youtube",
+            "com.whatsapp", "com.whatsapp.w4b", "com.instagram.android",
+            "org.telegram.messenger"
         )
 
         /**
@@ -802,7 +1134,12 @@ class ToolExecutor(
         private val UI_MUTATION_TOOLS = setOf(
             "open_app", "click_element", "click_text", "type_text", "scroll",
             "press_key", "tap_percent", "whatsapp_message", "youtube_play",
-            "spotify_play", "edit_text", "insert_code"
+            "spotify_play", "edit_text", "insert_code",
+            // v1.9.0 mutations (gestures, clipboard writes, new sends).
+            "long_press", "double_tap", "drag", "pinch_zoom", "set_slider",
+            "undo_action", "clipboard_set", "copy_selection", "paste_clipboard",
+            "whatsapp_photo", "whatsapp_reply_current", "instagram_message",
+            "telegram_message", "sms_message", "gmail_send", "share_screenshot"
         )
         private val PAYMENT_REGEX = Regex(
             "\\b(pay|payment|payments|purchase|buy now|place order|checkout|check out|" +

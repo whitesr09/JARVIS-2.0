@@ -1,0 +1,12 @@
+<!-- Bolt — lightning bolt, character only, no backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FFFFD93D"
+        android:pathData="M27.5,4 L12,27 h8 L19,44 L36,19 h-9.5 Z"
+        android:strokeWidth="1.5"
+        android:strokeColor="#FFE0A800" />
+</vector>

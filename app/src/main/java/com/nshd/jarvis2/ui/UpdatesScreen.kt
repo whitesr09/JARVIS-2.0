@@ -91,6 +91,31 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v1.9.0 — More Powers: new hands, more messaging, smarter memory",
+            body = "A big powers release. New tools: long-press, " +
+                "double-tap, drag and pinch gestures, slider control, " +
+                "read-this-page, clipboard get/set/copy/paste and an " +
+                "undo for the last text edit. Messaging grew up: " +
+                "WhatsApp can share your latest gallery photo and " +
+                "reply in the chat that's already open, plus Instagram " +
+                "DMs, Telegram, SMS and Gmail — every send still asks " +
+                "you first, showing the recipient and the exact text. " +
+                "Clock and calendar intents set alarms, timers and " +
+                "events in one command; say \"note that …\" to save a " +
+                "quick note. Voice remembers the language that worked, " +
+                "respects Do-Not-Disturb, and gains a hold-to-talk " +
+                "mode plus a wake-sensitivity slider with a recent-wake " +
+                "log. Memory gets a review queue for auto-saved facts " +
+                "and a duplicate-merge tidy; chat exports to .txt, " +
+                "renders markdown tables and previews HTML. Twelve " +
+                "new avatars, launcher shortcuts, a Quick Settings " +
+                "tile, batched multi-tool steps, per-app settle " +
+                "timing, and a Logs insights section with usage per " +
+                "provider, slowest commands and a storage manager."
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+
+        InfoCard(
             title = "v1.8.0 — Panel, Orb & Feel: live panel, smarter orb, living Home",
             body = "The floating panel grew up: while a task runs collapsed " +
                 "it shrinks to a slim pill (spinner, current step, % done) " +

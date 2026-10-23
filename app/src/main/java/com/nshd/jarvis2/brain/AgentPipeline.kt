@@ -14,10 +14,13 @@ import com.nshd.jarvis2.hands.TaskStoppedException
 import com.nshd.jarvis2.memory.MemoryCategories
 import com.nshd.jarvis2.memory.MemoryDb
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -290,12 +293,58 @@ object AgentPipeline {
             AppLog.d("Agent", "compound suspected but <2 sub-tasks — single agent turn")
         }
 
+        // ── v1.9.0 (#73): auto-extract a durable fact into the
+        // REVIEW QUEUE (never straight into memory — he approves it
+        // in the Memory Core). Silent: the turn continues normally.
+        autoExtractCandidate(clean)?.let { (category, fact) ->
+            val known = memoryDb.allFacts(null, null) +
+                memoryDb.pendingFacts()
+            if (known.none { it.text.equals(fact, ignoreCase = true) }) {
+                memoryDb.addPendingFact(category, fact)
+                AppLog.i(
+                    "Agent",
+                    "route=auto-extract → review queue: '${fact.take(50)}'"
+                )
+            }
+        }
+
+        // ── v1.9.0 (#82): fold old history into a memory note when
+        // the table grows past the threshold (background, best-effort).
+        housekeepingScope.launch {
+            HistoryCompactor.maybeCompact(memoryDb, providerStore)
+        }
+
         // ── Model + tools (single task) ────────────────────────────────
         AppLog.i("Agent", "route=loop")
         runAgentTurn(
             context, clean, settings, memoryDb, providerStore,
             codeMode, hudEvent, onAssistantDelta, ExecutionLedger()
         )
+    }
+
+    /** Background scope for #82-style housekeeping (never blocks a turn). */
+    private val housekeepingScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * v1.9.0 (#73): conservative auto-extraction — only clear,
+     * first-person durable statements ("my exam is on Friday",
+     * "I live in Kochi", "I work at …"). Questions, commands and
+     * long texts never match. Returns (category, fact-as-stated).
+     */
+    private fun autoExtractCandidate(text: String): Pair<String, String>? {
+        val clean = text.trim()
+        if (clean.length !in 8..140 || clean.contains('?')) return null
+        val patterns = listOf(
+            Regex("(?i)^my [a-z][a-z ]{1,28}? is .+$"),
+            Regex("(?i)^i live in .+$"),
+            Regex("(?i)^i work (?:at|for) .+$"),
+            Regex("(?i)^i study (?:at|in) .+$"),
+            Regex("(?i)^i am \\d{1,3} years old.*$"),
+            Regex("(?i)^my favourite .+? is .+$")
+        )
+        if (patterns.none { it.matches(clean) }) return null
+        return inferCategory(clean) to clean
     }
 
     /** Execute one deterministic quick command, with HUD events. */
@@ -496,6 +545,15 @@ object AgentPipeline {
             // Cancellation (abort) propagates to handleUserText, which
             // aborts the queue — queued items never start.
             currentCoroutineContext().ensureActive()
+            // v1.9.0 (#62): an item skipped/cancelled from the panel
+            // while it waited never executes.
+            val liveStatus = TaskQueue.tasks.value
+                .firstOrNull { it.id == item.id }?.status
+            if (liveStatus == TaskStatus.SKIPPED) {
+                AppLog.i("Agent", "task ${index + 1}/${items.size} skipped from panel")
+                lines += "⏭ " + item.title + " — skipped"
+                continue
+            }
             TaskQueue.markRunning(item.id)
             // TaskState mirrors the running sub-task's goal + steps.
             TaskState.begin(goal = item.title.take(60), job = job, maxSteps = 10)
@@ -1335,6 +1393,167 @@ object AgentPipeline {
             }
         }
 
+        // ── v1.9.0 "More Powers" quick patterns ─────────────────────
+        // Every send pattern still lands in its ToolExecutor tool,
+        // whose ConfirmGate confirms recipient + full text first.
+
+        // #43: "send the latest photo to Mom" (WhatsApp).
+        Regex("(?i)^send (?:the )?(?:latest|last|recent) photo to (.+)$")
+            .find(text)?.let { match ->
+                return QuickCommand(
+                    "whatsapp_photo",
+                    JSONObject().put("contact", match.groupValues[1].trim())
+                )
+            }
+
+        // #45: Instagram DM.
+        Regex("(?i)^(?:send (?:an? )?)?instagram (?:dm|message) to (.+?) saying (.+)$")
+            .find(text)?.let { match ->
+                return QuickCommand(
+                    "instagram_message",
+                    JSONObject()
+                        .put("contact", match.groupValues[1].trim())
+                        .put("message", match.groupValues[2].trim())
+                )
+            }
+        Regex("(?i)^dm (.+?) on instagram saying (.+)$").find(text)?.let { match ->
+            return QuickCommand(
+                "instagram_message",
+                JSONObject()
+                    .put("contact", match.groupValues[1].trim())
+                    .put("message", match.groupValues[2].trim())
+            )
+        }
+
+        // #46: Telegram.
+        Regex("(?i)^(?:send (?:a )?)?telegram (?:message )?to (.+?) saying (.+)$")
+            .find(text)?.let { match ->
+                return QuickCommand(
+                    "telegram_message",
+                    JSONObject()
+                        .put("contact", match.groupValues[1].trim())
+                        .put("message", match.groupValues[2].trim())
+                )
+            }
+
+        // #47: SMS.
+        Regex("(?i)^(?:send (?:an? )?)?sms to (.+?) saying (.+)$")
+            .find(text)?.let { match ->
+                return QuickCommand(
+                    "sms_message",
+                    JSONObject()
+                        .put("contact", match.groupValues[1].trim())
+                        .put("message", match.groupValues[2].trim())
+                )
+            }
+        Regex("(?i)^text (.+?) saying (.+)$").find(text)?.let { match ->
+            return QuickCommand(
+                "sms_message",
+                JSONObject()
+                    .put("contact", match.groupValues[1].trim())
+                    .put("message", match.groupValues[2].trim())
+            )
+        }
+
+        // #48: email — only when the target is a real address; the
+        // subject is the first sentence of the body text.
+        Regex("(?i)^email (\\S+@\\S+) saying (.+)$").find(text)?.let { match ->
+            val body = match.groupValues[2].trim()
+            val subject = body.substringBefore('.').take(60).ifBlank { "Message from Jarvis" }
+            return QuickCommand(
+                "gmail_send",
+                JSONObject()
+                    .put("to", match.groupValues[1].trim())
+                    .put("subject", subject)
+                    .put("body", body)
+            )
+        }
+
+        // #107: alarm — "set alarm for 6 am" / "set an alarm 6:30 pm".
+        Regex("(?i)^set (?:an? )?alarm (?:for )?(.+)$").find(text)?.let { match ->
+            parseTimeOfDay(match.groupValues[1])?.let { (hour, minute) ->
+                return QuickCommand(
+                    "set_alarm",
+                    JSONObject()
+                        .put("hour", hour)
+                        .put("minute", minute)
+                        .put("label", "")
+                )
+            }
+        }
+        // #107: timer — "set a timer for 10 minutes" / "timer 90 seconds".
+        Regex("(?i)^(?:set (?:a )?)?timer (?:for )?(.+)$").find(text)?.let { match ->
+            parseDurationSeconds(match.groupValues[1])?.let { seconds ->
+                return QuickCommand(
+                    "set_timer",
+                    JSONObject()
+                        .put("seconds", seconds)
+                        .put("label", "")
+                )
+            }
+        }
+
+        // #108: calendar — "add event Dentist in 30 minutes" /
+        // "add event Exam tomorrow at 9 am".
+        Regex("(?i)^(?:add|create|schedule) (?:an? )?(?:event|meeting) (.+?) in (\\d+) (minutes?|hours?)$")
+            .find(text)?.let { match ->
+                val amount = match.groupValues[2].toIntOrNull() ?: 0
+                val minutes = if (match.groupValues[3].startsWith("hour")) {
+                    amount * 60
+                } else {
+                    amount
+                }
+                return QuickCommand(
+                    "calendar_event",
+                    JSONObject()
+                        .put("title", match.groupValues[1].trim())
+                        .put("start_in_minutes", minutes)
+                        .put("duration_minutes", 60)
+                )
+            }
+        Regex("(?i)^(?:add|create|schedule) (?:an? )?(?:event|meeting) (.+?) tomorrow at (.+)$")
+            .find(text)?.let { match ->
+                parseTimeOfDay(match.groupValues[2])?.let { (hour, minute) ->
+                    val now = java.util.Calendar.getInstance()
+                    val target = java.util.Calendar.getInstance().apply {
+                        add(java.util.Calendar.DAY_OF_YEAR, 1)
+                        set(java.util.Calendar.HOUR_OF_DAY, hour)
+                        set(java.util.Calendar.MINUTE, minute)
+                        set(java.util.Calendar.SECOND, 0)
+                    }
+                    val inMinutes = ((target.timeInMillis - now.timeInMillis) / 60_000L)
+                        .toInt().coerceAtLeast(1)
+                    return QuickCommand(
+                        "calendar_event",
+                        JSONObject()
+                            .put("title", match.groupValues[1].trim())
+                            .put("start_in_minutes", inMinutes)
+                            .put("duration_minutes", 60)
+                    )
+                }
+            }
+
+        // #109: quick note — "note that …" / "note down …" / "take a note: …".
+        Regex("(?i)^note (?:that |down )?(?:this:? )?(.+)$").find(text)?.let { match ->
+            val note = match.groupValues[1].trim()
+            if (note.length >= 3) {
+                return QuickCommand(
+                    "save_note", JSONObject().put("text", note)
+                )
+            }
+        }
+        Regex("(?i)^take a note:? (.+)$").find(text)?.let { match ->
+            return QuickCommand(
+                "save_note",
+                JSONObject().put("text", match.groupValues[1].trim())
+            )
+        }
+
+        // #110: share the current screen/screenshot via the share sheet.
+        if (lower in SHARE_SCREENSHOT_COMMANDS) {
+            return QuickCommand("share_screenshot", JSONObject())
+        }
+
         Regex("(?i)^open\\s+(.+)$").find(text)?.let { match ->
             val app = match.groupValues[1].trim()
             // Avoid swallowing ordinary model requests that merely begin
@@ -1344,6 +1563,45 @@ object AgentPipeline {
             }
         }
         return null
+    }
+
+    /** v1.9.0 (#107): "6 am" / "6:30 pm" / "18:00" → (hour24, minute). */
+    private fun parseTimeOfDay(raw: String): Pair<Int, Int>? {
+        val text = raw.trim().lowercase()
+        val match = Regex("^(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?$").find(text)
+            ?: return null
+        var hour = match.groupValues[1].toIntOrNull() ?: return null
+        val minute = match.groupValues[2].toIntOrNull() ?: 0
+        when (match.groupValues[3]) {
+            "am" -> if (hour == 12) hour = 0
+            "pm" -> if (hour != 12) hour += 12
+        }
+        if (hour !in 0..23 || minute !in 0..59) return null
+        return hour to minute
+    }
+
+    /** v1.9.0 (#107): "10 minutes" / "1 hour 30 minutes" / "90" (=minutes). */
+    private fun parseDurationSeconds(raw: String): Int? {
+        val text = raw.trim().lowercase()
+        var total = 0
+        var matched = false
+        Regex("(\\d+)\\s*hours?").find(text)?.let {
+            total += (it.groupValues[1].toIntOrNull() ?: 0) * 3600
+            matched = true
+        }
+        Regex("(\\d+)\\s*(?:minutes?|mins?)").find(text)?.let {
+            total += (it.groupValues[1].toIntOrNull() ?: 0) * 60
+            matched = true
+        }
+        Regex("(\\d+)\\s*(?:seconds?|secs?)").find(text)?.let {
+            total += it.groupValues[1].toIntOrNull() ?: 0
+            matched = true
+        }
+        if (!matched) {
+            val plain = text.toIntOrNull() ?: return null
+            total = plain * 60
+        }
+        return total.takeIf { it > 0 }
     }
 
     private const val SPLIT_SYSTEM_PROMPT =
@@ -1455,6 +1713,12 @@ object AgentPipeline {
 
     private val AIRPLANE_COMMAND_REGEX =
         Regex("^(?:turn\\s+(?:on|off)\\s+|open\\s+)?airplane\\s+mode(?:\\s+settings)?$")
+
+    /** v1.9.0 (#110): share-sheet screenshot commands. */
+    private val SHARE_SCREENSHOT_COMMANDS = setOf(
+        "share screenshot", "share this screenshot", "share the screenshot",
+        "share this page", "share page", "share screen", "share this screen"
+    )
 
     private val SILENT_ON_COMMANDS = setOf(
         "silent mode on", "turn on silent mode", "enable silent mode",

@@ -1,0 +1,22 @@
+<!-- Heart — classic heart buddy, character only, no backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FFFF5A76"
+        android:pathData="M24,41.5 C10,30.5 5.5,20.5 9.8,13.2 C13.2,7.4 20.8,6.8 24,13 C27.2,6.8 34.8,7.4 38.2,13.2 C42.5,20.5 38,30.5 24,41.5 Z" />
+    <path
+        android:fillColor="#FF8E2438"
+        android:pathData="M16.2,19.5 a1.8,1.8 0 1,0 3.6,0 a1.8,1.8 0 1,0 -3.6,0" />
+    <path
+        android:fillColor="#FF8E2438"
+        android:pathData="M28.2,19.5 a1.8,1.8 0 1,0 3.6,0 a1.8,1.8 0 1,0 -3.6,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M20.5,24.5 q3.5,3 7,0"
+        android:strokeWidth="2"
+        android:strokeColor="#FF8E2438"
+        android:strokeLineCap="round" />
+</vector>

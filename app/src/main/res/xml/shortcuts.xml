@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v1.9.0 (#112): static launcher shortcuts. Each opens MainActivity
+     with the open_screen extra, handled by handleNavIntent. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="voice"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="Voice"
+        android:shortcutLongLabel="Talk to Jarvis">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.nshd.jarvis2"
+            android:targetClass="com.nshd.jarvis2.MainActivity">
+            <extra
+                android:name="open_screen"
+                android:value="voice" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="chat"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="Chat"
+        android:shortcutLongLabel="Chat with Jarvis">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.nshd.jarvis2"
+            android:targetClass="com.nshd.jarvis2.MainActivity">
+            <extra
+                android:name="open_screen"
+                android:value="chat" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="handsfree"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="Hands-Free"
+        android:shortcutLongLabel="Hands-Free and self-test">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.nshd.jarvis2"
+            android:targetClass="com.nshd.jarvis2.MainActivity">
+            <extra
+                android:name="open_screen"
+                android:value="handsfree" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="selftest"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="Self-test"
+        android:shortcutLongLabel="Run the Jarvis self-test">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.nshd.jarvis2"
+            android:targetClass="com.nshd.jarvis2.MainActivity">
+            <extra
+                android:name="open_screen"
+                android:value="selftest" />
+        </intent>
+    </shortcut>
+</shortcuts>

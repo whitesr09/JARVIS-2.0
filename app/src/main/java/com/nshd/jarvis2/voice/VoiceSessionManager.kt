@@ -357,7 +357,80 @@ object VoiceSessionManager {
     /** Screen-share → Live video forwarder (Level 5), Live path only. */
     private var shareJob: Job? = null
 
-    private val isSilent: Boolean get() = settings?.silentExecution == true
+    private val isSilent: Boolean
+        get() {
+            if (settings?.silentExecution == true) return true
+            // v1.9.0 (#87): DND respect — while the phone is in
+            // Do-Not-Disturb, voice sessions behave as if Silent
+            // Execution were on (a subtle chime still marks turns).
+            val s = settings ?: return false
+            if (!s.dndRespect) return false
+            val ctx = appContext ?: return false
+            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE)
+                as? android.app.NotificationManager ?: return false
+            return nm.currentInterruptionFilter ==
+                android.app.NotificationManager.INTERRUPTION_FILTER_NONE ||
+                nm.currentInterruptionFilter ==
+                android.app.NotificationManager.INTERRUPTION_FILTER_PRIORITY ||
+                nm.currentInterruptionFilter ==
+                android.app.NotificationManager.INTERRUPTION_FILTER_ALARMS
+        }
+
+    // ── v1.9.0 (#6): STT language memory ─────────────────────────────
+    // The language NAME the running Universal engine was built with,
+    // and the last language that produced a CLEAN final (persisted —
+    // an "Auto" session starts there next time instead of en-IN).
+
+    @Volatile
+    private var universalLanguageName: String = "Auto"
+
+    /** The remembered clean STT language name, or null when none yet. */
+    fun rememberedSttLanguage(context: Context): String? =
+        context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_STT_LAST_CLEAN, null)
+            ?.takeIf { it.isNotBlank() }
+
+    private fun noteCleanSttResult() {
+        val ctx = appContext ?: return
+        // "Auto" effectively ran en-IN — remember it as "English" so
+        // the memory names a real language, not the Auto placeholder.
+        val name = universalLanguageName
+            .takeIf { it.isNotBlank() && it != "Auto" } ?: "English"
+        val prefs = ctx.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+        if (prefs.getString(KEY_STT_LAST_CLEAN, null) != name) {
+            prefs.edit().putString(KEY_STT_LAST_CLEAN, name).apply()
+            AppLog.i("STT", "language memory: '$name' produced a clean result — remembered")
+        }
+    }
+
+    // ── v1.9.0 (#14): push-to-talk ───────────────────────────────────
+    // Hold = talk now; release = finish this utterance. Universal:
+    // press starts a listen cycle, release stops the recognizer (its
+    // final result dispatches as usual). Live: press unmutes the mic,
+    // release mutes it again.
+
+    fun pttDown() {
+        if (!active) return
+        mediaListenBlocked = false
+        when (_uiState.value.mode) {
+            VoiceMode.UNIVERSAL -> {
+                if (_uiState.value.micMuted) setMicMuted(false)
+                universal?.stopSpeaking()
+                startCurrentListening()
+            }
+            VoiceMode.LIVE -> setMicMuted(false)
+            VoiceMode.NONE -> Unit
+        }
+    }
+
+    fun pttUp() {
+        if (!active) return
+        when (_uiState.value.mode) {
+            VoiceMode.UNIVERSAL -> universal?.stopListening()
+            VoiceMode.LIVE -> setMicMuted(true)
+            VoiceMode.NONE -> Unit
+        }
+    }
 
     // ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -555,7 +628,14 @@ object VoiceSessionManager {
             biometricsSampleCount = prefs.getInt("biometrics_sample_count", 0),
             biometricsEnrolledDate = prefs.getString("biometrics_enrolled_date", "") ?: "",
             ttsRate = prefs.getFloat(KEY_TTS_RATE, UniversalVoice.DEFAULT_TTS_RATE),
-            ttsPitch = prefs.getFloat(KEY_TTS_PITCH, UniversalVoice.DEFAULT_TTS_PITCH)
+            ttsPitch = prefs.getFloat(KEY_TTS_PITCH, UniversalVoice.DEFAULT_TTS_PITCH),
+            // v1.9.0: wake-started sessions honour the same new
+            // settings as UI-started ones.
+            customPersonaName = prefs.getString("custom_persona_name", "") ?: "",
+            customPersonaPrompt = prefs.getString("custom_persona_prompt", "") ?: "",
+            dndRespect = prefs.getBoolean("dnd_respect", true),
+            pttMode = prefs.getBoolean("ptt_mode", false),
+            wakeSensitivity = prefs.getString("wake_sensitivity", "NORMAL") ?: "NORMAL"
         )
     }
 
@@ -1514,8 +1594,22 @@ object VoiceSessionManager {
         val ctx = appContext ?: return
         val listener = UniversalListener()
         universalListener = listener
+        // v1.9.0 (#6): with the language setting on "Auto", start from
+        // the language that produced the last CLEAN result (persisted)
+        // instead of always defaulting to en-IN.
+        universalLanguageName = if (s.language == "Auto") {
+            rememberedSttLanguage(ctx) ?: "Auto"
+        } else {
+            s.language
+        }
+        if (universalLanguageName != s.language) {
+            AppLog.i(
+                "STT",
+                "language memory: starting in '$universalLanguageName' (setting: Auto)"
+            )
+        }
         val uv = UniversalVoice(
-            ctx, s.language, listener,
+            ctx, universalLanguageName, listener,
             // F5.1: TTS tuning providers read the persisted slider
             // values LIVE on every reply, so speed/pitch changes in
             // Settings apply without restarting the session.
@@ -1791,6 +1885,9 @@ object VoiceSessionManager {
 
     /** A final STT result that passed every intercept — run the turn. */
     private fun dispatchUniversalFinal(text: String) {
+        // v1.9.0 (#6): a final that reached dispatch is a CLEAN
+        // result — remember the language it was heard in.
+        noteCleanSttResult()
         guardUsedThisTurn = false
         // v1.8 (#8): a new turn lifts any previous "Stop reading".
         readingSuppressed = false
@@ -2352,6 +2449,8 @@ object VoiceSessionManager {
     private const val SETTINGS_PREFS = "jarvis_settings"
     private const val KEY_TTS_RATE = "tts_rate"
     private const val KEY_TTS_PITCH = "tts_pitch"
+    /** v1.9.0 (#6): last STT language that produced a clean final. */
+    private const val KEY_STT_LAST_CLEAN = "stt_last_clean_language"
     /** F5.1: minimum first-chunk length before a clause cut is allowed. */
     private const val FIRST_CLAUSE_MIN_CHARS = 24
     private const val MAX_RECONNECTS = 3

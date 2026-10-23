@@ -180,6 +180,19 @@ fun JarvisApp(
             }
         }
 
+        // v1.9.0: launcher static shortcuts (Voice handled above;
+        // Chat / Hands-Free incl. the self-test shortcut land here).
+        val screenRequested by AppNavRequests.screenRequested.collectAsState()
+        LaunchedEffect(screenRequested) {
+            when (AppNavRequests.consumeScreenRequest()) {
+                "chat" -> {
+                    tab = Tab.CHAT
+                    subScreen = SubScreen.NONE
+                }
+                "handsfree", "selftest" -> subScreen = SubScreen.HANDSFREE
+            }
+        }
+
         // F5.1: while the keyboard is up, the floating nav is hidden
         // (plain conditional — no animation state to glitch while
         // typing) so it can never overlap a composer; the Scaffold
@@ -353,23 +366,25 @@ fun JarvisApp(
                 if (showWhatsNew) {
                     AlertDialog(
                         onDismissRequest = { showWhatsNew = false },
-                        title = { Text("What's new in v1.8.0") },
+                        title = { Text("What's new in v1.9.0") },
                         text = {
                             Text(
-                                "Panel, Orb & Feel: the floating panel " +
-                                    "gets a mini progress pill, task " +
-                                    "history, quick Stop/Pause, haptics " +
-                                    "and per-app positions — and Stop " +
-                                    "now truly stops a task mid-flight. " +
-                                    "The orb pulses to Jarvis's own " +
-                                    "voice, adapts its quality to your " +
-                                    "GPU and battery, and warms up for " +
-                                    "Girlfriend Mode. Home shows live " +
-                                    "weather, your next calendar event " +
-                                    "and the gold price. Plus chat " +
-                                    "message actions, search, dictation " +
-                                    "in the composer, \"forget …\" " +
-                                    "commands, a permission health " +
+                                "More Powers: new gesture tools " +
+                                    "(long-press, drag, pinch, sliders), " +
+                                    "clipboard tools, read-this-page and " +
+                                    "an undo for text edits. WhatsApp " +
+                                    "photo sharing and open-chat replies, " +
+                                    "Instagram, Telegram, SMS and Gmail " +
+                                    "sends — all behind the confirm " +
+                                    "gate. Alarms, timers and calendar " +
+                                    "events by voice; quick notes; " +
+                                    "hold-to-talk; wake sensitivity; " +
+                                    "DND respect; a memory review queue " +
+                                    "and duplicate tidy; chat export, " +
+                                    "markdown tables and HTML preview; " +
+                                    "12 new avatars, launcher shortcuts " +
+                                    "and a Quick Settings tile. Plus a " +
+                                    "permission health " +
                                     "dashboard, full backup/restore " +
                                     "and an update checker."
                             )

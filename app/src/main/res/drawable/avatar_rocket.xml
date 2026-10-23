@@ -1,0 +1,26 @@
+<!-- Rocket — ship with fins + flame, character only, no backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FFFF5A5F"
+        android:pathData="M15.5,25 L9,36.5 L15.5,34 Z" />
+    <path
+        android:fillColor="#FFFF5A5F"
+        android:pathData="M32.5,25 L39,36.5 L32.5,34 Z" />
+    <path
+        android:fillColor="#FFFFB340"
+        android:pathData="M20,35.5 q4,8.5 8,0 q-1.2,4 -4,4 q-2.8,0 -4,-4 Z" />
+    <path
+        android:fillColor="#FFDDE3EA"
+        android:pathData="M24,3.5 C31,9.5 33.5,17.5 33.5,27 L33.5,35 L14.5,35 L14.5,27 C14.5,17.5 17,9.5 24,3.5 Z"
+        android:strokeWidth="1.5"
+        android:strokeColor="#FFB9C4D0" />
+    <path
+        android:fillColor="#FF4FE3FF"
+        android:pathData="M20,16.5 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0"
+        android:strokeWidth="1.5"
+        android:strokeColor="#FF2F3542" />
+</vector>

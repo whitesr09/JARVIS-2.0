@@ -388,6 +388,28 @@ object TaskQueue {
         _tasks.value.getOrNull(index)?.let { update(it.id, TaskStatus.FAILED) }
     }
 
+    /**
+     * v1.9.0 (#62): skip ONE upcoming sub-task from the panel. Only
+     * QUEUED items can be skipped — a RUNNING item is stopped via
+     * the panel's Stop (TaskState abort), never from here. The
+     * pipeline's queue loop checks the live status before promoting
+     * each item, so a skipped item never executes.
+     */
+    @Synchronized
+    fun skipTask(id: Long) {
+        val item = _tasks.value.firstOrNull { it.id == id } ?: return
+        if (item.status != TaskStatus.QUEUED) {
+            AppLog.d("Queue", "skip ignored for task #$id (status=${item.status})")
+            return
+        }
+        AppLog.i("Queue", "task #$id SKIPPED from panel: '${item.title.take(40)}'")
+        update(id, TaskStatus.SKIPPED)
+    }
+
+    /** v1.9.0 (#62): cancel = skip for a QUEUED item (same contract). */
+    @Synchronized
+    fun cancelTask(id: Long) = skipTask(id)
+
     /** Empty the queue entirely (finished queues stay visible until then). */
     @Synchronized
     fun clear() {

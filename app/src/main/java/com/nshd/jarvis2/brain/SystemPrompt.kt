@@ -8,12 +8,16 @@ object PersonaPrompts {
     const val PERSONA_GIRLFRIEND = "Girlfriend Mode"
     const val PERSONA_PRO = "Jarvis Pro"
 
+    /** v1.9.0 (#77): the persona value stored when his own is active. */
+    const val PERSONA_CUSTOM = "Custom"
+
     /** Builds the full system prompt: persona + identity + language + memory. */
     fun build(settings: JarvisSettings, facts: List<Fact>, codeMode: Boolean): String {
-        val base = if (settings.persona == PERSONA_GIRLFRIEND) {
-            girlfriend(settings)
-        } else {
-            jarvisPro(settings)
+        val base = when {
+            settings.persona == PERSONA_GIRLFRIEND -> girlfriend(settings)
+            settings.persona == PERSONA_CUSTOM &&
+                settings.customPersonaPrompt.isNotBlank() -> custom(settings)
+            else -> jarvisPro(settings)
         }
         val sb = StringBuilder(base)
         if (settings.language != "Auto") {
@@ -98,6 +102,16 @@ object PersonaPrompts {
             "someone texting her favourite person: short, expressive, real. Light " +
             "Hinglish/Manglish touches are welcome when they fit. You are his companion, " +
             "not a customer-support bot."
+
+    /**
+     * v1.9.0 (#77): his own persona prompt, wrapped with the same
+     * identity frame as the built-ins (name + callsign always apply).
+     */
+    private fun custom(s: JarvisSettings): String =
+        "You are ${s.assistantName}, the personal AI assistant of ${s.callsign}. " +
+            "Persona: ${s.customPersonaName.ifBlank { "Custom" }} — defined by " +
+            "${s.callsign} himself, follow it exactly:\n" +
+            s.customPersonaPrompt.trim()
 
     private fun jarvisPro(s: JarvisSettings): String =
         "You are ${s.assistantName}, the personal AI assistant of ${s.callsign}. " +

@@ -1,0 +1,52 @@
+package com.nshd.jarvis2.service
+
+import android.content.Intent
+import android.os.Build
+import android.service.quicksettings.Tile
+import android.service.quicksettings.TileService
+import com.nshd.jarvis2.MainActivity
+import com.nshd.jarvis2.voice.VoiceSessionManager
+import com.nshd.jarvis2.voice.VoiceStatus
+
+/**
+ * v1.9.0 (#113): Quick Settings tile for the voice session.
+ *
+ * Tap while a session is live → stops it. Tap while idle → opens
+ * the app straight into the Voice screen (the session itself starts
+ * through the normal in-app flow, so every permission prompt and
+ * provider check still applies).
+ */
+class VoiceTileService : TileService() {
+
+    override fun onStartListening() {
+        super.onStartListening()
+        refreshTile()
+    }
+
+    override fun onClick() {
+        super.onClick()
+        val active = VoiceSessionManager.uiState.value.status != VoiceStatus.IDLE
+        if (active) {
+            VoiceSessionManager.stop()
+        } else {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                putExtra(MainActivity.EXTRA_OPEN_SCREEN, "voice")
+            }
+            @Suppress("DEPRECATION")
+            startActivityAndCollapse(intent)
+        }
+        refreshTile()
+    }
+
+    private fun refreshTile() {
+        val tile = qsTile ?: return
+        val active = VoiceSessionManager.uiState.value.status != VoiceStatus.IDLE
+        tile.state = if (active) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+        tile.label = "Jarvis Voice"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            tile.subtitle = if (active) "Tap to stop" else "Tap to talk"
+        }
+        tile.updateTile()
+    }
+}

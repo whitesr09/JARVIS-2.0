@@ -1092,6 +1092,9 @@ class FloatingOverlayService : Service() {
 
     private fun renderRows(rows: List<PanelRow>) {
         hudTaskRowViews.forEachIndexed { index, rowView ->
+            // #62: row click targets are re-assigned per render by the
+            // queue-mode branch; every other mode starts clean.
+            rowView.setOnClickListener(null)
             val row = rows.getOrNull(index)
             rowView.visibility = if (row == null) View.GONE else View.VISIBLE
             if (row != null) {
@@ -1464,13 +1467,33 @@ class FloatingOverlayService : Service() {
                     queue.take(MAX_HUD_TASKS).map { item ->
                         val (glyph, color) = glyphFor(item.status)
                         PanelRow(
-                            glyph, color, item.title,
+                            glyph, color,
+                            // v1.9.0 (#62): queued rows are tappable —
+                            // say so right on the row.
+                            if (item.status == TaskStatus.QUEUED) {
+                                item.title + "  (tap to skip)"
+                            } else {
+                                item.title
+                            },
                             labelColor = palette.textPrimary,
                             spinner = item.status == TaskStatus.RUNNING,
                             bold = item.status == TaskStatus.RUNNING
                         )
                     }
                 )
+                // v1.9.0 (#62): per-sub-task management — tapping a
+                // QUEUED row skips (cancels) just that sub-task; the
+                // pipeline honours SKIPPED before promoting it.
+                hudTaskRowViews.forEachIndexed { index, rowView ->
+                    val item = queue.getOrNull(index)
+                    if (item != null && item.status == TaskStatus.QUEUED) {
+                        rowView.setOnClickListener {
+                            com.nshd.jarvis2.brain.TaskQueue.skipTask(item.id)
+                        }
+                    } else {
+                        rowView.setOnClickListener(null)
+                    }
+                }
                 val extra = queue.size - MAX_HUD_TASKS
                 overflowText = if (extra > 0) "…and $extra more" else null
                 renderFallbackSteps(queue)

@@ -62,7 +62,16 @@ data class JarvisSettings(
     /** Plan #58: haptic tick in the floating panel when a plan step completes. */
     val panelHaptics: Boolean = true,
     /** Plan #105: highest versionCode whose "What's new" card was dismissed. */
-    val lastSeenVersionCode: Int = 0
+    val lastSeenVersionCode: Int = 0,
+    /** Plan #77: user-built persona — name + prompt ("" = none saved). */
+    val customPersonaName: String = "",
+    val customPersonaPrompt: String = "",
+    /** Plan #87: while Do-Not-Disturb is on, voice sessions stay silent. */
+    val dndRespect: Boolean = true,
+    /** Plan #14: push-to-talk — hold the orb/mic to talk, release to send. */
+    val pttMode: Boolean = false,
+    /** Plan #9: wake-word sensitivity — "LOW" / "NORMAL" / "HIGH". */
+    val wakeSensitivity: String = "NORMAL"
 )
 
 class MainActivity : ComponentActivity() {
@@ -180,6 +189,17 @@ class MainActivity : ComponentActivity() {
             AppNavRequests.requestVoice()
             intent.removeExtra(EXTRA_OPEN_VOICE)
         }
+        // v1.9.0: launcher static shortcuts + the QS tile carry their
+        // target screen in this extra ("voice" / "chat" / "handsfree"
+        // / "selftest").
+        intent.getStringExtra(EXTRA_OPEN_SCREEN)?.let { target ->
+            if (target == "voice") {
+                AppNavRequests.requestVoice()
+            } else {
+                AppNavRequests.requestScreen(target)
+            }
+            intent.removeExtra(EXTRA_OPEN_SCREEN)
+        }
     }
 
     private fun loadSettings(): JarvisSettings {
@@ -223,7 +243,12 @@ class MainActivity : ComponentActivity() {
             chatFontSize = prefs.getString(KEY_CHAT_FONT, "M") ?: "M",
             reduceMotion = prefs.getBoolean(KEY_REDUCE_MOTION, false),
             panelHaptics = prefs.getBoolean(KEY_PANEL_HAPTICS, true),
-            lastSeenVersionCode = prefs.getInt(KEY_LAST_SEEN_VC, 0)
+            lastSeenVersionCode = prefs.getInt(KEY_LAST_SEEN_VC, 0),
+            customPersonaName = prefs.getString(KEY_CUSTOM_PERSONA_NAME, "") ?: "",
+            customPersonaPrompt = prefs.getString(KEY_CUSTOM_PERSONA_PROMPT, "") ?: "",
+            dndRespect = prefs.getBoolean(KEY_DND_RESPECT, true),
+            pttMode = prefs.getBoolean(KEY_PTT_MODE, false),
+            wakeSensitivity = prefs.getString(KEY_WAKE_SENSITIVITY, "NORMAL") ?: "NORMAL"
         )
     }
 
@@ -253,11 +278,18 @@ class MainActivity : ComponentActivity() {
             .putBoolean(KEY_REDUCE_MOTION, s.reduceMotion)
             .putBoolean(KEY_PANEL_HAPTICS, s.panelHaptics)
             .putInt(KEY_LAST_SEEN_VC, s.lastSeenVersionCode)
+            .putString(KEY_CUSTOM_PERSONA_NAME, s.customPersonaName)
+            .putString(KEY_CUSTOM_PERSONA_PROMPT, s.customPersonaPrompt)
+            .putBoolean(KEY_DND_RESPECT, s.dndRespect)
+            .putBoolean(KEY_PTT_MODE, s.pttMode)
+            .putString(KEY_WAKE_SENSITIVITY, s.wakeSensitivity)
             .apply()
     }
 
     companion object {
         const val EXTRA_OPEN_VOICE = "open_voice"
+        /** v1.9.0: shortcut/tile target screen (see handleNavIntent). */
+        const val EXTRA_OPEN_SCREEN = "open_screen"
         /** Wake word fired: show over the lock screen and turn it on. */
         const val EXTRA_FROM_WAKE = "from_wake"
         private const val PREFS_NAME = "jarvis_settings"
@@ -285,5 +317,10 @@ class MainActivity : ComponentActivity() {
         private const val KEY_REDUCE_MOTION = "reduce_motion"
         private const val KEY_PANEL_HAPTICS = "panel_haptics"
         private const val KEY_LAST_SEEN_VC = "last_seen_version_code"
+        private const val KEY_CUSTOM_PERSONA_NAME = "custom_persona_name"
+        private const val KEY_CUSTOM_PERSONA_PROMPT = "custom_persona_prompt"
+        private const val KEY_DND_RESPECT = "dnd_respect"
+        private const val KEY_PTT_MODE = "ptt_mode"
+        private const val KEY_WAKE_SENSITIVITY = "wake_sensitivity"
     }
 }

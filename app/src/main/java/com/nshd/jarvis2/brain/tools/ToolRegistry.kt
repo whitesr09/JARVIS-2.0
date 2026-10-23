@@ -187,6 +187,197 @@ object ToolRegistry {
                 properties = JSONObject().put("description", stringProperty("What to tap, described visually, e.g. \"the blue send arrow icon at the bottom right\"")),
                 required = listOf("description")
             )
+        ),
+        // ── v1.9.0 "More Powers" tools ─────────────────────────────────
+        // Risk classes: reads (read_page, clipboard_get) are SAFE and
+        // ledger-exempt; gestures/clipboard writes are plain mutations;
+        // every messaging tool stays behind the always-confirm gate in
+        // ToolExecutor, exactly like whatsapp_message.
+        ToolSpec(
+            "long_press",
+            "Long-press at screen coordinates given as percentages (0-100). Use for context menus and press-and-hold controls.",
+            schema(
+                properties = JSONObject()
+                    .put("x", numberProperty("Horizontal position as a percentage"))
+                    .put("y", numberProperty("Vertical position as a percentage")),
+                required = listOf("x", "y")
+            )
+        ),
+        ToolSpec(
+            "double_tap",
+            "Double-tap at screen coordinates given as percentages (0-100), e.g. to like a photo or zoom.",
+            schema(
+                properties = JSONObject()
+                    .put("x", numberProperty("Horizontal position as a percentage"))
+                    .put("y", numberProperty("Vertical position as a percentage")),
+                required = listOf("x", "y")
+            )
+        ),
+        ToolSpec(
+            "drag",
+            "Drag from one screen point to another, coordinates as percentages (0-100). Use for sliders, reordering and swipe-to-move interactions.",
+            schema(
+                properties = JSONObject()
+                    .put("from_x", numberProperty("Start X as a percentage"))
+                    .put("from_y", numberProperty("Start Y as a percentage"))
+                    .put("to_x", numberProperty("End X as a percentage"))
+                    .put("to_y", numberProperty("End Y as a percentage")),
+                required = listOf("from_x", "from_y", "to_x", "to_y")
+            )
+        ),
+        ToolSpec(
+            "pinch_zoom",
+            "Pinch at the screen centre: direction \"in\" zooms in (fingers spread), \"out\" zooms out. For maps and photos.",
+            schema(
+                properties = JSONObject().put(
+                    "direction",
+                    stringProperty("Pinch direction", listOf("in", "out"))
+                ),
+                required = listOf("direction")
+            )
+        ),
+        ToolSpec(
+            "set_slider",
+            "Set the first visible slider/seek bar (volume-style, brightness, seek) to a percentage of its range.",
+            schema(
+                properties = JSONObject().put("percent", integerProperty("Slider position, 0-100")),
+                required = listOf("percent")
+            )
+        ),
+        ToolSpec(
+            "read_page",
+            "Read the current screen's readable text (article/page content as plain text). Then summarise it or read it aloud for the user, as asked. Read-only.",
+            schema(properties = JSONObject())
+        ),
+        ToolSpec(
+            "undo_action",
+            "Undo the last reversible action (a text edit, a dictation insert, or an app open). Sends and playback cannot be undone.",
+            schema(properties = JSONObject())
+        ),
+        ToolSpec(
+            "clipboard_get",
+            "Read the current clipboard text. Read-only.",
+            schema(properties = JSONObject())
+        ),
+        ToolSpec(
+            "clipboard_set",
+            "Put text on the clipboard so the user (or a paste) can use it.",
+            schema(
+                properties = JSONObject().put("text", stringProperty("Text to copy to the clipboard")),
+                required = listOf("text")
+            )
+        ),
+        ToolSpec(
+            "copy_selection",
+            "Copy the currently selected text in the focused field to the clipboard.",
+            schema(properties = JSONObject())
+        ),
+        ToolSpec(
+            "paste_clipboard",
+            "Paste the clipboard contents into the currently focused text field. Entry is verified by reading the field back.",
+            schema(properties = JSONObject())
+        ),
+        ToolSpec(
+            "whatsapp_photo",
+            "Send the most recent photo from the gallery to a WhatsApp contact (name, alias or phone number). Always confirmed with the user first.",
+            schema(
+                properties = JSONObject().put("contact", stringProperty("Contact name, saved alias or phone number")),
+                required = listOf("contact")
+            )
+        ),
+        ToolSpec(
+            "whatsapp_reply_current",
+            "Reply to the WhatsApp chat that is currently open on screen. Always confirmed (chat name + full text) first.",
+            schema(
+                properties = JSONObject().put("message", stringProperty("Reply text")),
+                required = listOf("message")
+            )
+        ),
+        ToolSpec(
+            "instagram_message",
+            "Send an Instagram DM to a contact (name or username). Always confirmed with the user first.",
+            schema(
+                properties = JSONObject()
+                    .put("contact", stringProperty("Instagram contact name or username"))
+                    .put("message", stringProperty("Message text")),
+                required = listOf("contact", "message")
+            )
+        ),
+        ToolSpec(
+            "telegram_message",
+            "Send a Telegram message to a contact (name or username). Always confirmed with the user first.",
+            schema(
+                properties = JSONObject()
+                    .put("contact", stringProperty("Telegram contact name or username"))
+                    .put("message", stringProperty("Message text")),
+                required = listOf("contact", "message")
+            )
+        ),
+        ToolSpec(
+            "sms_message",
+            "Send an SMS to a contact name or phone number via the default SMS app. Always confirmed with the user first.",
+            schema(
+                properties = JSONObject()
+                    .put("contact", stringProperty("Contact name, saved alias or phone number"))
+                    .put("message", stringProperty("SMS text")),
+                required = listOf("contact", "message")
+            )
+        ),
+        ToolSpec(
+            "gmail_send",
+            "Send an email via Gmail. Always confirmed (recipient + subject + body) first.",
+            schema(
+                properties = JSONObject()
+                    .put("to", stringProperty("Recipient email address"))
+                    .put("subject", stringProperty("Email subject"))
+                    .put("body", stringProperty("Email body")),
+                required = listOf("to", "subject", "body")
+            )
+        ),
+        ToolSpec(
+            "set_alarm",
+            "Set an alarm in the Clock app (24-hour time).",
+            schema(
+                properties = JSONObject()
+                    .put("hour", integerProperty("Hour, 0-23"))
+                    .put("minute", integerProperty("Minute, 0-59"))
+                    .put("label", stringProperty("Alarm label (optional)")),
+                required = listOf("hour", "minute")
+            )
+        ),
+        ToolSpec(
+            "set_timer",
+            "Start a countdown timer in the Clock app.",
+            schema(
+                properties = JSONObject()
+                    .put("seconds", integerProperty("Timer length in seconds"))
+                    .put("label", stringProperty("Timer label (optional)")),
+                required = listOf("seconds")
+            )
+        ),
+        ToolSpec(
+            "calendar_event",
+            "Create a calendar event starting in N minutes from now. The calendar app opens with the draft filled in for the user to save.",
+            schema(
+                properties = JSONObject()
+                    .put("title", stringProperty("Event title"))
+                    .put("start_in_minutes", integerProperty("Minutes from now until the event starts"))
+                    .put("duration_minutes", integerProperty("Event length in minutes")),
+                required = listOf("title", "start_in_minutes")
+            )
+        ),
+        ToolSpec(
+            "share_screenshot",
+            "Share the current screen (or the latest Jarvis screenshot) through the Android share sheet — the user picks the target app.",
+            schema(properties = JSONObject())
+        ),
+        ToolSpec(
+            "save_note",
+            "Save a quick note to Memory Core (Notes category) — for \"note that …\" requests.",
+            schema(
+                properties = JSONObject().put("text", stringProperty("The note text")),
+                required = listOf("text")
+            )
         )
     )
 

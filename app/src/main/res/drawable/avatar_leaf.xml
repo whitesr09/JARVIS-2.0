@@ -1,0 +1,28 @@
+<!-- Leaf — green leaf buddy, character only, no backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FF58B368"
+        android:pathData="M24,5 C36,12 40,24 24,43 C8,24 12,12 24,5 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M24,11 V37"
+        android:strokeWidth="2"
+        android:strokeColor="#FF2E7D4F"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#FF1E4634"
+        android:pathData="M18.2,23 a1.7,1.7 0 1,0 3.4,0 a1.7,1.7 0 1,0 -3.4,0" />
+    <path
+        android:fillColor="#FF1E4634"
+        android:pathData="M26.4,23 a1.7,1.7 0 1,0 3.4,0 a1.7,1.7 0 1,0 -3.4,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M20.5,27.5 q3.5,3 7,0"
+        android:strokeWidth="2"
+        android:strokeColor="#FF1E4634"
+        android:strokeLineCap="round" />
+</vector>

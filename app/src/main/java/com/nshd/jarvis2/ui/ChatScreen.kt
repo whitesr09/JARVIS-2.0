@@ -344,6 +344,54 @@ fun ChatScreen(
         }
     }
 
+    /**
+     * v1.9.0 (#68): export the visible conversation as a .txt file
+     * via the share sheet (FileProvider exposes cacheDir already).
+     */
+    fun exportConversation() {
+        val exportable = messages.filter { !it.isTool && it.text.isNotBlank() }
+        if (exportable.isEmpty()) {
+            hint = "Nothing to export yet"
+            return
+        }
+        val text = buildString {
+            appendLine("Jarvis conversation — exported from the app")
+            appendLine()
+            exportable.forEach { msg ->
+                append(if (msg.fromUser) "You: " else "${settings.assistantName}: ")
+                appendLine(msg.text)
+                appendLine()
+            }
+        }
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    val file = java.io.File(context.cacheDir, "jarvis-chat-export.txt")
+                    file.writeText(text)
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        context, "${context.packageName}.fileprovider", file
+                    )
+                    val intent = android.content.Intent(android.content.Intent.ACTION_SEND)
+                        .apply {
+                            type = "text/plain"
+                            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                            putExtra(
+                                android.content.Intent.EXTRA_SUBJECT,
+                                "Jarvis conversation"
+                            )
+                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                    context.startActivity(
+                        android.content.Intent.createChooser(intent, "Export conversation")
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                    true
+                }.getOrDefault(false)
+            }
+            hint = if (ok) "Conversation export opened" else "Export failed"
+        }
+    }
+
     fun send() {
         val text = input.trim()
         if (text.isEmpty() || sending) return
@@ -560,7 +608,8 @@ fun ChatScreen(
                     onDismiss = { headerMenuOpen = false },
                     onClear = { showClearConfirm = true },
                     onOpenVoice = onOpenVoice,
-                    onSearch = { searchOpen = true }
+                    onSearch = { searchOpen = true },
+                    onExport = { exportConversation() }
                 )
             }
             Column(
@@ -830,7 +879,8 @@ fun ChatScreen(
                             onDismiss = { composerMenuOpen = false },
                             onClear = { showClearConfirm = true },
                             onOpenVoice = onOpenVoice,
-                            onSearch = { searchOpen = true }
+                            onSearch = { searchOpen = true },
+                            onExport = { exportConversation() }
                         )
                     }
                     // #72: inline dictation — fills the composer, never
@@ -961,7 +1011,8 @@ private fun ChatOptionsMenu(
     onDismiss: () -> Unit,
     onClear: () -> Unit,
     onOpenVoice: () -> Unit,
-    onSearch: () -> Unit = {}
+    onSearch: () -> Unit = {},
+    onExport: () -> Unit = {}
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(
@@ -972,6 +1023,16 @@ private fun ChatOptionsMenu(
             },
             leadingIcon = {
                 Icon(imageVector = Icons.Filled.Search, contentDescription = null)
+            }
+        )
+        DropdownMenuItem(
+            text = { Text("Export conversation (.txt)") },
+            onClick = {
+                onDismiss()
+                onExport()
+            },
+            leadingIcon = {
+                Icon(imageVector = Icons.Filled.Share, contentDescription = null)
             }
         )
         DropdownMenuItem(

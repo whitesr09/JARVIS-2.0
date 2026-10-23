@@ -293,17 +293,68 @@ class WakeWordService : Service(), RecognitionListener {
 
     private fun checkWakePhrase(hypothesis: String?) {
         if (hypothesis.isNullOrBlank()) return
-        val text = try {
-            JSONObject(hypothesis).optString("text").trim().lowercase()
+        val json = try {
+            JSONObject(hypothesis)
         } catch (e: Exception) {
             return
         }
+        val text = json.optString("text").trim().lowercase()
         if (text.contains("hey jarvis") || text == "jarvis") {
             val now = System.currentTimeMillis()
             if (now - lastWakeAtMs < WAKE_DEBOUNCE_MS) return
+            // v1.9.0 (#9): sensitivity gate — the recognizer's word
+            // confidences for the wake words must clear the threshold
+            // for the user's sensitivity setting. Below it, the phrase
+            // is logged as a (visible) near-miss instead of waking.
+            val confidence = wakeConfidence(json)
+            val threshold = wakeThreshold()
+            if (confidence < threshold) {
+                com.nshd.jarvis2.core.WakeEvents.record(
+                    this,
+                    "Heard \"hey jarvis\" at ${(confidence * 100).toInt()}% " +
+                        "confidence — below the $threshold threshold, ignored"
+                )
+                com.nshd.jarvis2.core.AppLog.d(
+                    "Wake",
+                    "wake phrase below sensitivity threshold " +
+                        "(conf=$confidence < $threshold)"
+                )
+                return
+            }
             lastWakeAtMs = now
             com.nshd.jarvis2.core.AppLog.i("Wake", "wake phrase detected")
+            com.nshd.jarvis2.core.WakeEvents.record(
+                this,
+                "Wake fired — \"hey jarvis\" at ${(confidence * 100).toInt()}% confidence"
+            )
             mainHandler.post { onWake() }
+        }
+    }
+
+    /** v1.9.0 (#9): mean confidence of the wake words in a Vosk result. */
+    private fun wakeConfidence(json: JSONObject): Float {
+        val words = json.optJSONArray("result") ?: return 0.75f
+        var sum = 0f
+        var count = 0
+        for (i in 0 until words.length()) {
+            val entry = words.optJSONObject(i) ?: continue
+            val word = entry.optString("word").lowercase()
+            if (word == "hey" || word == "jarvis") {
+                sum += entry.optDouble("conf", 0.75).toFloat()
+                count++
+            }
+        }
+        return if (count == 0) 0.75f else sum / count
+    }
+
+    /** v1.9.0 (#9): confidence threshold for the sensitivity setting. */
+    private fun wakeThreshold(): Float {
+        val setting = getSharedPreferences("jarvis_settings", MODE_PRIVATE)
+            .getString("wake_sensitivity", "NORMAL") ?: "NORMAL"
+        return when (setting) {
+            "LOW" -> 0.85f
+            "HIGH" -> 0.0f
+            else -> 0.55f
         }
     }
 

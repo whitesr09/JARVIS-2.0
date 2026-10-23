@@ -1,0 +1,28 @@
+<!-- Fox — pointy ears + white muzzle, character only, no backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FFF4842B"
+        android:pathData="M11,19 L13.5,5 L23.5,11.5 Z" />
+    <path
+        android:fillColor="#FFF4842B"
+        android:pathData="M37,19 L34.5,5 L24.5,11.5 Z" />
+    <path
+        android:fillColor="#FFF4842B"
+        android:pathData="M9.5,27 a14.5,14.5 0 1,0 29,0 a14.5,14.5 0 1,0 -29,0" />
+    <path
+        android:fillColor="#FFFFF3E0"
+        android:pathData="M17.5,33.5 a6.5,6.5 0 1,0 13,0 a6.5,6.5 0 1,0 -13,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M15.2,24.5 a1.9,1.9 0 1,0 3.8,0 a1.9,1.9 0 1,0 -3.8,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M29,24.5 a1.9,1.9 0 1,0 3.8,0 a1.9,1.9 0 1,0 -3.8,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M22.2,30.5 a1.8,1.8 0 1,0 3.6,0 a1.8,1.8 0 1,0 -3.6,0" />
+</vector>

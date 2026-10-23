@@ -83,6 +83,20 @@ class ScreenReader(private val service: JarvisAccessibilityService) {
         return elements
     }
 
+    /**
+     * v1.9.0 (#39): the readable text of the current screen — every
+     * visible label in reading order, de-duplicated, for the
+     * read_page tool (the pipeline then reads it aloud or summarises
+     * it). Capped so a dense screen can't flood the prompt.
+     */
+    fun pageText(maxChars: Int = 4_000): String {
+        val lines = snapshot()
+            .map { it.label.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+        return lines.joinToString("\n").take(maxChars)
+    }
+
     /** Screen signature: package plus the bounded tree's identifying data. */
     fun signature(): Int {
         val scan = scan()

@@ -78,6 +78,9 @@ fun MemoryScreen(onBack: () -> Unit) {
 
     var facts by remember { mutableStateOf<List<Fact>>(emptyList()) }
     var totalCount by remember { mutableStateOf(0) }
+    // v1.9.0 (#73): review queue; (#74): duplicate-merge suggestions.
+    var pending by remember { mutableStateOf<List<Fact>>(emptyList()) }
+    var dupeGroups by remember { mutableStateOf<List<List<Fact>>>(emptyList()) }
     var search by remember { mutableStateOf("") }
     var categoryFilter by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<Fact?>(null) } // null + showEditor → new fact
@@ -94,6 +97,7 @@ fun MemoryScreen(onBack: () -> Unit) {
             }
             facts = list
             totalCount = count
+            pending = withContext(Dispatchers.IO) { db.pendingFacts() }
         }
     }
 
@@ -199,6 +203,123 @@ fun MemoryScreen(onBack: () -> Unit) {
             }
             Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
 
+            // ── v1.9.0 (#73): review queue — auto-extracted facts
+            // wait here for one-tap approve / reject ──────────────────
+            if (pending.isNotEmpty()) {
+                Card(
+                    shape = RoundedCornerShape(JarvisDimens.radiusCard),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = JarvisDimens.spaceLg)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text(
+                            text = "Review queue — ${pending.size} auto-saved " +
+                                if (pending.size == 1) "fact" else "facts",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Jarvis noticed these in conversation. " +
+                                "Approve to keep them in memory, reject to drop them.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        pending.forEach { fact ->
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "[${fact.category}] ${fact.text}",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                TextButton(onClick = {
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            db.setFactPending(fact.id, false)
+                                        }
+                                        reload()
+                                    }
+                                }) { Text("Approve") }
+                                TextButton(onClick = {
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            db.deleteFact(fact.id)
+                                        }
+                                        reload()
+                                    }
+                                }) { Text("Reject") }
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
+            }
+
+            // ── v1.9.0 (#74): memory tidy — duplicate merge suggestions ──
+            Row(
+                modifier = Modifier.padding(horizontal = JarvisDimens.spaceLg),
+                horizontalArrangement = Arrangement.spacedBy(JarvisDimens.spaceSm)
+            ) {
+                OutlinedButton(onClick = {
+                    scope.launch {
+                        dupeGroups = withContext(Dispatchers.IO) {
+                            findDuplicateGroups(db.allFacts(null, null))
+                        }
+                        if (dupeGroups.isEmpty()) {
+                            snackbar.showSnackbar("No duplicates found — memory is tidy.")
+                        }
+                    }
+                }) { Text("Find duplicates") }
+            }
+            if (dupeGroups.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
+                Card(
+                    shape = RoundedCornerShape(JarvisDimens.radiusCard),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = JarvisDimens.spaceLg)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text(
+                            text = "Possible duplicates",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        dupeGroups.forEach { group ->
+                            Spacer(modifier = Modifier.height(8.dp))
+                            group.forEach { fact ->
+                                Text(
+                                    text = "• [${fact.category}] ${fact.text}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                TextButton(onClick = {
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            group.drop(1).forEach { db.deleteFact(it.id) }
+                                        }
+                                        dupeGroups = dupeGroups.filter { it != group }
+                                        reload()
+                                    }
+                                }) { Text("Merge — keep first") }
+                                TextButton(onClick = {
+                                    dupeGroups = dupeGroups.filter { it != group }
+                                }) { Text("Keep all") }
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
+            }
+
             if (facts.isEmpty()) {
                 // #96: shared friendly empty state; the action reuses
                 // this screen's existing add-fact editor entry point.
@@ -294,6 +415,47 @@ fun MemoryScreen(onBack: () -> Unit) {
 }
 
 /** Filter chip with the D2 selected treatment: lavender fill + check. */
+/**
+ * v1.9.0 (#74): group facts that say (nearly) the same thing —
+ * identical after normalisation, or ≥70% shared word tokens
+ * (Jaccard). Greedy clustering is fine at personal-memory scale.
+ */
+private fun findDuplicateGroups(facts: List<Fact>): List<List<Fact>> {
+    fun normalize(text: String): String = text.lowercase()
+        .replace(Regex("[^a-z0-9 ]"), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
+    fun tokens(text: String): Set<String> =
+        normalize(text).split(" ").filter { it.isNotBlank() }.toSet()
+
+    fun similar(a: Fact, b: Fact): Boolean {
+        if (normalize(a.text) == normalize(b.text)) return true
+        val ta = tokens(a.text)
+        val tb = tokens(b.text)
+        if (ta.isEmpty() || tb.isEmpty()) return false
+        val union = (ta + tb).size
+        if (union == 0) return false
+        return (ta intersect tb).size.toDouble() / union >= 0.7
+    }
+
+    val used = mutableSetOf<Long>()
+    val groups = mutableListOf<List<Fact>>()
+    for (fact in facts) {
+        if (fact.id in used) continue
+        val group = mutableListOf(fact)
+        for (other in facts) {
+            if (other.id == fact.id || other.id in used) continue
+            if (similar(fact, other)) group += other
+        }
+        if (group.size > 1) {
+            group.forEach { used += it.id }
+            groups += group
+        }
+    }
+    return groups
+}
+
 @Composable
 private fun MemoryFilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
     FilterChip(

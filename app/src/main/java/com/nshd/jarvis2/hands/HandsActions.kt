@@ -620,6 +620,310 @@ object HandsActions {
         ActionResult(ok, if (ok) "Screen locked." else "The lock action was not accepted.")
     }
 
+    // ── v1.9.0 (#32/#33): gesture tools ──────────────────────────────
+    //
+    // long-press / double-tap / drag / pinch / slider-set. All are
+    // plain gesture dispatches through the same [dispatchSwipe]
+    // plumbing as taps — no new guard surface (a coordinate gesture
+    // carries no label; the SensitiveTapGuard story is unchanged
+    // from tap_percent's).
+
+    /** #32: press-and-hold at a percentage point. */
+    suspend fun longPressPercent(
+        xPercent: Double,
+        yPercent: Double,
+        durationMs: Long = 700
+    ): ActionResult = serialized {
+        val service = serviceOrNull() ?: return@serialized disabled()
+        if (xPercent !in 0.0..100.0 || yPercent !in 0.0..100.0) {
+            return@serialized ActionResult(false, "Percentages must be between 0 and 100.")
+        }
+        val metrics = service.resources.displayMetrics
+        val x = metrics.widthPixels * (xPercent / 100.0).toFloat()
+        val y = metrics.heightPixels * (yPercent / 100.0).toFloat()
+        val ok = dispatchSwipe(service, x, y, x, y, durationMs)
+        com.nshd.jarvis2.core.AppLog.d("Hands", "long-press at $xPercent%, $yPercent% (ok=$ok)")
+        ActionResult(ok, if (ok) "Long-pressed at $xPercent%, $yPercent%." else "Long-press was not dispatched.")
+    }
+
+    /** #32: two quick taps at a percentage point. */
+    suspend fun doubleTapPercent(xPercent: Double, yPercent: Double): ActionResult =
+        serialized {
+            val service = serviceOrNull() ?: return@serialized disabled()
+            if (xPercent !in 0.0..100.0 || yPercent !in 0.0..100.0) {
+                return@serialized ActionResult(false, "Percentages must be between 0 and 100.")
+            }
+            val metrics = service.resources.displayMetrics
+            val x = metrics.widthPixels * (xPercent / 100.0).toFloat()
+            val y = metrics.heightPixels * (yPercent / 100.0).toFloat()
+            val first = dispatchSwipe(service, x, y, x, y, durationMs = 50)
+            delay(120)
+            val second = dispatchSwipe(service, x, y, x, y, durationMs = 50)
+            val ok = first && second
+            com.nshd.jarvis2.core.AppLog.d("Hands", "double-tap at $xPercent%, $yPercent% (ok=$ok)")
+            ActionResult(ok, if (ok) "Double-tapped at $xPercent%, $yPercent%." else "Double-tap was not fully dispatched.")
+        }
+
+    /** #32: drag from one percentage point to another. */
+    suspend fun dragPercent(
+        fromX: Double,
+        fromY: Double,
+        toX: Double,
+        toY: Double,
+        durationMs: Long = 600
+    ): ActionResult = serialized {
+        val service = serviceOrNull() ?: return@serialized disabled()
+        val points = listOf(fromX, fromY, toX, toY)
+        if (points.any { it !in 0.0..100.0 }) {
+            return@serialized ActionResult(false, "Percentages must be between 0 and 100.")
+        }
+        val metrics = service.resources.displayMetrics
+        val w = metrics.widthPixels.toFloat()
+        val h = metrics.heightPixels.toFloat()
+        val ok = dispatchSwipe(
+            service,
+            w * (fromX / 100.0).toFloat(), h * (fromY / 100.0).toFloat(),
+            w * (toX / 100.0).toFloat(), h * (toY / 100.0).toFloat(),
+            durationMs
+        )
+        com.nshd.jarvis2.core.AppLog.d("Hands", "drag ($fromX,$fromY)->($toX,$toY) (ok=$ok)")
+        ActionResult(ok, if (ok) "Dragged from $fromX%, $fromY% to $toX%, $toY%." else "Drag was not dispatched.")
+    }
+
+    /** #33: two-finger pinch — [zoomIn] spreads the fingers, else closes them. */
+    suspend fun pinch(zoomIn: Boolean): ActionResult = serialized {
+        val service = serviceOrNull() ?: return@serialized disabled()
+        val metrics = service.resources.displayMetrics
+        val cx = metrics.widthPixels * 0.5f
+        val cy = metrics.heightPixels * 0.5f
+        val near = metrics.widthPixels * 0.08f
+        val far = metrics.widthPixels * 0.32f
+        val (startOffset, endOffset) = if (zoomIn) near to far else far to near
+        fun fingerPath(dx: Float, dy: Float): Path = Path().apply {
+            moveTo(cx + dx * startOffset, cy + dy * startOffset)
+            lineTo(cx + dx * endOffset, cy + dy * endOffset)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(fingerPath(-1f, -1f), 0, 350))
+            .addStroke(GestureDescription.StrokeDescription(fingerPath(1f, 1f), 0, 350))
+            .build()
+        val ok = suspendCancellableCoroutine { continuation ->
+            val callback = object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (continuation.isActive) continuation.resume(true)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    if (continuation.isActive) continuation.resume(false)
+                }
+            }
+            val accepted = try {
+                service.dispatchGesture(gesture, callback, null)
+            } catch (e: Exception) {
+                false
+            }
+            if (!accepted && continuation.isActive) continuation.resume(false)
+        }
+        com.nshd.jarvis2.core.AppLog.d("Hands", "pinch ${if (zoomIn) "out (zoom in)" else "in (zoom out)"} (ok=$ok)")
+        ActionResult(
+            ok,
+            if (ok) "Pinch ${if (zoomIn) "zoomed in" else "zoomed out"}."
+            else "Pinch gesture was not dispatched."
+        )
+    }
+
+    /**
+     * #32: set the first visible slider/seek bar to [percent] of its
+     * range — ACTION_SET_PROGRESS when the node exposes range info,
+     * else a drag along the bar's track to the target position.
+     */
+    suspend fun setSliderPercent(percent: Int): ActionResult = serialized {
+        val service = serviceOrNull() ?: return@serialized disabled()
+        val target = percent.coerceIn(0, 100)
+        val reader = service.screenReader()
+        val slider = reader.snapshot().firstOrNull {
+            it.className.contains("SeekBar", ignoreCase = true) ||
+                it.className.contains("Slider", ignoreCase = true)
+        } ?: return@serialized ActionResult(
+            false, "No slider or seek bar is visible on this screen."
+        )
+        val root = service.activeRoot()
+            ?: return@serialized ActionResult(false, "No active window is available.")
+        val node = resolveNode(root, slider)
+        val range = node?.rangeInfo
+        if (node != null && range != null) {
+            val value = range.min + (range.max - range.min) * (target / 100f)
+            val args = Bundle().apply {
+                putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE, value)
+            }
+            val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_PROGRESS, args)
+            com.nshd.jarvis2.core.AppLog.d("Hands", "slider set_progress $target% (ok=$ok)")
+            if (ok) return@serialized ActionResult(true, "Slider set to $target%.")
+        }
+        // Fallback: drag the thumb along the track.
+        val bounds = slider.bounds
+        if (bounds.width() <= 0) {
+            return@serialized ActionResult(false, "The slider has no measurable track.")
+        }
+        val y = bounds.exactCenterY()
+        val fromX = bounds.left + bounds.width() * 0.5f
+        val toX = bounds.left + bounds.width() * (target / 100f)
+        val ok = dispatchSwipe(service, fromX, y, toX, y, durationMs = 300)
+        com.nshd.jarvis2.core.AppLog.d("Hands", "slider drag to $target% (ok=$ok)")
+        ActionResult(ok, if (ok) "Slider dragged to $target%." else "Slider could not be set.")
+    }
+
+    // ── v1.9.0 (#41): undo last action ───────────────────────────────
+    //
+    // A small in-memory stack of REVERSIBLE action records, pushed by
+    // ToolExecutor after a successful mutating tool. Only inverses
+    // that are honest are recorded: a text edit restores the field's
+    // previous content, a dictation insert deletes its characters,
+    // an opened app goes Back. Sends and plays are NEVER recorded —
+    // they can't be unsent/unplayed, and pretending otherwise would
+    // be a lie in the UI.
+
+    data class UndoEntry(val label: String, val kind: String, val payload: String)
+
+    private val undoStack = ArrayDeque<UndoEntry>()
+
+    @Synchronized
+    fun pushUndo(entry: UndoEntry) {
+        undoStack.addLast(entry)
+        while (undoStack.size > 10) undoStack.removeFirst()
+        com.nshd.jarvis2.core.AppLog.d("Hands", "undo recorded: ${entry.label}")
+    }
+
+    @Synchronized
+    fun peekUndo(): UndoEntry? = undoStack.lastOrNull()
+
+    /** Execute the inverse of the most recent recorded action. */
+    suspend fun undoLast(): ActionResult {
+        val entry = synchronized(this) {
+            if (undoStack.isEmpty()) null else undoStack.removeLast()
+        } ?: return ActionResult(
+            false,
+            "Nothing to undo — no reversible action was recorded this session."
+        )
+        com.nshd.jarvis2.core.AppLog.i("Hands", "undo: ${entry.label} (kind=${entry.kind})")
+        return when (entry.kind) {
+            "restore_text" -> restoreFocusedText(entry.payload)
+            "delete_chars" -> editTextOnFocused(
+                "delete_last_chars", entry.payload.toIntOrNull() ?: 0
+            )
+            "press_back" -> pressKey("back")
+            else -> ActionResult(false, "That action can't be undone.")
+        }
+    }
+
+    /** Replace the focused field's whole content (undo's text restore). */
+    suspend fun restoreFocusedText(text: String): ActionResult = serialized {
+        val service = serviceOrNull() ?: return@serialized disabled()
+        val root = service.activeRoot()
+            ?: return@serialized ActionResult(false, "No active window is available.")
+        val target = resolveEditableTarget(root)
+            ?: return@serialized ActionResult(false, "The text field is no longer on screen.")
+        val accepted = target.node.performAction(
+            AccessibilityNodeInfo.ACTION_SET_TEXT,
+            Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text
+                )
+            }
+        )
+        delay(VERIFY_DELAY_MS)
+        val readBack = freshTarget(service, target.descriptor)?.text
+        if (accepted && readBack == text) {
+            ActionResult(true, "Restored the field's previous text.")
+        } else {
+            ActionResult(false, "The previous text could not be restored.")
+        }
+    }
+
+    /** The focused field's current selection text, or null (for #64 diffs). */
+    fun focusedSelectionText(): String? {
+        val service = serviceOrNull() ?: return null
+        val root = service.activeRoot() ?: return null
+        val target = resolveEditableTarget(root) ?: return null
+        val start = target.selectionStart
+        val end = target.selectionEnd
+        if (start < 0 || end <= start || end > target.text.length) return null
+        return target.text.substring(start, end)
+    }
+
+    /** The focused field's full current text, or null when none is focused. */
+    fun focusedFieldText(): String? {
+        val service = serviceOrNull() ?: return null
+        val root = service.activeRoot() ?: return null
+        return resolveEditableTarget(root)?.text
+    }
+
+    // ── v1.9.0 (#42): clipboard tools ────────────────────────────────
+
+    /** Current clipboard text (null when empty/unavailable). */
+    fun clipboardText(): String? {
+        val service = serviceOrNull() ?: return null
+        val clipboard = service.getSystemService(Context.CLIPBOARD_SERVICE)
+            as? ClipboardManager ?: return null
+        val clip = clipboard.primaryClip ?: return null
+        if (clip.itemCount == 0) return null
+        return clip.getItemAt(0)?.coerceToText(service)?.toString()
+    }
+
+    /** Put [text] on the clipboard. */
+    fun setClipboardText(text: String): Boolean {
+        val service = serviceOrNull() ?: return false
+        val clipboard = service.getSystemService(Context.CLIPBOARD_SERVICE)
+            as? ClipboardManager ?: return false
+        clipboard.setPrimaryClip(ClipData.newPlainText("Jarvis", text))
+        return true
+    }
+
+    /** Copy the focused field's current selection to the clipboard. */
+    suspend fun copySelection(): ActionResult = serialized {
+        val service = serviceOrNull() ?: return@serialized disabled()
+        val root = service.activeRoot()
+            ?: return@serialized ActionResult(false, "No active window is available.")
+        val target = resolveEditableTarget(root)
+            ?: return@serialized ActionResult(
+                false, "No text field is focused — select text first."
+            )
+        val copied = target.node.performAction(AccessibilityNodeInfo.ACTION_COPY)
+        if (!copied) {
+            return@serialized ActionResult(
+                false, "Nothing was copied — is any text selected?"
+            )
+        }
+        delay(100)
+        val clip = clipboardText()
+        ActionResult(
+            true,
+            "Copied to clipboard" +
+                (clip?.let { ": \"${it.take(60)}\"" } ?: ".")
+        )
+    }
+
+    /** Paste the clipboard into the focused field (verified by read-back). */
+    suspend fun pasteIntoFocused(): ActionResult = serialized {
+        val service = serviceOrNull() ?: return@serialized disabled()
+        val clip = clipboardText()
+            ?: return@serialized ActionResult(false, "The clipboard is empty.")
+        val root = service.activeRoot()
+            ?: return@serialized ActionResult(false, "No active window is available.")
+        val target = resolveEditableTarget(root)
+            ?: return@serialized ActionResult(
+                false, "No text field is focused — tap into a field first."
+            )
+        val pasted = target.node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+        delay(VERIFY_DELAY_MS)
+        val readBack = freshTarget(service, target.descriptor)?.text.orEmpty()
+        if (pasted && readBack.contains(clip.take(20))) {
+            ActionResult(true, "Pasted ${clip.length} characters from the clipboard.")
+        } else {
+            ActionResult(false, "Paste was not verified in the field.")
+        }
+    }
+
     suspend fun pressKey(key: String): ActionResult = serialized {
         val service = serviceOrNull() ?: return@serialized disabled()
         val action = when (key.lowercase()) {

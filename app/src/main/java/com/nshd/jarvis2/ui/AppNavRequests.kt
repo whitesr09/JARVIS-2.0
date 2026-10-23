@@ -24,4 +24,21 @@ object AppNavRequests {
         _voiceRequested.value = false
         return true
     }
+
+    // ── v1.9.0 (parent extra): launcher static-shortcut targets ──────
+    // "chat" / "handsfree" (the Hands-Free screen also hosts the
+    // self-test card, so the Self-test shortcut lands there too).
+    private val _screenRequested = MutableStateFlow<String?>(null)
+    val screenRequested: StateFlow<String?> = _screenRequested.asStateFlow()
+
+    fun requestScreen(target: String) {
+        _screenRequested.value = target
+    }
+
+    /** Returns (and clears) the pending shortcut target, if any. */
+    fun consumeScreenRequest(): String? {
+        val target = _screenRequested.value
+        _screenRequested.value = null
+        return target
+    }
 }

@@ -1,0 +1,34 @@
+<!-- Mushroom — spotted cap + stem, character only, no backdrop. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FFFFE8D6"
+        android:pathData="M17.5,21.5 h13 l1.6,11.5 a3.2,3.2 0 0 1 -3.2,3.6 h-9.8 a3.2,3.2 0 0 1 -3.2,-3.6 Z" />
+    <path
+        android:fillColor="#FFFF5A5F"
+        android:pathData="M6.5,22 a17.5,12.5 0 0 1 35,0 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M14.4,13.5 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M25.9,10.5 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M31.4,16.5 a2.3,2.3 0 1,0 4.6,0 a2.3,2.3 0 1,0 -4.6,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M19.6,27.5 a1.4,1.4 0 1,0 2.8,0 a1.4,1.4 0 1,0 -2.8,0" />
+    <path
+        android:fillColor="#FF2F3542"
+        android:pathData="M25.6,27.5 a1.4,1.4 0 1,0 2.8,0 a1.4,1.4 0 1,0 -2.8,0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M21.5,31 q2.5,2.2 5,0"
+        android:strokeWidth="1.8"
+        android:strokeColor="#FF2F3542"
+        android:strokeLineCap="round" />
+</vector>
