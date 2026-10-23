@@ -1662,13 +1662,31 @@ object VoiceSessionManager {
 
     // ── F8 (#5) offline STT fallback plumbing ──────────────────────────
 
-    /** True when the device currently has no internet-capable network. */
+    /**
+     * True when the device currently has no internet-capable network.
+     *
+     * v1.9.1 hotfix: the whole check is guarded — ACCESS_NETWORK_STATE
+     * was missing from the manifest until this release, and
+     * [ConnectivityManager.getActiveNetwork] throws SecurityException
+     * without it (the v1.9.0 crash on the Live → Universal fallback
+     * path). Any failure here now means "treat as online" (the normal
+     * SpeechRecognizer path) instead of crashing a voice start.
+     */
     private fun isDeviceOffline(context: Context): Boolean {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
-            as? ConnectivityManager ?: return false
-        val network = cm.activeNetwork ?: return true
-        val caps = cm.getNetworkCapabilities(network) ?: return true
-        return !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+                as? ConnectivityManager ?: return false
+            val network = cm.activeNetwork ?: return true
+            val caps = cm.getNetworkCapabilities(network) ?: return true
+            !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        } catch (e: Exception) {
+            AppLog.w(
+                "Voice",
+                "offline check failed (${e.javaClass.simpleName}: " +
+                    "${e.message}) — treating device as online"
+            )
+            false
+        }
     }
 
     /** Listen on whichever recognizer currently owns the cycle. */

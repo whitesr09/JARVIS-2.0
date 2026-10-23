@@ -91,6 +91,17 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v1.9.1 — Hotfix",
+            body = "Fix: voice crash when Live fell back to the " +
+                "Universal engine (missing ACCESS_NETWORK_STATE " +
+                "permission made the offline check throw a " +
+                "SecurityException). The permission is now declared " +
+                "and the check itself can never crash a voice start " +
+                "again — any failure just treats the device as online."
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+
+        InfoCard(
             title = "v1.9.0 — More Powers: new hands, more messaging, smarter memory",
             body = "A big powers release. New tools: long-press, " +
                 "double-tap, drag and pinch gestures, slider control, " +
