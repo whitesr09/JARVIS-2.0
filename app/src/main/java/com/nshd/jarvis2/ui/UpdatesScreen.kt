@@ -91,6 +91,23 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v2.0.1 — Live self-healing + overlay appearance",
+            body = "Live fix: Gemini was rejecting the voice setup " +
+                "itself (close code 1007 — an invalid speech-sensitivity " +
+                "value), so Live never connected on strict models like " +
+                "gemini-3.8-live. The value is corrected, and the setup " +
+                "is now SELF-HEALING: if a model ever rejects a setup " +
+                "option again, Jarvis removes just that option and " +
+                "retries the same model automatically — and never sends " +
+                "the rejected option again that run. New in Hands-Free " +
+                "& App Control → Overlay appearance: an Avatar opacity " +
+                "slider, plus Panel size (80–120%) and Panel background " +
+                "opacity sliders for the floating task panel — all " +
+                "applied live."
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+
+        InfoCard(
             title = "v2.0.0 — Brain Upgrade: Jarvis learns",
             body = "The final phase of the Next-100 plan (all 115 " +
                 "items now shipped). Learned macros: finish a task " +

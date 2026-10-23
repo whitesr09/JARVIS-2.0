@@ -42,6 +42,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -88,6 +89,7 @@ import kotlinx.coroutines.withContext
 @Composable
 fun HandsFreeScreen(
     settings: JarvisSettings,
+    onSettingsChange: (JarvisSettings) -> Unit,
     onBack: () -> Unit,
     onOpenPermissions: () -> Unit,
     modifier: Modifier = Modifier
@@ -277,6 +279,92 @@ fun HandsFreeScreen(
                     }
                 }
             }
+        }
+
+        // ── Overlay appearance (v2.0.1) ────────────────────────────────
+        SectionLabel(
+            text = "OVERLAY APPEARANCE",
+            modifier = Modifier.padding(
+                top = JarvisDimens.sectionGap,
+                bottom = JarvisDimens.spaceSm
+            )
+        )
+        GlassCard {
+            Text(
+                text = "Make the floating avatar see-through, and resize " +
+                    "or fade the floating task panel's background. " +
+                    "Changes apply live while the overlay is running.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Avatar opacity",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "${(settings.overlayAvatarOpacity * 100).toInt()}%",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Slider(
+                value = settings.overlayAvatarOpacity,
+                onValueChange = {
+                    onSettingsChange(settings.copy(overlayAvatarOpacity = it))
+                },
+                valueRange = 0.25f..1.0f,
+                steps = 14,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Panel size",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "${settings.panelSizePercent}%",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Slider(
+                value = settings.panelSizePercent.toFloat(),
+                onValueChange = {
+                    onSettingsChange(
+                        settings.copy(
+                            panelSizePercent = it.toInt().coerceIn(80, 120)
+                        )
+                    )
+                },
+                valueRange = 80f..120f,
+                steps = 39,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Panel background opacity",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "${(settings.panelBgOpacity * 100).toInt()}%",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Slider(
+                value = settings.panelBgOpacity,
+                onValueChange = {
+                    onSettingsChange(settings.copy(panelBgOpacity = it))
+                },
+                valueRange = 0.35f..1.0f,
+                steps = 12,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
 
         // ── How it works ───────────────────────────────────────────────

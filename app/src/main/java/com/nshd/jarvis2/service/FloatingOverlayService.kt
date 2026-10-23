@@ -138,6 +138,19 @@ class FloatingOverlayService : Service() {
     private var lastHapticItemId: Long = -1L
     private var lastHapticDoneCount: Int = 0
     private var panelHapticsEnabled: Boolean = true
+
+    // ── v2.0.1: overlay appearance (avatar opacity / panel size /
+    // panel background opacity) — mirrors of the JarvisSettings
+    // values, re-read with the other panel settings (onCreate +
+    // every onStartCommand) and applied by applyOverlayAppearance().
+    private var overlayAvatarOpacity: Float = 1.0f
+    private var panelSizePercent: Int = 100
+    private var panelBgOpacity: Float = 0.97f
+    /** Unscaled geometry captured at build time (px), for size scaling. */
+    private var panelBaseWidthPx = 0
+    private var panelBasePadHPx = 0
+    private var panelBasePadVPx = 0
+    private var pillBaseWidthPx = 0
     // #57 per-foreground-app position memory.
     private var lastForegroundPkg: String? = null
     private var foregroundPoll: Runnable? = null
@@ -259,6 +272,8 @@ class FloatingOverlayService : Service() {
             setImageResource(currentAvatarRes())
             scaleType = ImageView.ScaleType.FIT_CENTER
             contentDescription = "Jarvis floating avatar"
+            // v2.0.1: avatar opacity (figure only — still plate-free).
+            alpha = overlayAvatarOpacity
             layoutParams = FrameLayout.LayoutParams(bubbleSize, bubbleSize)
         }
 
@@ -310,7 +325,8 @@ class FloatingOverlayService : Service() {
         val pillBg = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = dp(18).toFloat()
-            setColor(palette.background)
+            // v2.0.1: the pill is a panel surface — same bg opacity.
+            setColor(panelSurfaceColor())
             setStroke(dp(1), palette.border)
         }
         miniPillBackground = pillBg
@@ -337,13 +353,14 @@ class FloatingOverlayService : Service() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { leftMargin = dp(8) }
         }
+        pillBaseWidthPx = (resources.displayMetrics.widthPixels * 0.62f).toInt()
         val pill = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             background = pillBg
             setPadding(dp(12), dp(8), dp(12), dp(8))
             layoutParams = FrameLayout.LayoutParams(
-                (resources.displayMetrics.widthPixels * 0.62f).toInt(),
+                (pillBaseWidthPx * panelScale()).toInt(),
                 FrameLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(62) }
             addView(spinner)
@@ -379,16 +396,30 @@ class FloatingOverlayService : Service() {
         val panelBg = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = dp(18).toFloat()
-            setColor(palette.background)
+            // v2.0.1: the user's panel background opacity over the
+            // palette fill (default = the shipped ~0.97 alpha).
+            setColor(panelSurfaceColor())
             setStroke(dp(1), palette.border)
         }
         hudBackground = panelBg
-        val panelWidth = (resources.displayMetrics.widthPixels * 0.86f).toInt()
+        // v2.0.1: panel size scales the shipped geometry — base width
+        // and base padding are captured unscaled so applyOverlayAppearance
+        // can re-derive them when the slider moves.
+        panelBaseWidthPx = (resources.displayMetrics.widthPixels * 0.86f).toInt()
+        panelBasePadHPx = dp(14)
+        panelBasePadVPx = dp(12)
+        val scale = panelScale()
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = panelBg // The panel is a card — its background is allowed.
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            layoutParams = FrameLayout.LayoutParams(panelWidth, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            setPadding(
+                (panelBasePadHPx * scale).toInt(), (panelBasePadVPx * scale).toInt(),
+                (panelBasePadHPx * scale).toInt(), (panelBasePadVPx * scale).toInt()
+            )
+            layoutParams = FrameLayout.LayoutParams(
+                (panelBaseWidthPx * scale).toInt(),
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
                 topMargin = dp(62)
             }
         }
@@ -1295,6 +1326,68 @@ class FloatingOverlayService : Service() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         panelHapticsEnabled = prefs.getBoolean(KEY_PANEL_HAPTICS, true)
         MotionSettings.reduceMotion = prefs.getBoolean(KEY_REDUCE_MOTION, false)
+        // v2.0.1: overlay appearance mirrors + live apply. This runs
+        // on onCreate AND every onStartCommand — MainActivity re-sends
+        // a start when these settings change, so slider moves reach
+        // the running overlay without a service restart.
+        overlayAvatarOpacity = prefs.getFloat(KEY_OVERLAY_AVATAR_OPACITY, 1.0f)
+            .coerceIn(0.25f, 1.0f)
+        panelSizePercent = prefs.getInt(KEY_PANEL_SIZE_PERCENT, 100)
+            .coerceIn(80, 120)
+        panelBgOpacity = prefs.getFloat(KEY_PANEL_BG_OPACITY, 0.97f)
+            .coerceIn(0.35f, 1.0f)
+        applyOverlayAppearance()
+    }
+
+    /** v2.0.1: panel width scale from [panelSizePercent] (80–120%). */
+    private fun panelScale(): Float = panelSizePercent.coerceIn(80, 120) / 100f
+
+    /**
+     * v2.0.1: the panel card fill — the palette background's RGB with
+     * the user's [panelBgOpacity] as its alpha (palette default
+     * ≈ 0.97). Only the card surface takes this alpha; panel text and
+     * content stay fully opaque.
+     */
+    private fun panelSurfaceColor(): Int {
+        val alpha = (panelBgOpacity.coerceIn(0.35f, 1.0f) * 255f)
+            .toInt().coerceIn(0, 255)
+        return (alpha shl 24) or (palette.background and 0x00FFFFFF)
+    }
+
+    /**
+     * v2.0.1: applies the appearance mirrors to the live views —
+     * avatar alpha, panel + mini-pill surface alpha, panel/pill width
+     * and panel padding scaled from the build-time base geometry.
+     * A no-op for views not built yet (they read the mirrors at build).
+     */
+    private fun applyOverlayAppearance() {
+        bubbleView?.alpha = overlayAvatarOpacity
+        val surface = panelSurfaceColor()
+        hudBackground?.setColor(surface)
+        miniPillBackground?.setColor(surface)
+        val scale = panelScale()
+        hudPanel?.let { panel ->
+            val lp = panel.layoutParams as? FrameLayout.LayoutParams
+            if (lp != null && panelBaseWidthPx > 0) {
+                lp.width = (panelBaseWidthPx * scale).toInt()
+                panel.layoutParams = lp
+            }
+            if (panelBasePadHPx > 0) {
+                panel.setPadding(
+                    (panelBasePadHPx * scale).toInt(),
+                    (panelBasePadVPx * scale).toInt(),
+                    (panelBasePadHPx * scale).toInt(),
+                    (panelBasePadVPx * scale).toInt()
+                )
+            }
+        }
+        miniPill?.let { pill ->
+            val lp = pill.layoutParams as? FrameLayout.LayoutParams
+            if (lp != null && pillBaseWidthPx > 0) {
+                lp.width = (pillBaseWidthPx * scale).toInt()
+                pill.layoutParams = lp
+            }
+        }
     }
 
     /**
@@ -1917,7 +2010,8 @@ class FloatingOverlayService : Service() {
     private fun applyPalette(newPalette: HudPalette) {
         palette = newPalette
         hudBackground?.let { bg ->
-            bg.setColor(newPalette.background)
+            // v2.0.1: panel fill keeps the user's bg opacity.
+            bg.setColor(panelSurfaceColor())
             bg.setStroke(dp(1), newPalette.border)
         }
         hudGoalView?.setTextColor(newPalette.textPrimary)
@@ -1956,7 +2050,8 @@ class FloatingOverlayService : Service() {
         }
         // v1.8.0 additions follow the palette too (#59).
         miniPillBackground?.let { bg ->
-            bg.setColor(newPalette.background)
+            // v2.0.1: the pill follows the same panel bg opacity.
+            bg.setColor(panelSurfaceColor())
             bg.setStroke(dp(1), newPalette.border)
         }
         miniPillText?.setTextColor(newPalette.textPrimary)
@@ -2150,6 +2245,10 @@ class FloatingOverlayService : Service() {
         private const val POS_EDGE_SUFFIX = "_edge"
         private const val KEY_PANEL_HAPTICS = "panel_haptics"
         private const val KEY_REDUCE_MOTION = "reduce_motion"
+        /** v2.0.1: overlay appearance prefs (mirror MainActivity keys). */
+        private const val KEY_OVERLAY_AVATAR_OPACITY = "overlay_avatar_opacity"
+        private const val KEY_PANEL_SIZE_PERCENT = "panel_size_percent"
+        private const val KEY_PANEL_BG_OPACITY = "panel_bg_opacity"
         private const val GLYPH_DONE = 0xFF43A047.toInt()
         private const val GLYPH_FAILED = 0xFFE53935.toInt()
         /** F7: how long the finished panel lingers before auto-collapse. */

@@ -25,6 +25,20 @@ object FriendlyErrors {
         // chars — the full body belongs in AppLog, never on screen.
         val detail = detailSnippet(text)
         return when {
+            // v2.0.1: Gemini rejected one setup VALUE ("Invalid value
+            // at 'setup.…'") — e.g. the invalid START_SENSITIVITY_MED
+            // enum v1.8.0 sent. Not the user's fault and not the
+            // model's availability: Jarvis strips the field and
+            // retries by itself, so say exactly that.
+            lower.contains("invalid value at 'setup.") ||
+                lower.contains("invalid value at \"setup.") ->
+                Mapped(
+                    "Gemini rejected one of Jarvis's Live setup options — " +
+                        "Jarvis removes it and retries automatically, so " +
+                        "just tap Retry.",
+                    detail
+                )
+
             lower.contains("unsupported language code") || lower.contains("language code") ->
                 Mapped(
                     "That voice model doesn't support the selected language — " +
@@ -96,6 +110,13 @@ object FriendlyErrors {
                 lower.contains("language not supported") -> "language not supported"
             lower.contains("setup timeout") || lower.contains("setup timed out") ->
                 "setup timeout"
+            // v2.0.1: a rejected setup value (invalid enum/field) —
+            // checked before the generic branches: the raw text
+            // ("…type.googleapis.com/…") matches none of them, but
+            // the caption deserves the precise cause.
+            lower.contains("invalid value at 'setup.") ||
+                lower.contains("invalid value at \"setup.") ->
+                "Live setup option rejected (auto-fixed)"
             lower.contains("401") || lower.contains("403") ||
                 lower.contains("api key") || lower.contains("permission denied") ->
                 "API key rejected"

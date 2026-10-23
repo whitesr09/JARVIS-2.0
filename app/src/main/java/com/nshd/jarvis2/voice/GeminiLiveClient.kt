@@ -79,6 +79,15 @@ class GeminiLiveClient(
      * so existing call sites keep compiling.
      */
     private val bargeInSensitivity: String = "NORMAL",
+    /**
+     * v2.0.1: setup paths ("realtime_input_config.…") Gemini has
+     * rejected with "Invalid value at 'setup.…'" during THIS app run.
+     * Shared (same instance) across every client the session manager
+     * builds — model-chain attempts and goAway reconnects included —
+     * so once a field is stripped it is never re-sent this run. The
+     * client adds paths as its self-healing setup strips them.
+     */
+    private val strippedSetupPaths: MutableSet<String> = mutableSetOf(),
     private val listener: Listener
 ) {
     interface Listener {
@@ -170,6 +179,18 @@ class GeminiLiveClient(
 
     @Volatile
     private var languageRetried = false
+
+    /**
+     * v2.0.1 self-healing setup: how many strip retries THIS client
+     * (one model attempt) has used, and the first offending setup
+     * path — later strip levels escalate relative to it (leaf →
+     * parent object → whole realtime_input_config).
+     */
+    @Volatile
+    private var setupStripRetries = 0
+
+    @Volatile
+    private var firstSetupOffender: String? = null
 
     /** Incremented per connect(); stale sockets' callbacks are ignored. */
     @Volatile
@@ -402,10 +423,17 @@ class GeminiLiveClient(
                         .put("disabled", false)
                         .put(
                             "start_of_speech_sensitivity",
+                            // v2.0.1: the Live API's StartSensitivity
+                            // enum has ONLY _HIGH and _LOW — the old
+                            // "START_SENSITIVITY_MED" (the NORMAL
+                            // branch) is not a real value, and Gemini
+                            // rejected the whole setup with close code
+                            // 1007 ("Invalid value at 'setup.…start_
+                            // of_speech_sensitivity'"). NORMAL maps to
+                            // HIGH (the API's own default behaviour).
                             when (bargeInSensitivity.trim().uppercase()) {
                                 "LOW" -> "START_SENSITIVITY_LOW"
-                                "HIGH" -> "START_SENSITIVITY_HIGH"
-                                else -> "START_SENSITIVITY_MED"
+                                else -> "START_SENSITIVITY_HIGH"
                             }
                         )
                 )
@@ -430,7 +458,101 @@ class GeminiLiveClient(
             resumption.put("handle", resumptionHandle)
         }
         setup.put("session_resumption", resumption)
+        // v2.0.1: never re-send a field Gemini already rejected this
+        // app run (see trySetupStripRetry) — stripped paths are
+        // removed from every subsequent setup, for every model.
+        applySetupStrips(setup)
         return JSONObject().put("setup", setup).toString()
+    }
+
+    // ── v2.0.1: self-healing setup ───────────────────────────────────
+    //
+    // A strict Live model can reject an optional setup field the
+    // previous model accepted, closing the socket (1007) with
+    // "Invalid value at 'setup.<path>'" BEFORE setupComplete — the
+    // session died at the door even though only one leaf of the
+    // setup was at fault. On that exact rejection class the client
+    // retries the SAME model with the offending config progressively
+    // stripped: (1) the named leaf, (2) its parent object,
+    // (3) realtime_input_config entirely. Core setup (model,
+    // generation_config, system_instruction, tools,
+    // session_resumption) is never stripped. These retries run
+    // INSIDE one model attempt: the session manager only hears
+    // failure after they are exhausted, so its F5.1 clean retry,
+    // F8 model chain and Universal fallback keep their order.
+
+    /** The setup path out of "Invalid value at 'setup.<path>'", if any. */
+    private fun extractInvalidSetupPath(text: String?): String? {
+        if (text.isNullOrBlank()) return null
+        val match = INVALID_SETUP_PATH_REGEX.find(text) ?: return null
+        return match.groupValues[1].trimEnd('.').takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * On a setup rejection naming [text]'s invalid path: strip the
+     * next level, remember the stripped path in [strippedSetupPaths]
+     * (shared for the app run) and reconnect with the rebuilt setup.
+     * Returns false when this isn't a strippable rejection or the
+     * per-attempt strip budget is spent — normal failure handling
+     * then proceeds untouched.
+     */
+    private fun trySetupStripRetry(text: String?): Boolean {
+        if (setupComplete || closedByUser) return false
+        val named = extractInvalidSetupPath(text) ?: return false
+        if (setupStripRetries >= MAX_SETUP_STRIP_RETRIES) return false
+        val offender = firstSetupOffender ?: named.also { firstSetupOffender = it }
+        val segments = offender.split('.').filter { it.isNotBlank() }
+        if (segments.isEmpty()) return false
+        val stripPath = when (setupStripRetries) {
+            0 -> segments.joinToString(".")
+            1 -> if (segments.size >= 2) {
+                segments.dropLast(1).joinToString(".")
+            } else {
+                segments[0]
+            }
+            else -> segments[0]
+        }
+        val added = synchronized(strippedSetupPaths) { strippedSetupPaths.add(stripPath) }
+        setupStripRetries++
+        AppLog.w(
+            "Live",
+            "setup-strip $stripPath (retry $setupStripRetries/" +
+                "$MAX_SETUP_STRIP_RETRIES) — server rejected '$named'"
+        )
+        if (!added) {
+            // Already stripped for an earlier attempt this run, yet
+            // THIS connect still sent it — impossible via buildSetupJson;
+            // log for diagnosis but still retry with the next level
+            // queued for the reconnect's build.
+            AppLog.w("Live", "setup-strip path '$stripPath' was already remembered")
+        }
+        // Quietly drop this socket (its listener generation goes stale
+        // in connect()) and reconnect with the stripped setup.
+        val old = webSocket
+        webSocket = null
+        runCatching { old?.close(1000, "Retrying with adjusted setup") }
+        connect()
+        return true
+    }
+
+    /** Removes every remembered stripped path from a built setup object. */
+    private fun applySetupStrips(setup: JSONObject) {
+        val paths = synchronized(strippedSetupPaths) { strippedSetupPaths.toList() }
+        for (path in paths) {
+            val segments = path.split('.').filter { it.isNotBlank() }
+            if (segments.isEmpty()) continue
+            var node: JSONObject = setup
+            var reachable = true
+            for (i in 0 until segments.size - 1) {
+                val next = node.optJSONObject(segments[i])
+                if (next == null) {
+                    reachable = false
+                    break
+                }
+                node = next
+            }
+            if (reachable) node.remove(segments.last())
+        }
     }
 
     // ── Downlink parsing ───────────────────────────────────────────────
@@ -504,6 +626,12 @@ class GeminiLiveClient(
                     currentLanguageCode != null && !languageRetried
                 ) {
                     retryWithoutLanguage()
+                    return
+                }
+                // v2.0.1: a rejected optional setup field is healed
+                // in place (strip + same-model retry) before this is
+                // allowed to become a session failure.
+                if (!setupComplete && trySetupStripRetry(message)) {
                     return
                 }
                 if (!setupComplete) {
@@ -704,6 +832,13 @@ class GeminiLiveClient(
                     retryWithoutLanguage()
                     return
                 }
+                // v2.0.1: close 1007 = the server rejected the setup
+                // VALUES (that's exactly how the invalid sensitivity
+                // enum arrived). Heal by stripping + retrying the
+                // same model before reporting a dead session.
+                if (!setupComplete && code == 1007 && trySetupStripRetry(reason)) {
+                    return
+                }
                 listener.onClosed(
                     withGatewayHint(reason.ifBlank { "Session closed (code $code)" })
                 )
@@ -719,6 +854,15 @@ class GeminiLiveClient(
             "wss://$WS_HOST/ws/" +
                 "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
         private const val SETUP_TIMEOUT_MS = 12_000L
+
+        /** v2.0.1: per-model-attempt budget for self-healing setup strips. */
+        private const val MAX_SETUP_STRIP_RETRIES = 3
+
+        /** v2.0.1: "Invalid value at 'setup.<path>'" in server rejections. */
+        private val INVALID_SETUP_PATH_REGEX = Regex(
+            """Invalid value at ['"]setup\.([a-zA-Z0-9_.]+)['"]""",
+            RegexOption.IGNORE_CASE
+        )
 
         /** Exactly one "models/" prefix, however the user typed it (F5). */
         fun normalizeModelId(raw: String): String {

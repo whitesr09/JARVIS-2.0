@@ -87,7 +87,16 @@ data class JarvisSettings(
     val personaOverride: String = "",
     val personaOverrideDay: String = "",
     /** Plan #10 (v2.0.0): his own extra wake phrase ("" = Hey Jarvis only). */
-    val customWakePhrase: String = ""
+    val customWakePhrase: String = "",
+    /** v2.0.1: floating avatar opacity (0.25–1.0; the figure only, never a plate). */
+    val overlayAvatarOpacity: Float = 1.0f,
+    /** v2.0.1: floating task-panel size, percent of the shipped width (80–120). */
+    val panelSizePercent: Int = 100,
+    /**
+     * v2.0.1: floating task-panel background opacity (0.35–1.0). The
+     * default matches the shipped palette fill (PANEL_ALPHA 0xF7 ≈ 0.97).
+     */
+    val panelBgOpacity: Float = 0.97f
 )
 
 class MainActivity : ComponentActivity() {
@@ -177,11 +186,21 @@ class MainActivity : ComponentActivity() {
                     }
                     val themeChanged = effective.theme != settings.theme ||
                         effective.customBgHex != settings.customBgHex
+                    // v2.0.1: overlay appearance (avatar opacity, panel
+                    // size, panel background opacity) applies through
+                    // the same live re-start: the service's
+                    // onStartCommand re-reads them and repaints.
+                    val overlayLookChanged =
+                        effective.overlayAvatarOpacity != settings.overlayAvatarOpacity ||
+                            effective.panelSizePercent != settings.panelSizePercent ||
+                            effective.panelBgOpacity != settings.panelBgOpacity
                     settings = effective
                     saveSettings(effective)
                     // D3: a running overlay re-reads its HUD palette on
                     // start, so a theme change re-skins the HUD live.
-                    if (themeChanged && FloatingOverlayService.isRunning()) {
+                    if ((themeChanged || overlayLookChanged) &&
+                        FloatingOverlayService.isRunning()
+                    ) {
                         runCatching { FloatingOverlayService.start(this) }
                     }
                 }
@@ -304,7 +323,13 @@ class MainActivity : ComponentActivity() {
             personaDayEndHour = prefs.getInt(KEY_PERSONA_DAY_END, 18),
             personaOverride = prefs.getString(KEY_PERSONA_OVERRIDE, "") ?: "",
             personaOverrideDay = prefs.getString(KEY_PERSONA_OVERRIDE_DAY, "") ?: "",
-            customWakePhrase = prefs.getString(KEY_CUSTOM_WAKE_PHRASE, "") ?: ""
+            customWakePhrase = prefs.getString(KEY_CUSTOM_WAKE_PHRASE, "") ?: "",
+            overlayAvatarOpacity = prefs.getFloat(KEY_OVERLAY_AVATAR_OPACITY, 1.0f)
+                .coerceIn(0.25f, 1.0f),
+            panelSizePercent = prefs.getInt(KEY_PANEL_SIZE_PERCENT, 100)
+                .coerceIn(80, 120),
+            panelBgOpacity = prefs.getFloat(KEY_PANEL_BG_OPACITY, 0.97f)
+                .coerceIn(0.35f, 1.0f)
         )
     }
 
@@ -347,6 +372,9 @@ class MainActivity : ComponentActivity() {
             .putString(KEY_PERSONA_OVERRIDE, s.personaOverride)
             .putString(KEY_PERSONA_OVERRIDE_DAY, s.personaOverrideDay)
             .putString(KEY_CUSTOM_WAKE_PHRASE, s.customWakePhrase)
+            .putFloat(KEY_OVERLAY_AVATAR_OPACITY, s.overlayAvatarOpacity)
+            .putInt(KEY_PANEL_SIZE_PERCENT, s.panelSizePercent)
+            .putFloat(KEY_PANEL_BG_OPACITY, s.panelBgOpacity)
             .apply()
     }
 
@@ -398,5 +426,8 @@ class MainActivity : ComponentActivity() {
         private const val KEY_PERSONA_OVERRIDE = "persona_override"
         private const val KEY_PERSONA_OVERRIDE_DAY = "persona_override_day"
         private const val KEY_CUSTOM_WAKE_PHRASE = "custom_wake_phrase"
+        private const val KEY_OVERLAY_AVATAR_OPACITY = "overlay_avatar_opacity"
+        private const val KEY_PANEL_SIZE_PERCENT = "panel_size_percent"
+        private const val KEY_PANEL_BG_OPACITY = "panel_bg_opacity"
     }
 }

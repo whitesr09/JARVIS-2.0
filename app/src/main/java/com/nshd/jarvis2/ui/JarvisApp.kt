@@ -367,6 +367,7 @@ fun JarvisApp(
                         )
                         SubScreen.HANDSFREE -> HandsFreeScreen(
                             settings = settings,
+                            onSettingsChange = onSettingsChange,
                             onBack = { subScreen = SubScreen.NONE },
                             onOpenPermissions = { subScreen = SubScreen.PERMISSIONS }
                         )
@@ -409,31 +410,21 @@ fun JarvisApp(
                 if (showWhatsNew) {
                     AlertDialog(
                         onDismissRequest = { showWhatsNew = false },
-                        title = { Text("What's new in v2.0.0") },
+                        title = { Text("What's new in v2.0.1") },
                         text = {
                             Text(
-                                "Brain Upgrade: Jarvis can now learn. " +
-                                    "Teach it \"when I say X, do Y\", save " +
-                                    "a finished task as a quick command " +
-                                    "and replay it with no model call, " +
-                                    "build named routines that run on " +
-                                    "wake or app-open, and schedule " +
-                                    "WhatsApp messages (always confirmed " +
-                                    "again before they send). An on-device " +
-                                    "intent classifier answers paraphrases " +
-                                    "offline; form-filling proposes " +
-                                    "values from Memory Core; only " +
-                                    "topic-relevant memories enter the " +
-                                    "prompt now. Plus: your own wake " +
-                                    "phrase, persona schedules, group " +
-                                    "broadcasts, an unread-message " +
-                                    "reader, image questions in chat, " +
-                                    "call answer/reject by voice, " +
-                                    "headset-button wake, location " +
-                                    "answers, a download helper and a " +
-                                    "model A/B test in Settings. (Also " +
-                                    "includes the v1.9.1 voice-crash " +
-                                    "hotfix.)"
+                                "Live voice fix: Gemini was rejecting " +
+                                    "the Live setup itself, so Live never " +
+                                    "connected on strict models. The bad " +
+                                    "value is fixed — and the setup now " +
+                                    "heals itself: if a model rejects a " +
+                                    "setup option, Jarvis removes just " +
+                                    "that option and retries automatically. " +
+                                    "Also new in Hands-Free & App Control: " +
+                                    "Overlay appearance — an avatar " +
+                                    "opacity slider, plus panel size and " +
+                                    "panel background opacity sliders for " +
+                                    "the floating task panel, applied live."
                             )
                         },
                         confirmButton = {

@@ -67,7 +67,13 @@ object SettingsLoader {
             personaDayEndHour = prefs.getInt("persona_day_end_hour", 18),
             personaOverride = prefs.getString("persona_override", "") ?: "",
             personaOverrideDay = prefs.getString("persona_override_day", "") ?: "",
-            customWakePhrase = prefs.getString("custom_wake_phrase", "") ?: ""
+            customWakePhrase = prefs.getString("custom_wake_phrase", "") ?: "",
+            overlayAvatarOpacity = prefs.getFloat("overlay_avatar_opacity", 1.0f)
+                .coerceIn(0.25f, 1.0f),
+            panelSizePercent = prefs.getInt("panel_size_percent", 100)
+                .coerceIn(80, 120),
+            panelBgOpacity = prefs.getFloat("panel_bg_opacity", 0.97f)
+                .coerceIn(0.35f, 1.0f)
         )
     }
 }

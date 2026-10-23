@@ -208,6 +208,18 @@ object VoiceSessionManager {
     @Volatile
     private var liveSetupDone = false
 
+    /**
+     * v2.0.1: Live setup paths Gemini rejected this app run ("Invalid
+     * value at 'setup.…'" — e.g. the invalid START_SENSITIVITY_MED
+     * enum v1.8.0 sent). ONE set instance is handed to every
+     * GeminiLiveClient built here: the client strips + remembers
+     * paths in it (its self-healing setup), and every later connect
+     * this run — chain attempts and goAway reconnects alike — builds
+     * its setup without them.
+     */
+    private val liveStrippedSetupPaths: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf())
+
     /** Live model that last connected OK — in-memory, app run only. */
     @Volatile
     private var rememberedWorkingLiveModel: String? = null
@@ -1029,6 +1041,9 @@ object VoiceSessionManager {
                 // v1.8 (#4): the user's barge-in sensitivity drives
                 // the server VAD's start-of-speech sensitivity.
                 bargeInSensitivity = s.bargeInSensitivity,
+                // v2.0.1: the app-run set of Gemini-rejected setup
+                // paths (self-healing setup strips live in here).
+                strippedSetupPaths = liveStrippedSetupPaths,
                 listener = LiveListener()
             )
             client = liveClient
@@ -1064,6 +1079,19 @@ object VoiceSessionManager {
                 delay(1000)
             }
         }
+    }
+
+    /**
+     * v2.0.1: server wording for a rejected Live SETUP value —
+     * "Invalid value at 'setup.<path>' …". Distinct from a session
+     * rejection (F5.1) and from a model problem: the setup itself
+     * carried a field/value this model revision refuses. The client
+     * strips it and retries automatically (self-healing setup).
+     */
+    private fun isSetupRejection(message: String): Boolean {
+        val lower = message.lowercase()
+        return lower.contains("invalid value at 'setup.") ||
+            lower.contains("invalid value at \"setup.")
     }
 
     /** F5.1: server wording for a rejected Live session/resumption handle. */
@@ -1156,6 +1184,15 @@ object VoiceSessionManager {
             .takeLast(8)
             .map { AppLog.formatLine(it) }
         val nextStep = when {
+            // v2.0.1: the server rejected a setup VALUE (invalid enum
+            // or field), not the model/key/network. The client heals
+            // this itself — strip + same-model retry, and the field
+            // stays stripped for the rest of the app run.
+            isSetupRejection(reason) ->
+                "Nothing to fix by hand: Jarvis auto-adjusted its Live " +
+                    "settings (it stopped sending the option this model " +
+                    "rejected) and retries on its own. If you're reading " +
+                    "this after a fallback, just tap Retry."
             isModelClassFailure(reason) -> {
                 val next = liveCandidates.getOrNull(liveCandidateIndex + 1)
                     ?: KNOWN_LIVE_ALTERNATES.firstOrNull { it != liveAttemptModel }
