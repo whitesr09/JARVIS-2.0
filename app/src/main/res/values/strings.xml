@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- v1.9.0 (#112): launcher shortcut labels must be resources. -->
+    <string name="shortcut_voice_short">Voice</string>
+    <string name="shortcut_voice_long">Talk to Jarvis</string>
+    <string name="shortcut_chat_short">Chat</string>
+    <string name="shortcut_chat_long">Chat with Jarvis</string>
+    <string name="shortcut_handsfree_short">Hands-Free</string>
+    <string name="shortcut_handsfree_long">Hands-Free and self-test</string>
+    <string name="shortcut_selftest_short">Self-test</string>
+    <string name="shortcut_selftest_long">Run the Jarvis self-test</string>
+</resources>

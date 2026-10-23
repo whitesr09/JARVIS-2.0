@@ -6,8 +6,8 @@
         android:shortcutId="voice"
         android:enabled="true"
         android:icon="@mipmap/ic_launcher"
-        android:shortcutShortLabel="Voice"
-        android:shortcutLongLabel="Talk to Jarvis">
+        android:shortcutShortLabel="@string/shortcut_voice_short"
+        android:shortcutLongLabel="@string/shortcut_voice_long">
         <intent
             android:action="android.intent.action.VIEW"
             android:targetPackage="com.nshd.jarvis2"
@@ -21,8 +21,8 @@
         android:shortcutId="chat"
         android:enabled="true"
         android:icon="@mipmap/ic_launcher"
-        android:shortcutShortLabel="Chat"
-        android:shortcutLongLabel="Chat with Jarvis">
+        android:shortcutShortLabel="@string/shortcut_chat_short"
+        android:shortcutLongLabel="@string/shortcut_chat_long">
         <intent
             android:action="android.intent.action.VIEW"
             android:targetPackage="com.nshd.jarvis2"
@@ -36,8 +36,8 @@
         android:shortcutId="handsfree"
         android:enabled="true"
         android:icon="@mipmap/ic_launcher"
-        android:shortcutShortLabel="Hands-Free"
-        android:shortcutLongLabel="Hands-Free and self-test">
+        android:shortcutShortLabel="@string/shortcut_handsfree_short"
+        android:shortcutLongLabel="@string/shortcut_handsfree_long">
         <intent
             android:action="android.intent.action.VIEW"
             android:targetPackage="com.nshd.jarvis2"
@@ -51,8 +51,8 @@
         android:shortcutId="selftest"
         android:enabled="true"
         android:icon="@mipmap/ic_launcher"
-        android:shortcutShortLabel="Self-test"
-        android:shortcutLongLabel="Run the Jarvis self-test">
+        android:shortcutShortLabel="@string/shortcut_selftest_short"
+        android:shortcutLongLabel="@string/shortcut_selftest_long">
         <intent
             android:action="android.intent.action.VIEW"
             android:targetPackage="com.nshd.jarvis2"
