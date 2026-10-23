@@ -378,6 +378,35 @@ object ToolRegistry {
                 properties = JSONObject().put("text", stringProperty("The note text")),
                 required = listOf("text")
             )
+        ),
+        // ── v2.0.0 "Brain Upgrade" tools ───────────────────────────────
+        ToolSpec(
+            "whatsapp_group_message",
+            "Send a WhatsApp message to a named GROUP (broadcast to that one group). Always confirmed with the user first, showing the group name and the full text.",
+            schema(
+                properties = JSONObject()
+                    .put("group", stringProperty("WhatsApp group name"))
+                    .put("message", stringProperty("Message text")),
+                required = listOf("group", "message")
+            )
+        ),
+        ToolSpec(
+            "fill_form",
+            "Fill the form on the current screen: detects the editable fields, proposes values for them from the user's Memory Core, asks for ONE confirmation listing every field and value, then types the approved values in. Fields that already have text are never overwritten.",
+            schema(properties = JSONObject())
+        ),
+        ToolSpec(
+            "wait_for_text",
+            "Wait until the given text appears on the current screen (polls the accessibility snapshot). Use after an action when the next screen loads slowly, instead of guessing. Read-only.",
+            schema(
+                properties = JSONObject()
+                    .put("text", stringProperty("Text to wait for"))
+                    .put(
+                        "timeout_seconds",
+                        integerProperty("Max seconds to wait (1-30, default 15)")
+                    ),
+                required = listOf("text")
+            )
         )
     )
 

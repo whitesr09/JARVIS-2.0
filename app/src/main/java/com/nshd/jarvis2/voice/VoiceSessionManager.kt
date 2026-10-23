@@ -352,6 +352,9 @@ object VoiceSessionManager {
     @Volatile
     private var guardUsedThisTurn = false
 
+    /** v2.0.0: pending Live session time warning (see onSetupComplete). */
+    private var liveTimeWarningJob: Job? = null
+
     private var pulseJob: Job? = null
 
     /** Screen-share → Live video forwarder (Level 5), Live path only. */
@@ -635,7 +638,19 @@ object VoiceSessionManager {
             customPersonaPrompt = prefs.getString("custom_persona_prompt", "") ?: "",
             dndRespect = prefs.getBoolean("dnd_respect", true),
             pttMode = prefs.getBoolean("ptt_mode", false),
-            wakeSensitivity = prefs.getString("wake_sensitivity", "NORMAL") ?: "NORMAL"
+            wakeSensitivity = prefs.getString("wake_sensitivity", "NORMAL") ?: "NORMAL",
+            // v2.0.0 (#78): wake-started sessions honour the persona
+            // schedule + any manual override, like UI-started ones.
+            personaScheduleEnabled = prefs.getBoolean("persona_schedule_enabled", false),
+            personaDayPersona = prefs.getString("persona_day_persona", "Jarvis Pro")
+                ?: "Jarvis Pro",
+            personaNightPersona = prefs.getString("persona_night_persona", "Girlfriend Mode")
+                ?: "Girlfriend Mode",
+            personaDayStartHour = prefs.getInt("persona_day_start_hour", 9),
+            personaDayEndHour = prefs.getInt("persona_day_end_hour", 18),
+            personaOverride = prefs.getString("persona_override", "") ?: "",
+            personaOverrideDay = prefs.getString("persona_override_day", "") ?: "",
+            customWakePhrase = prefs.getString("custom_wake_phrase", "") ?: ""
         )
     }
 
@@ -892,6 +907,8 @@ object VoiceSessionManager {
         // F6: tearing Live down (stop, or the switch to Universal)
         // closes the task window. Idempotent — see stopInternal.
         closeLiveTaskWindow()
+        liveTimeWarningJob?.cancel()
+        liveTimeWarningJob = null
         shareJob?.cancel()
         shareJob = null
         capture?.stop()
@@ -1288,6 +1305,33 @@ object VoiceSessionManager {
             // F8 (#13): record the setup duration + clear the
             // weak-network failure counter — this start was healthy.
             liveSetupDone = true
+            // v2.0.0: Live session time warning — Gemini rotates
+            // Live sessions at roughly 10 minutes (the goAway
+            // reconnect handles it), but a user mid-conversation
+            // deserves a heads-up BEFORE the rotation, not after a
+            // surprise drop. Fires once per setup, ~9 minutes in.
+            liveTimeWarningJob?.cancel()
+            liveTimeWarningJob = scope.launch {
+                delay(LIVE_TIME_WARNING_MS)
+                if (active && _uiState.value.mode == VoiceMode.LIVE &&
+                    liveSetupDone
+                ) {
+                    AppLog.i(
+                        "Live",
+                        "session time warning shown (~9 min into the session)"
+                    )
+                    addCaption(
+                        VoiceCaption(
+                            fromUser = false,
+                            text = "This Live session has been running " +
+                                "about 9 minutes — Google may rotate it " +
+                                "soon. If it drops, I'll reconnect or " +
+                                "switch to Universal automatically.",
+                            kind = CaptionKind.SYSTEM
+                        )
+                    )
+                }
+            }
             if (liveConnectStartMs > 0) {
                 lastLiveSetupMs = SystemClock.elapsedRealtime() - liveConnectStartMs
                 AppLog.i(
@@ -1665,12 +1709,12 @@ object VoiceSessionManager {
     /**
      * True when the device currently has no internet-capable network.
      *
-     * v1.9.1 hotfix: the whole check is guarded — ACCESS_NETWORK_STATE
-     * was missing from the manifest until this release, and
+     * v1.9.1 hotfix (carried into v2.0.0): the whole check is guarded —
      * [ConnectivityManager.getActiveNetwork] throws SecurityException
-     * without it (the v1.9.0 crash on the Live → Universal fallback
-     * path). Any failure here now means "treat as online" (the normal
-     * SpeechRecognizer path) instead of crashing a voice start.
+     * when ACCESS_NETWORK_STATE is unavailable (the v1.9.0 crash on
+     * the Live → Universal fallback path). Any failure here means
+     * "treat as online" (the normal SpeechRecognizer path) instead of
+     * crashing a voice start.
      */
     private fun isDeviceOffline(context: Context): Boolean {
         return try {
@@ -2474,4 +2518,7 @@ object VoiceSessionManager {
     private const val MAX_RECONNECTS = 3
     private const val TAG = "voice"
     private const val MIC_ACQUIRE_TIMEOUT_MS = 900L
+
+    /** v2.0.0: warn ~1 minute before the typical Live rotation. */
+    private const val LIVE_TIME_WARNING_MS = 9 * 60 * 1_000L
 }

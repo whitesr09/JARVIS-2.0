@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Menu
@@ -130,6 +131,23 @@ fun ChatScreen(
     var mode by remember { mutableStateOf(ChatMode.JARVIS) }
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
+    // v2.0.0 (#71): an image picked for the next send (base64 JPEG),
+    // plus the picker that fills it.
+    var pendingImage by remember { mutableStateOf<String?>(null) }
+    val imagePicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                pendingImage = withContext(Dispatchers.IO) {
+                    encodeImageForChat(context, uri)
+                }
+                if (pendingImage == null) {
+                    hint = "Couldn't read that image"
+                }
+            }
+        }
+    }
     var showClearConfirm by remember { mutableStateOf(false) }
     var headerMenuOpen by remember { mutableStateOf(false) }
     var composerMenuOpen by remember { mutableStateOf(false) }
@@ -255,6 +273,19 @@ fun ChatScreen(
         }
     }
 
+    // v2.0.0 (#51): consume an injected command (due-draft "Send
+    // now") once the pipeline is free — the StateFlow holds it until
+    // then, and `sending` as a key re-runs this when a turn ends.
+    val chatTextRequested by AppNavRequests.chatTextRequested
+        .collectAsState()
+    LaunchedEffect(chatTextRequested, sending) {
+        if (!sending) {
+            AppNavRequests.consumeChatTextRequest()?.let { injected ->
+                sendInjected(injected)
+            }
+        }
+    }
+
     LaunchedEffect(messages.size, sending) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex + if (sending) 1 else 0)
@@ -297,7 +328,7 @@ fun ChatScreen(
      * regenerate, and (via its text) by a pending edit's resend.
      * Shared pipeline: memory commands → quick phone commands → agent loop.
      */
-    fun launchPipeline(text: String) {
+    fun launchPipeline(text: String, imageBase64: String? = null) {
         sending = true
         resetStream()
         streamStartedAt = System.currentTimeMillis()
@@ -313,7 +344,8 @@ fun ChatScreen(
                     providerStore = providerStore,
                     codeMode = codeMode,
                     onEvent = { event -> appendToolEvent(event) },
-                    onAssistantDelta = { delta -> onAssistantDelta(delta) }
+                    onAssistantDelta = { delta -> onAssistantDelta(delta) },
+                    imageBase64 = imageBase64
                 )
                 // Flush any throttled tail, then persist the final text
                 // once as the permanent bubble and retire the live one.
@@ -394,9 +426,14 @@ fun ChatScreen(
     }
 
     fun send() {
-        val text = input.trim()
-        if (text.isEmpty() || sending) return
+        // v2.0.0 (#71): an attached image can carry a send on its own.
+        val image = pendingImage
+        val text = input.trim().ifBlank {
+            if (image != null) "What's in this image?" else ""
+        }
+        if ((text.isEmpty() && image == null) || sending) return
         input = ""
+        pendingImage = null
         // #66 edit-and-resend: a pending edit REPLACES its turn now —
         // the edited user message and everything after it leave the UI
         // list AND MemoryDb history (real per-row deletes by id).
@@ -411,6 +448,30 @@ fun ChatScreen(
                 }
             }
         }
+        val userMsg = UiMessage(
+            fromUser = true,
+            text = if (image != null) "$text 📷" else text
+        )
+        messages.add(userMsg)
+        scope.launch(Dispatchers.IO) {
+            val newId = db.addMessage("user", text)
+            if (newId > 0) {
+                withContext(Dispatchers.Main) {
+                    val idx = messages.indexOfFirst { it === userMsg }
+                    if (idx >= 0) messages[idx] = messages[idx].copy(id = newId)
+                }
+            }
+        }
+        launchPipeline(text, imageBase64 = image)
+    }
+
+    /**
+     * v2.0.0 (#51): a command injected from outside (the due-draft
+     * dialog's "Send now") — rendered and run exactly like a typed
+     * message, so every gate on the path still applies.
+     */
+    fun sendInjected(text: String) {
+        if (sending) return
         val userMsg = UiMessage(fromUser = true, text = text)
         messages.add(userMsg)
         scope.launch(Dispatchers.IO) {
@@ -834,6 +895,23 @@ fun ChatScreen(
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
             Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                // v2.0.0 (#71): attached-image chip.
+                if (pendingImage != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    ) {
+                        Text(
+                            text = "🖼 Image attached — it goes with your next message",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.weight(1f))
+                        TextButton(onClick = { pendingImage = null }) {
+                            Text("Remove")
+                        }
+                    }
+                }
                 TextField(
                     value = input,
                     onValueChange = { input = it },
@@ -867,6 +945,18 @@ fun ChatScreen(
                         label = "Code"
                     ) { mode = ChatMode.CODE }
                     Spacer(modifier = Modifier.weight(1f))
+                    // v2.0.0 (#71): attach an image to ask about it.
+                    IconButton(onClick = { imagePicker.launch("image/*") }) {
+                        Icon(
+                            imageVector = Icons.Filled.Image,
+                            contentDescription = "Attach image",
+                            tint = if (pendingImage != null) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
                     Box {
                         IconButton(onClick = { composerMenuOpen = true }) {
                             Icon(
@@ -902,7 +992,7 @@ fun ChatScreen(
                         )
                     }
                     Spacer(modifier = Modifier.width(4.dp))
-                    val canSend = input.isNotBlank()
+                    val canSend = input.isNotBlank() || pendingImage != null
                     Box(
                         modifier = Modifier
                             .size(44.dp)
@@ -1225,4 +1315,38 @@ private fun MessageBubble(
             }
         }
     }
+}
+
+/**
+ * v2.0.0 (#71): read a picked image, downscale it to at most 1280 px
+ * on the long edge, and JPEG-encode it as base64 for the vision
+ * models (the ChatMsg.imageBase64 path). Returns null on any failure
+ * so the composer can show a plain "couldn't read" hint.
+ */
+private fun encodeImageForChat(
+    context: android.content.Context,
+    uri: android.net.Uri
+): String? {
+    return runCatching {
+        val bitmap = context.contentResolver.openInputStream(uri)?.use { stream ->
+            android.graphics.BitmapFactory.decodeStream(stream)
+        } ?: return null
+        val maxEdge = maxOf(bitmap.width, bitmap.height)
+        val scaled = if (maxEdge > 1280) {
+            val ratio = 1280f / maxEdge
+            android.graphics.Bitmap.createScaledBitmap(
+                bitmap,
+                (bitmap.width * ratio).toInt().coerceAtLeast(1),
+                (bitmap.height * ratio).toInt().coerceAtLeast(1),
+                true
+            )
+        } else {
+            bitmap
+        }
+        val out = java.io.ByteArrayOutputStream()
+        scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, out)
+        android.util.Base64.encodeToString(
+            out.toByteArray(), android.util.Base64.NO_WRAP
+        )
+    }.getOrNull()
 }

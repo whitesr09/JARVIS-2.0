@@ -1,7 +1,15 @@
 package com.nshd.jarvis2.brain.tools
 
+import android.Manifest
+import android.app.DownloadManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Environment
+import android.telecom.TelecomManager
+import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.brain.ExecutionLedger
+import com.nshd.jarvis2.core.MacroRecorder
 import com.nshd.jarvis2.hands.ActionResult
 import com.nshd.jarvis2.hands.ContactResolution
 import com.nshd.jarvis2.hands.ContactsResolver
@@ -11,6 +19,7 @@ import com.nshd.jarvis2.hands.HandsActions
 import com.nshd.jarvis2.hands.VisionGrounder
 import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.service.JarvisAccessibilityService
+import kotlinx.coroutines.delay
 import org.json.JSONObject
 
 data class ToolResult(
@@ -106,6 +115,14 @@ class ToolExecutor(
         } catch (e: Exception) {
             ToolResult(false, "Tool $name failed safely: ${e.message ?: "unexpected error"}")
         }
+        // v2.0.0 (#16): feed the turn recorder — successful executions
+        // only, so a saved macro replays a sequence that worked. The
+        // recorder is armed solely by AgentPipeline for its own turns;
+        // replaying a macro re-enters execute() but the pipeline does
+        // not arm the recorder then, so macros never record themselves.
+        if (raw.success) {
+            MacroRecorder.record(name, args.toString())
+        }
         // v1.9.0 (#41): record the honest inverses of reversible
         // successes. Sends/plays are never recorded (they cannot be
         // undone and the undo tool must not pretend otherwise).
@@ -163,8 +180,9 @@ class ToolExecutor(
             name == "see_screen" || name == "vision_tap" ||
             name == "take_screenshot" || name == "read_page" ||
             name == "clipboard_get"
-        ) return raw
-        val service = JarvisAccessibilityService.instance ?: return raw
+        ) return withUndoHint(name, raw)
+        val service = JarvisAccessibilityService.instance
+            ?: return withUndoHint(name, raw)
         if (name in UI_MUTATION_TOOLS) {
             // Give the target app a brief chance to finish its transition so
             // the summary attached below is the post-action screen, not the
@@ -193,10 +211,28 @@ class ToolExecutor(
         }
         return try {
             val summary = screenSummaryForStep(service)
-            ToolResult(raw.success, raw.message + "\nScreen now:\n" + summary)
+            withUndoHint(
+                name,
+                ToolResult(raw.success, raw.message + "\nScreen now:\n" + summary)
+            )
         } catch (e: Exception) {
-            raw
+            withUndoHint(name, raw)
         }
+    }
+
+    /**
+     * v2.0.0: per-step undo hint — when a step's action is one of the
+     * reversible kinds (#41 records an inverse for exactly these),
+     * the result tells the model — and through it the user — that
+     * "undo that" will revert it. Sends and playback are never
+     * hinted: they cannot be undone and must not pretend otherwise.
+     */
+    private fun withUndoHint(name: String, result: ToolResult): ToolResult {
+        if (!result.success || name !in UNDOABLE_TOOLS) return result
+        return result.copy(
+            message = result.message +
+                " (Reversible: the user can say \"undo that\" to revert this step.)"
+        )
     }
 
     /**
@@ -444,6 +480,16 @@ class ToolExecutor(
                 )
                 ToolResult(true, "Note saved to Memory Core.")
             } ?: missing("text")
+            // ── v2.0.0 "Brain Upgrade" ────────────────────────────
+            "whatsapp_group_message" -> whatsappGroupMessage(args)
+            "fill_form" -> fillForm()
+            "wait_for_text" -> waitForText(args)
+            // Internal quick-command tools (not in the model registry).
+            "download_url" -> args.requiredString("url")?.let {
+                downloadUrl(it)
+            } ?: missing("url")
+            "call_answer" -> callControl(answer = true)
+            "call_reject" -> callControl(answer = false)
             else -> ToolResult(false, "Unknown tool: $name")
         }
     }
@@ -1026,6 +1072,296 @@ class ToolExecutor(
         return intents.gmailSend(to, subject, body).toToolResult()
     }
 
+    // ── v2.0.0 tool implementations ──────────────────────────────────
+
+    /**
+     * #49: group broadcast — one message to a named WhatsApp group.
+     * The gate names the GROUP and shows the full text (per-group
+     * confirm); the send tap runs under the usual one-shot permit.
+     */
+    private suspend fun whatsappGroupMessage(args: JSONObject): ToolResult {
+        val group = args.requiredString("group") ?: return missing("group")
+        val message = args.requiredString("message") ?: return missing("message")
+        com.nshd.jarvis2.core.AppLog.i(
+            "Send", "routed: whatsapp_group_message to group '$group'"
+        )
+        val approved = ConfirmGate.confirm(
+            "Send WhatsApp message to the group \"$group\"?\n\nMessage: \"$message\""
+        )
+        if (!approved) {
+            return ToolResult(
+                false,
+                "Group message was not confirmed, so nothing was sent."
+            )
+        }
+        HandsActions.grantSendPermit("com.whatsapp")
+        HandsActions.grantSendPermit("com.whatsapp.w4b")
+        return intents.whatsappGroupMessage(group, message).toToolResult()
+    }
+
+    /**
+     * #38: form-filling. Detect the editable fields on screen,
+     * propose a value for each from Memory Core, show ALL proposals
+     * in ONE confirm gate, then fill only the approved set. Fields
+     * with text already in them are never overwritten.
+     */
+    private suspend fun fillForm(): ToolResult {
+        val service = JarvisAccessibilityService.instance
+            ?: return ToolResult(
+                false,
+                "Accessibility is not enabled. Enable Jarvis Digital Hands in Permissions → Accessibility Service first."
+            )
+        val fields = service.screenReader().snapshot()
+            .filter { it.editable && it.enabled }
+        if (fields.isEmpty()) {
+            return ToolResult(false, "No editable form fields are visible on this screen.")
+        }
+        val facts = memoryDb.allFacts(null, null)
+        data class Proposal(
+            val index: Int,
+            val label: String,
+            val value: String
+        )
+        val proposals = mutableListOf<Proposal>()
+        val skipped = mutableListOf<String>()
+        for (field in fields) {
+            val label = field.label.ifBlank { field.desc }
+                .ifBlank { "field #${field.index}" }
+            if (field.text.isNotBlank()) {
+                skipped += "\"$label\" (already filled)"
+                continue
+            }
+            val value = proposeFormValue(label, facts)
+            if (value == null) {
+                skipped += "\"$label\" (nothing saved matches)"
+            } else {
+                proposals += Proposal(field.index, label, value)
+            }
+        }
+        if (proposals.isEmpty()) {
+            return ToolResult(
+                true,
+                "I found ${fields.size} field(s) but no saved memory matches " +
+                    "any of them, so nothing was filled." +
+                    if (skipped.isNotEmpty()) {
+                        " Skipped: ${skipped.joinToString("; ")}."
+                    } else {
+                        ""
+                    }
+            )
+        }
+        val gateText = buildString {
+            append("Fill this form from your saved memories?\n")
+            proposals.forEach { p ->
+                append("\n• ${p.label} → \"${p.value}\"")
+            }
+            if (skipped.isNotEmpty()) {
+                append("\n\nLeft empty: ${skipped.joinToString("; ")}")
+            }
+        }
+        val approved = ConfirmGate.confirm(gateText)
+        if (!approved) {
+            return ToolResult(false, "Form fill was not confirmed — nothing was typed.")
+        }
+        var filled = 0
+        for (proposal in proposals) {
+            // Re-check the stop flag before every field (#61).
+            com.nshd.jarvis2.hands.TaskState.throwIfStopRequested()
+            val tapped = HandsActions.clickElement(proposal.index)
+            if (!tapped.success) continue
+            HandsActions.waitForSettle(300)
+            val typed = HandsActions.setTextOnFocused(proposal.value)
+            if (typed.success) filled++
+        }
+        com.nshd.jarvis2.core.AppLog.i(
+            "Tools", "fill_form: filled $filled/${proposals.size} fields"
+        )
+        return ToolResult(
+            filled > 0,
+            "Filled $filled of ${proposals.size} field(s) from your saved memories."
+        )
+    }
+
+    /** #38: pick a value for a field label from Memory Core facts. */
+    private fun proposeFormValue(
+        label: String,
+        facts: List<com.nshd.jarvis2.memory.Fact>
+    ): String? {
+        val lower = label.lowercase()
+        fun factTextContaining(vararg needles: String): String? =
+            facts.firstOrNull { fact ->
+                needles.any { fact.text.contains(it, ignoreCase = true) }
+            }?.text
+        return when {
+            lower.contains("email") || lower.contains("e-mail") -> {
+                val emailRegex = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
+                facts.firstNotNullOfOrNull { fact ->
+                    emailRegex.find(fact.text)?.value
+                }
+            }
+            lower.contains("phone") || lower.contains("mobile") ||
+                lower.contains("contact number") -> {
+                val phoneRegex = Regex("\\+?[0-9][0-9\\s-]{6,}[0-9]")
+                facts.firstNotNullOfOrNull { fact ->
+                    phoneRegex.find(fact.text)?.value?.trim()
+                }
+            }
+            lower.contains("name") -> {
+                val fact = factTextContaining("my name is", "name is")
+                fact?.let {
+                    val idx = it.lowercase().indexOf("name is")
+                    if (idx >= 0) {
+                        it.substring(idx + "name is".length).trim()
+                            .trimEnd('.').take(60)
+                    } else {
+                        null
+                    }
+                }
+            }
+            lower.contains("address") -> {
+                factTextContaining("address", "live in", "living in")?.let { fact ->
+                    fact.substringAfter(":", fact).trim().take(120)
+                }
+            }
+            lower.contains("city") -> {
+                factTextContaining("live in", "living in")?.let { fact ->
+                    val idx = fact.lowercase().indexOf("live in")
+                    if (idx >= 0) {
+                        fact.substring(idx + "live in".length).trim()
+                            .trimEnd('.').take(40)
+                    } else {
+                        null
+                    }
+                }
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * v2.0.0: wait until [text] appears on screen (poll the a11y
+     * snapshot every 500 ms, up to the timeout). Read-only — used to
+     * pace multi-step flows on slow screens instead of guessing.
+     */
+    private suspend fun waitForText(args: JSONObject): ToolResult {
+        val text = args.requiredString("text") ?: return missing("text")
+        val timeoutSec = args.optInt("timeout_seconds", 15).coerceIn(1, 30)
+        val service = JarvisAccessibilityService.instance
+            ?: return ToolResult(
+                false,
+                "Accessibility is not enabled. Enable Jarvis Digital Hands in Permissions → Accessibility Service first."
+            )
+        val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
+        var polls = 0
+        while (System.currentTimeMillis() < deadline) {
+            com.nshd.jarvis2.hands.TaskState.throwIfStopRequested()
+            polls++
+            val found = service.screenReader().snapshot().any { element ->
+                element.text.contains(text, ignoreCase = true) ||
+                    element.desc.contains(text, ignoreCase = true)
+            }
+            if (found) {
+                com.nshd.jarvis2.core.AppLog.d(
+                    "Tools", "wait_for_text: '$text' appeared after $polls poll(s)"
+                )
+                return ToolResult(true, "\"$text\" is now on screen.")
+            }
+            delay(500)
+        }
+        return ToolResult(
+            false,
+            "\"$text\" did not appear within $timeoutSec seconds."
+        )
+    }
+
+    /** #111: download a link into Downloads via DownloadManager. */
+    private fun downloadUrl(url: String): ToolResult {
+        if (!url.startsWith("http://", ignoreCase = true) &&
+            !url.startsWith("https://", ignoreCase = true)
+        ) {
+            return ToolResult(false, "That doesn't look like a web link — nothing downloaded.")
+        }
+        val manager = appContext.getSystemService(DownloadManager::class.java)
+            ?: return ToolResult(false, "The system download service is unavailable.")
+        val fileName = Uri.parse(url).lastPathSegment
+            ?.takeIf { it.isNotBlank() && it.contains('.') }
+            ?: "jarvis-download"
+        return try {
+            val request = DownloadManager.Request(Uri.parse(url))
+                .setTitle(fileName)
+                .setDescription("Downloaded by Jarvis")
+                .setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                )
+                .setDestinationInExternalPublicDir(
+                    Environment.DIRECTORY_DOWNLOADS, fileName
+                )
+            manager.enqueue(request)
+            com.nshd.jarvis2.core.AppLog.i(
+                "Tools", "download_url: enqueued $fileName"
+            )
+            ToolResult(
+                true,
+                "Downloading $fileName to your Downloads folder — " +
+                    "Android will notify you when it finishes."
+            )
+        } catch (e: Exception) {
+            ToolResult(
+                false,
+                "The download couldn't start: ${e.message ?: "unknown error"}"
+            )
+        }
+    }
+
+    /**
+     * #112: answer / reject the ringing call via TelecomManager.
+     * Both are the user's explicit command, so neither is gated
+     * (the plan keeps reject gate-free; answering is equally his own
+     * instruction). Requires the ANSWER_PHONE_CALLS runtime grant.
+     */
+    private fun callControl(answer: Boolean): ToolResult {
+        if (ContextCompat.checkSelfPermission(
+                appContext, Manifest.permission.ANSWER_PHONE_CALLS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return ToolResult(
+                false,
+                "I need the \"Answer calls\" permission first — grant it in " +
+                    "Permissions so I can answer or reject calls by voice."
+            )
+        }
+        val telecom = appContext.getSystemService(TelecomManager::class.java)
+            ?: return ToolResult(false, "The phone service is unavailable right now.")
+        return try {
+            if (answer) {
+                @Suppress("DEPRECATION")
+                telecom.acceptRingingCall()
+                ToolResult(true, "Call answered.")
+            } else {
+                val ended = telecom.endCall()
+                if (ended) {
+                    ToolResult(true, "Call rejected.")
+                } else {
+                    ToolResult(false, "No ringing or active call to reject.")
+                }
+            }
+        } catch (e: SecurityException) {
+            ToolResult(
+                false,
+                "Android refused the call action — the \"Answer calls\" permission may have been revoked."
+            )
+        } catch (e: Exception) {
+            ToolResult(
+                false,
+                if (answer) {
+                    "No ringing call to answer right now."
+                } else {
+                    "The call couldn't be rejected: ${e.message ?: "unknown error"}"
+                }
+            )
+        }
+    }
+
     /** #108: calendar draft via intent (the calendar app confirms). */
     private fun calendarEvent(args: JSONObject): ToolResult {
         val title = args.requiredString("title") ?: return missing("title")
@@ -1110,7 +1446,9 @@ class ToolExecutor(
         private val OBSERVATION_TOOLS = setOf(
             "inspect_screen", "see_screen", "take_screenshot",
             // v1.9.0: SAFE reads (page text / clipboard) — always fresh.
-            "read_page", "clipboard_get"
+            "read_page", "clipboard_get",
+            // v2.0.0: waiting re-reads the CURRENT screen by design.
+            "wait_for_text"
         )
 
         /** v1.9.0 (#28): apps whose transitions settle fast. */
@@ -1118,6 +1456,12 @@ class ToolExecutor(
             "com.spotify.music", "com.google.android.youtube",
             "com.whatsapp", "com.whatsapp.w4b", "com.instagram.android",
             "org.telegram.messenger"
+        )
+
+        /**
+        /** v2.0.0: tools whose success has a recorded #41 inverse. */
+        private val UNDOABLE_TOOLS = setOf(
+            "type_text", "edit_text", "insert_code", "open_app"
         )
 
         /**
@@ -1139,7 +1483,9 @@ class ToolExecutor(
             "long_press", "double_tap", "drag", "pinch_zoom", "set_slider",
             "undo_action", "clipboard_set", "copy_selection", "paste_clipboard",
             "whatsapp_photo", "whatsapp_reply_current", "instagram_message",
-            "telegram_message", "sms_message", "gmail_send", "share_screenshot"
+            "telegram_message", "sms_message", "gmail_send", "share_screenshot",
+            // v2.0.0 mutations.
+            "whatsapp_group_message", "fill_form"
         )
         private val PAYMENT_REGEX = Regex(
             "\\b(pay|payment|payments|purchase|buy now|place order|checkout|check out|" +

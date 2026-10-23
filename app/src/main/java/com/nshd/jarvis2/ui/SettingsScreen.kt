@@ -1333,6 +1333,13 @@ fun SettingsScreen(
             )
         }
 
+        // ── v2.0.0: Brain Upgrade (learned commands & routines) ──────
+        Spacer(modifier = Modifier.height(JarvisDimens.sectionGap))
+        BrainUpgradeSection(
+            settings = settings,
+            onSettingsChange = onSettingsChange
+        )
+
         // ── Developer footer ───────────────────────────────────────────
         Spacer(modifier = Modifier.height(JarvisDimens.sectionGap))
         Column(
@@ -1368,7 +1375,7 @@ fun SettingsScreen(
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "JARVIS • v1.9.1",
+                text = "JARVIS • v2.0.0",
                 style = MaterialTheme.typography.labelMedium.copy(
                     letterSpacing = 1.2.sp
                 ),

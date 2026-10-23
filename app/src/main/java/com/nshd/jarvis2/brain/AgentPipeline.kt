@@ -5,14 +5,21 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
 import com.nshd.jarvis2.JarvisSettings
+import com.nshd.jarvis2.brain.tools.ConfirmGate
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.core.AppLog
+import com.nshd.jarvis2.core.BrainStore
+import com.nshd.jarvis2.core.MacroRecorder
+import com.nshd.jarvis2.core.ScheduledAlarms
 import com.nshd.jarvis2.hands.ContactsResolver
 import com.nshd.jarvis2.hands.DeepIntents
+import com.nshd.jarvis2.hands.LocationHelper
 import com.nshd.jarvis2.hands.TaskState
 import com.nshd.jarvis2.hands.TaskStoppedException
+import com.nshd.jarvis2.memory.Fact
 import com.nshd.jarvis2.memory.MemoryCategories
 import com.nshd.jarvis2.memory.MemoryDb
+import com.nshd.jarvis2.service.JarvisNotificationListener
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +50,14 @@ import org.json.JSONObject
  */
 object AgentPipeline {
 
+    /**
+     * v2.0.0 (#16): set when this turn was itself a macro replay or a
+     * custom-command re-dispatch — such turns never feed the "save as
+     * a command" learning (a replay must not offer to save itself).
+     */
+    @Volatile
+    private var suppressMacroNote = false
+
     suspend fun handleUserText(
         context: Context,
         text: String,
@@ -51,8 +66,11 @@ object AgentPipeline {
         providerStore: ProviderStore,
         codeMode: Boolean = false,
         onEvent: (ToolEvent) -> Unit = {},
-        onAssistantDelta: (String) -> Unit = {}
+        onAssistantDelta: (String) -> Unit = {},
+        /** Plan #71: an image attached in chat, forwarded to the model. */
+        imageBase64: String? = null
     ): String {
+        suppressMacroNote = false
         // Feed the floating overlay's Task HUD (Level 5): the pipeline
         // runs under the caller's own coroutine Job so the overlay's
         // abort can cancel it. dispatch() calls TaskState.begin with
@@ -70,14 +88,39 @@ object AgentPipeline {
         if (turnTitle.isNotBlank()) TaskQueue.beginTask(turnTitle)
         val turnStartedAt = System.currentTimeMillis()
         return try {
-            val result = withContext(Dispatchers.IO) {
+            val rawResult = withContext(Dispatchers.IO) {
                 dispatch(
                     context, text, settings, memoryDb, providerStore,
-                    codeMode, job, onEvent, onAssistantDelta
+                    codeMode, job, onEvent, onAssistantDelta, imageBase64
                 )
             }
-            val success = !result.startsWith("I couldn't") &&
-                !result.startsWith("Please configure")
+            val success = !rawResult.startsWith("I couldn't") &&
+                !rawResult.startsWith("Please configure")
+            // ── v2.0.0 (#16): learn from successful turns ──────────
+            // A successful turn that executed ≥2 tools is a macro
+            // candidate. The FIRST time the same goal succeeds, it is
+            // counted silently; the SECOND time, the reply offers
+            // "save that as a command" (the save itself is a separate
+            // explicit command, so nothing is ever saved unasked).
+            var result = rawResult
+            val recordedSteps = MacroRecorder.snapshot()
+            if (success && !suppressMacroNote && recordedSteps.size >= 2) {
+                val goalKey = BrainStore.normalizeKey(text)
+                val alreadyMacro = BrainStore.findMacro(context, goalKey) != null
+                val count = BrainStore.noteSuccessfulTurn(
+                    context, text.trim(), recordedSteps
+                )
+                if (count == 2 && !alreadyMacro) {
+                    AppLog.i(
+                        "Agent",
+                        "macro offer: goal succeeded 2× (${recordedSteps.size} steps)"
+                    )
+                    result += "\n\n💾 You've asked me to do this twice now — " +
+                        "say \"save that as a command\" and I'll save these " +
+                        "${recordedSteps.size} steps so next time it runs " +
+                        "instantly, with no model call."
+                }
+            }
             // F7: panel outcome line + chat-only plan collapse. A
             // "generic" plan whose item never executed a tool was a
             // chat answer, not an action — render the honest 2-step
@@ -141,11 +184,16 @@ object AgentPipeline {
         codeMode: Boolean = false,
         job: Job,
         onEvent: (ToolEvent) -> Unit = {},
-        onAssistantDelta: (String) -> Unit = {}
+        onAssistantDelta: (String) -> Unit = {},
+        imageBase64: String? = null,
+        depth: Int = 0
     ): String = withContext(Dispatchers.IO) {
         val clean = text.trim()
         if (clean.isBlank()) return@withContext "I didn't catch that — please try again."
         AppLog.d("Agent", "turn received (${clean.length} chars)")
+        // v2.0.0 (#16): arm the macro recorder for this turn (a
+        // custom-command re-dispatch shares the OUTER turn's record).
+        if (depth == 0) MacroRecorder.begin()
 
         // ── F8 (#15): stop / cancel — abort the running task. Runs
         // BEFORE TaskState.begin so TaskState still holds the RUNNING
@@ -231,6 +279,18 @@ object AgentPipeline {
         // #61: a stop pressed during the local routes above wins here.
         TaskState.throwIfStopRequested()
 
+        // ── v2.0.0 Brain routes ─────────────────────────────────────
+        // Learned structures, all deterministic and model-free, run
+        // BEFORE the quick router: teach/save commands, scheduled
+        // sends (whose text would otherwise match the immediate-send
+        // patterns), routine create/run, macro triggers and custom
+        // commands. Order inside the block matters and is deliberate.
+        val brainReply = brainRoutes(
+            context, clean, settings, memoryDb, providerStore,
+            codeMode, job, hudEvent, onAssistantDelta, depth
+        )
+        if (brainReply != null) return@withContext brainReply
+
         // ── Deterministic quick commands (work with no API key) ────────
         // F7 ORDER GUARANTEE: the quick router runs FIRST in dispatch
         // — before the editor-code route, before the splitter, before
@@ -241,6 +301,29 @@ object AgentPipeline {
         quickCommand(context, clean)?.let { quick ->
             AppLog.i("Agent", "route=quick-${quick.toolName}")
             return@withContext runQuick(context, quick, memoryDb, ExecutionLedger(), hudEvent)
+        }
+
+        // ── v2.0.0 (#22): on-device intent classifier ───────────────
+        // AFTER the exact quick patterns, BEFORE the model: catches
+        // paraphrases ("make it louder", "ring Mom") for the top
+        // commands with a conservative score+margin gate. A miss
+        // falls through to the editor route / splitter / agent loop
+        // exactly as before.
+        IntentClassifier.classify(context, clean)?.let { hit ->
+            AppLog.i("Agent", "route=classifier-${hit.intent}")
+            val quick = QuickCommand(
+                toolName = hit.toolName,
+                args = hit.args,
+                directReply = when (hit.directReplyKind) {
+                    "battery" -> batteryReply(context)
+                    "time" -> timeReply()
+                    "date" -> dateReply()
+                    else -> null
+                }
+            )
+            return@withContext runQuick(
+                context, quick, memoryDb, ExecutionLedger(), hudEvent
+            )
         }
 
         // ── Write-code-into-editor route (F6 D2-4) ────────────────────
@@ -318,8 +401,384 @@ object AgentPipeline {
         AppLog.i("Agent", "route=loop")
         runAgentTurn(
             context, clean, settings, memoryDb, providerStore,
-            codeMode, hudEvent, onAssistantDelta, ExecutionLedger()
+            codeMode, hudEvent, onAssistantDelta, ExecutionLedger(),
+            imageBase64 = imageBase64
         )
+    }
+
+    // ── v2.0.0 Brain routes ──────────────────────────────────────────
+
+    /**
+     * The learned-structure routes. Returns the turn's reply when a
+     * route matched, or null to continue down the normal pipeline
+     * (quick commands → classifier → editor route → splitter → loop).
+     */
+    private suspend fun brainRoutes(
+        context: Context,
+        clean: String,
+        settings: JarvisSettings,
+        memoryDb: MemoryDb,
+        providerStore: ProviderStore,
+        codeMode: Boolean,
+        hudEvent: (ToolEvent) -> Unit,
+        onAssistantDelta: (String) -> Unit,
+        depth: Int
+    ): String? {
+        val normalized = normalizeCommandText(clean)
+
+        // ── #16: "save that as a command [called X]" ────────────────
+        val saveMatch = Regex(
+            "(?i)^save (?:that|this) as a (?:quick )?command(?: called (.+))?$"
+        ).matchEntire(normalized) ?: Regex(
+            "(?i)^make (?:that|this) a (?:quick )?command(?: called (.+))?$"
+        ).matchEntire(normalized)
+        if (saveMatch != null) {
+            AppLog.i("Agent", "route=macro-save")
+            val candidate = BrainStore.lastCandidate(context)
+                ?: return "There's no finished task to save yet — ask me " +
+                    "to do something first, then say \"save that as a command\"."
+            val trigger = saveMatch.groupValues.getOrNull(1)?.trim()
+                ?.takeIf { it.isNotBlank() } ?: candidate.goal
+            BrainStore.saveMacro(
+                context,
+                BrainStore.Macro(
+                    trigger = trigger,
+                    steps = candidate.steps,
+                    sourceGoal = candidate.goal
+                )
+            )
+            BrainStore.clearCandidate(context)
+            suppressMacroNote = true
+            return "Saved ✅ — the ${candidate.steps.size} steps from " +
+                "\"${candidate.goal}\" are now the quick command " +
+                "\"$trigger\". Say \"$trigger\" any time and I'll run " +
+                "them instantly, with no model call. (Any send inside " +
+                "still asks you to confirm first.)"
+        }
+
+        // ── Custom quick commands: "when I say X, do Y" ─────────────
+        val teachMatch = Regex(
+            "(?i)^when i say (.+?)\\s*,\\s*(?:do|run|execute)\\s+(.+)$"
+        ).matchEntire(normalized) ?: Regex(
+            "(?i)^when i say (.+?)\\s+(?:do|run|execute)\\s+(.+)$"
+        ).matchEntire(normalized) ?: Regex(
+            "(?i)^when i say (.+?)\\s*,\\s*(.+)$"
+        ).matchEntire(normalized)
+        if (teachMatch != null) {
+            val phrase = teachMatch.groupValues[1].trim()
+            val target = teachMatch.groupValues[2].trim()
+            if (phrase.length >= 2 && target.isNotBlank()) {
+                AppLog.i("Agent", "route=custom-teach '$phrase'")
+                BrainStore.saveCustomCommand(
+                    context, BrainStore.CustomCommand(phrase, target)
+                )
+                suppressMacroNote = true
+                return "Got it ✅ — when you say \"$phrase\", I'll run: \"$target\"."
+            }
+        }
+
+        // ── #51: scheduled message (gate at schedule time) ──────────
+        tryScheduleMessage(context, clean)?.let { reply ->
+            AppLog.i("Agent", "route=scheduled-message")
+            suppressMacroNote = true
+            return reply
+        }
+
+        // ── #115: routine create ─────────────────────────────────────
+        val routineCreate = Regex(
+            "(?i)^create (?:a )?routine (?:called )?(.+?)\\s*:\\s*(.+)$"
+        ).matchEntire(normalized) ?: Regex(
+            "(?i)^create (?:a )?routine (?:called )?(.+?) with steps:?\\s+(.+)$"
+        ).matchEntire(normalized)
+        if (routineCreate != null) {
+            val name = routineCreate.groupValues[1].trim()
+            val steps = routineCreate.groupValues[2]
+                .split(Regex("\\s*;\\s*|\\s+and then\\s+|\\s*\\n\\s*"))
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+            if (name.isNotBlank() && steps.isNotEmpty()) {
+                AppLog.i("Agent", "route=routine-create '$name' (${steps.size} steps)")
+                BrainStore.saveRoutine(
+                    context,
+                    BrainStore.Routine(
+                        name = name,
+                        trigger = "MANUAL",
+                        steps = steps
+                    )
+                )
+                suppressMacroNote = true
+                return "Routine \"$name\" saved with ${steps.size} step(s) ✅ — " +
+                    "say \"run routine $name\" to run it. You can make it " +
+                    "run on wake or app-open in Settings → Brain Upgrade."
+            }
+        }
+
+        // ── #115: routine run ────────────────────────────────────────
+        val routineRun = Regex(
+            "(?i)^(?:run|start|do) (?:the |my )?routine (.+)$"
+        ).matchEntire(normalized) ?: Regex(
+            "(?i)^(?:run|start) my (.+?) routine$"
+        ).matchEntire(normalized)
+        if (routineRun != null) {
+            val name = routineRun.groupValues[1].trim()
+            val routine = BrainStore.findRoutine(context, name)
+            if (routine == null) {
+                val known = BrainStore.routines(context)
+                return if (known.isEmpty()) {
+                    "You don't have a routine called \"$name\" yet — " +
+                        "create one with \"create routine $name: step 1; step 2\"."
+                } else {
+                    "No routine called \"$name\". Your routines: " +
+                        known.joinToString(", ") { it.name } + "."
+                }
+            }
+            AppLog.i("Agent", "route=routine-run '${routine.name}'")
+            suppressMacroNote = true
+            return runRoutineSteps(
+                context, routine, settings, memoryDb, providerStore,
+                hudEvent, registerTask = false
+            )
+        }
+
+        if (depth == 0) {
+            // ── #17: macro trigger (exact phrase) ───────────────────
+            BrainStore.findMacro(context, BrainStore.normalizeKey(clean))
+                ?.let { macro ->
+                    AppLog.i(
+                        "Agent",
+                        "route=macro-replay '${macro.trigger}' (${macro.steps.size} steps)"
+                    )
+                    suppressMacroNote = true
+                    return runMacro(context, macro, memoryDb, hudEvent)
+                }
+
+            // ── Custom command trigger (exact phrase) ───────────────
+            BrainStore.findCustomCommand(
+                context, BrainStore.normalizeKey(clean)
+            )?.let { command ->
+                AppLog.i(
+                    "Agent",
+                    "route=custom-command '${command.phrase}' → '${command.target}'"
+                )
+                suppressMacroNote = true
+                return dispatch(
+                    context, command.target, settings, memoryDb,
+                    providerStore, codeMode,
+                    job = currentCoroutineContext()[Job] ?: Job(),
+                    onEvent = hudEvent,
+                    onAssistantDelta = onAssistantDelta,
+                    imageBase64 = null,
+                    depth = 1
+                )
+            }
+        }
+        return null
+    }
+
+    /**
+     * #17: macro replay — the recorded tool sequence runs through a
+     * fresh ToolExecutor + fresh ExecutionLedger, with NO model call.
+     * Every step keeps its normal safety behaviour: a recorded send
+     * hits the always-confirm gate again (recipient + full text),
+     * because the replay calls the same tool implementations.
+     */
+    private suspend fun runMacro(
+        context: Context,
+        macro: BrainStore.Macro,
+        memoryDb: MemoryDb,
+        onEvent: (ToolEvent) -> Unit
+    ): String {
+        // A replay never records itself into a new candidate.
+        MacroRecorder.disarm()
+        TaskQueue.setPlanForRunning(
+            macro.steps.map { ToolEvent.prettyTool(it.tool) },
+            kind = "macro"
+        )
+        val executor = ToolExecutor(context, memoryDb, ExecutionLedger())
+        val lines = mutableListOf<String>()
+        var done = 0
+        for ((index, step) in macro.steps.withIndex()) {
+            TaskState.throwIfStopRequested()
+            TaskQueue.setPlanStepForRunning(index, PlanStepState.RUNNING)
+            val args = try {
+                JSONObject(step.argsJson)
+            } catch (e: Exception) {
+                JSONObject()
+            }
+            val result = executor.execute(
+                step.tool, args, includeScreenSummary = false
+            )
+            if (result.success) done++
+            TaskQueue.setPlanStepForRunning(
+                index,
+                if (result.success) PlanStepState.DONE else PlanStepState.FAILED
+            )
+            lines += (if (result.success) "✅ " else "❌ ") +
+                ToolEvent.prettyTool(step.tool) + " — " +
+                result.message.lineSequence().firstOrNull().orEmpty().take(90)
+        }
+        return buildString {
+            append("Ran your \"${macro.trigger}\" command — ")
+            append("$done of ${macro.steps.size} steps done.")
+            lines.forEach { append("\n").append(it) }
+        }
+    }
+
+    /**
+     * #115: run one routine's steps through the same per-step paths
+     * the task queue uses (quick commands first, then the agent
+     * loop), each with a fresh ledger. Shared by the chat/voice
+     * "run routine" route ([registerTask] = false — the turn already
+     * owns a task item) and by RoutineRunner's headless wake /
+     * app-open runs ([registerTask] = true).
+     */
+    suspend fun runRoutineSteps(
+        context: Context,
+        routine: BrainStore.Routine,
+        settings: JarvisSettings,
+        memoryDb: MemoryDb,
+        providerStore: ProviderStore,
+        onEvent: (ToolEvent) -> Unit,
+        registerTask: Boolean = true
+    ): String {
+        val job = currentCoroutineContext()[Job] ?: Job()
+        if (registerTask) TaskQueue.beginTask("Routine: ${routine.name}")
+        val lines = mutableListOf<String>()
+        var done = 0
+        var failed = 0
+        try {
+            for ((index, stepText) in routine.steps.withIndex()) {
+                TaskState.throwIfStopRequested()
+                currentCoroutineContext().ensureActive()
+                TaskState.begin(goal = stepText.take(60), job = job, maxSteps = 10)
+                onEvent(
+                    ToolEvent(
+                        ToolEventKind.INFO, "",
+                        "Routine step ${index + 1}/${routine.steps.size}: $stepText"
+                    )
+                )
+                val result = try {
+                    val quick = quickCommand(context, stepText)
+                    if (quick != null) {
+                        runQuick(
+                            context, quick, memoryDb,
+                            ExecutionLedger(), onEvent
+                        )
+                    } else {
+                        runAgentTurn(
+                            context, stepText, settings, memoryDb,
+                            providerStore, codeMode = false,
+                            onEvent = onEvent,
+                            onAssistantDelta = {},
+                            ledger = ExecutionLedger()
+                        )
+                    }
+                } catch (e: TaskStoppedException) {
+                    throw e
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    AppLog.e(
+                        "Brain",
+                        "routine step '$stepText' crashed: " +
+                            (e.message ?: "error"),
+                        e
+                    )
+                    "Failed: " +
+                        com.nshd.jarvis2.ui.FriendlyErrors.shortReason(e.message)
+                }
+                val ok = !isFailureResult(result)
+                if (ok) done++ else failed++
+                lines += (if (ok) "✅ " else "❌ ") + stepText + " — " +
+                    result.lineSequence().firstOrNull().orEmpty().take(90)
+            }
+        } finally {
+            if (registerTask) TaskQueue.finishRunning(failed == 0)
+        }
+        return buildString {
+            append("☀️ Routine \"${routine.name}\" — $done of ")
+            append("${routine.steps.size} steps done")
+            if (failed > 0) append(" ($failed failed)")
+            append(".")
+            lines.forEach { append("\n").append(it) }
+        }
+    }
+
+    /**
+     * #51: parse + gate + store a scheduled WhatsApp message.
+     * Returns the reply when the text IS a scheduled-send request
+     * (scheduled, or refused at the gate), null when it isn't one —
+     * the tail after "saying" must end in a parseable time ("at 7 pm",
+     * "tomorrow at 9 am", "for 18:30") for the route to claim it.
+     * The draft is all that is created here: at fire time the alarm
+     * posts a due notification and the actual send re-enters the
+     * gated whatsapp_message flow.
+     */
+    private suspend fun tryScheduleMessage(
+        context: Context,
+        clean: String
+    ): String? {
+        val match = Regex(
+            "(?i)^(?:schedule|send) (?:a )?(?:whatsapp )?message to (.+?) saying (.+)$"
+        ).matchEntire(normalizeCommandText(clean)) ?: return null
+        val contact = match.groupValues[1].trim()
+        val tail = match.groupValues[2].trim()
+        // Split the tail into message + when, from the END: the last
+        // " at "/" for " whose remainder parses as a time of day
+        // (optionally wrapped in "tomorrow"). Searched on the
+        // lowercase tail (indexes are identical) because STT casing
+        // varies. " tomorrow at " wins over the bare " at " inside it.
+        val lowerTail = tail.lowercase()
+        val tomorrowAt = lowerTail.lastIndexOf(" tomorrow at ")
+        val splitIndex = if (tomorrowAt > 0) {
+            tomorrowAt
+        } else {
+            listOf(
+                lowerTail.lastIndexOf(" at "),
+                lowerTail.lastIndexOf(" for ")
+            ).filter { it > 0 }.maxOrNull() ?: return null
+        }
+        val message = tail.substring(0, splitIndex).trim()
+            .removeSuffix("tomorrow").trim()
+        var whenText = tail.substring(splitIndex).trim()
+        val explicitTomorrow = whenText.contains("tomorrow", ignoreCase = true)
+        whenText = whenText
+            .replace(Regex("(?i)tomorrow"), "")
+            .trim()
+            .removePrefix("at").trim()
+            .removePrefix("for").trim()
+        val (hour, minute) = parseTimeOfDay(whenText) ?: return null
+        if (contact.isBlank() || message.isBlank()) return null
+        val fireAt = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, hour)
+            set(java.util.Calendar.MINUTE, minute)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+            if (explicitTomorrow ||
+                timeInMillis <= System.currentTimeMillis()
+            ) {
+                add(java.util.Calendar.DAY_OF_YEAR, 1)
+            }
+        }
+        val whenLabel = java.text.SimpleDateFormat(
+            "EEE d MMM, h:mm a", java.util.Locale.ENGLISH
+        ).format(fireAt.time)
+        val approved = ConfirmGate.confirm(
+            "Schedule a WhatsApp message to $contact for $whenLabel?\n\n" +
+                "Message: \"$message\"\n\n" +
+                "It stays a draft — when the time comes, Jarvis will " +
+                "ask you to confirm the send itself."
+        )
+        if (!approved) {
+            return "Okay — I didn't schedule that message."
+        }
+        val item = BrainStore.addScheduled(
+            context, contact, message, fireAt.timeInMillis
+        )
+        ScheduledAlarms.schedule(context, item)
+        return "Scheduled ✅ — WhatsApp message to $contact for " +
+            "$whenLabel: \"$message\". It's a draft: when the time " +
+            "comes I'll ask you to confirm the actual send."
     }
 
     /** Background scope for #82-style housekeeping (never blocks a turn). */
@@ -442,6 +901,41 @@ object AgentPipeline {
         }
     }
 
+    /**
+     * v2.0.0 (#76): topic-matched memory injection — only memories
+     * relevant to THIS request enter the prompt (faster, and the
+     * model isn't distracted by unrelated facts). Personal /
+     * Preferences / Contacts facts always ride along (identity +
+     * aliases are relevant to almost everything); other categories
+     * join when they share a significant token with the request.
+     * With nothing matched, the 5 most recent facts are used so a
+     * bare "hi" still has some context. The full store is untouched —
+     * "what do you remember" still lists everything.
+     */
+    private fun relevantFacts(memoryDb: MemoryDb, query: String): List<Fact> {
+        val all = memoryDb.allFacts(null, null)
+        if (all.size <= 12) return all
+        val tokens = query.lowercase()
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.length >= 4 }
+            .toSet()
+        val always = all.filter { fact ->
+            fact.category == MemoryCategories.PERSONAL ||
+                fact.category == MemoryCategories.PREFERENCES ||
+                fact.category == MemoryCategories.CONTACTS
+        }
+        val matched = all.filter { fact ->
+            fact !in always &&
+                tokens.any { token -> fact.text.lowercase().contains(token) }
+        }
+        val selected = (always + matched).distinctBy { it.id }.take(12)
+        AppLog.d(
+            "Agent",
+            "memory injection: ${selected.size}/${all.size} facts (topic-matched)"
+        )
+        return if (selected.isEmpty()) all.take(5) else selected
+    }
+
     /** The model + tools agent loop for exactly one user goal. */
     private suspend fun runAgentTurn(
         context: Context,
@@ -452,9 +946,10 @@ object AgentPipeline {
         codeMode: Boolean,
         onEvent: (ToolEvent) -> Unit,
         onAssistantDelta: (String) -> Unit,
-        ledger: ExecutionLedger
+        ledger: ExecutionLedger,
+        imageBase64: String? = null
     ): String {
-        val facts = memoryDb.allFacts(null, null)
+        val facts = relevantFacts(memoryDb, userText)
         val systemPrompt = PersonaPrompts.build(settings, facts, codeMode)
         // Trim what's SENT (stored history stays intact): last 16 turns
         // keeps prompts small, which keeps free-tier latency down.
@@ -463,8 +958,10 @@ object AgentPipeline {
             .map { ChatMsg(role = it.role, content = it.content) }
         val messages = mutableListOf(ChatMsg("system", systemPrompt))
         messages += history
-        if (history.lastOrNull()?.content != userText) {
-            messages += ChatMsg("user", userText)
+        // Plan #71: an attached image rides on the user turn (the
+        // provider layer serializes it as a vision content part).
+        if (history.lastOrNull()?.content != userText || imageBase64 != null) {
+            messages += ChatMsg("user", userText, imageBase64 = imageBase64)
         }
         val executor = ToolExecutor(context, memoryDb, ledger)
         // F7: the generic agent loop runs the screenshot's generic
@@ -756,7 +1253,7 @@ object AgentPipeline {
         )
         TaskQueue.setPlanStepForRunning(0, PlanStepState.DONE)
         TaskQueue.setPlanStepForRunning(1, PlanStepState.RUNNING)
-        val facts = memoryDb.allFacts(null, null)
+        val facts = relevantFacts(memoryDb, userText)
         val systemPrompt = PersonaPrompts.build(settings, facts, codeMode) +
             EDITOR_CODE_INSTRUCTION
         val history = memoryDb.lastMessages(6)
@@ -1115,9 +1612,106 @@ object AgentPipeline {
         }
     }
 
+    /**
+     * v2.0.0 (#49): explicit WhatsApp GROUP sends. Checked before the
+     * 1:1 WhatsApp patterns — otherwise "the group Family" would be
+     * resolved as a contact name and the send would go nowhere.
+     */
+    private fun groupBroadcastQuick(text: String): QuickCommand? {
+        fun build(group: String, message: String): QuickCommand =
+            QuickCommand(
+                "whatsapp_group_message",
+                JSONObject()
+                    .put("group", group.trim())
+                    .put("message", message.trim())
+            )
+        Regex("(?i)^broadcast (?:to )?(?:the )?(.+?)(?: group)?\\s*:\\s*(.+)$")
+            .find(text)?.let { return build(it.groupValues[1], it.groupValues[2]) }
+        Regex("(?i)^broadcast (?:to )?(?:the )?(.+?)(?: group)? saying (.+)$")
+            .find(text)?.let { return build(it.groupValues[1], it.groupValues[2]) }
+        Regex("(?i)^send (?:a )?(?:whatsapp )?message to (?:the )?group (.+?)\\s*:\\s*(.+)$")
+            .find(text)?.let { return build(it.groupValues[1], it.groupValues[2]) }
+        Regex("(?i)^send (?:a )?message to (?:the )?(.+?) group\\s*:\\s*(.+)$")
+            .find(text)?.let { return build(it.groupValues[1], it.groupValues[2]) }
+        Regex("(?i)^message (?:the )?group (.+?)\\s*:\\s*(.+)$")
+            .find(text)?.let { return build(it.groupValues[1], it.groupValues[2]) }
+        return null
+    }
+
+    /** v2.0.0 (#50): spoken-style summary of stored notifications. */
+    private fun notificationReply(context: Context, whatsappOnly: Boolean): String {
+        if (!BrainStore.notifReaderEnabled(context)) {
+            return "The notification reader is off. Turn it on in " +
+                "Settings → Brain Upgrade → Notification reader, and " +
+                "grant Notification Access when Android asks — then " +
+                "I can read your unread messages aloud."
+        }
+        if (!JarvisNotificationListener.connected) {
+            return "Notification Access isn't active yet. Open " +
+                "Permissions → Notification Access and allow Jarvis, " +
+                "then ask me again."
+        }
+        val notes = if (whatsappOnly) {
+            JarvisNotificationListener.recent().filter {
+                it.packageName == "com.whatsapp" ||
+                    it.packageName == "com.whatsapp.w4b"
+            }
+        } else {
+            JarvisNotificationListener.recent()
+        }
+        if (notes.isEmpty()) {
+            return if (whatsappOnly) {
+                "No WhatsApp notifications right now — you're all caught up."
+            } else {
+                "No notifications to read right now."
+            }
+        }
+        val shown = notes.take(8)
+        return buildString {
+            append(
+                if (whatsappOnly) {
+                    "Here are your latest WhatsApp notifications:"
+                } else {
+                    "Here are your latest notifications:"
+                }
+            )
+            shown.forEach { note ->
+                append("\n• ")
+                if (note.title.isNotBlank()) append(note.title)
+                if (note.text.isNotBlank()) {
+                    if (note.title.isNotBlank()) append(": ")
+                    append(note.text.take(140))
+                }
+            }
+            if (notes.size > shown.size) {
+                append("\n…and ${notes.size - shown.size} more.")
+            }
+        }
+    }
+
+    /** v2.0.0 (#114): "where am I" — permission-aware direct reply. */
+    private fun locationReply(context: Context): String {
+        if (!LocationHelper.hasPermission(context)) {
+            return "I don't have location permission yet — grant " +
+                "\"Precise Location\" in Permissions and ask me again."
+        }
+        val fix = LocationHelper.lastKnownFix(context)
+            ?: return "I couldn't get a location fix — turn on Location " +
+                "and open Maps once so the phone has a recent position, " +
+                "then ask me again."
+        return LocationHelper.describe(fix) +
+            " Map: " + LocationHelper.mapsLink(fix)
+    }
+
     private fun quickCommand(context: Context, rawText: String): QuickCommand? {
         val text = normalizeCommandText(rawText)
         val lower = text.lowercase()
+
+        // v2.0.0 (#49): explicit group sends claim the text first —
+        // see groupBroadcastQuick.
+        if (lower.contains("group") || lower.startsWith("broadcast")) {
+            groupBroadcastQuick(text)?.let { return it }
+        }
 
         // ── WhatsApp sends (F7 expanded). Every hit still runs the
         // whatsapp_message tool, whose own ConfirmGate confirms with
@@ -1554,6 +2148,83 @@ object AgentPipeline {
             return QuickCommand("share_screenshot", JSONObject())
         }
 
+        // ── v2.0.0 "Brain Upgrade" quick patterns ────────────────────
+
+        // #49 (second shape): "send a whatsapp message to the group
+        // X saying Y" — the colon shapes are claimed at the top of
+        // quickCommand (see groupBroadcastQuick) before the 1:1
+        // WhatsApp patterns can read "the group X" as a contact name.
+        Regex("(?i)^send (?:a )?whatsapp (?:message )?to (?:the )?group (.+?) saying (.+)$")
+            .find(text)?.let { match ->
+                return QuickCommand(
+                    "whatsapp_group_message",
+                    JSONObject()
+                        .put("group", match.groupValues[1].trim())
+                        .put("message", match.groupValues[2].trim())
+                )
+            }
+
+        // #50: unread reader — answered locally from the notification
+        // listener's in-memory store (opt-in, see BrainStore).
+        if (lower in READ_WHATSAPP_COMMANDS || lower in READ_ALL_NOTIF_COMMANDS) {
+            val whatsappOnly = lower in READ_WHATSAPP_COMMANDS
+            return QuickCommand(
+                "direct_reply",
+                JSONObject(),
+                directReply = notificationReply(context, whatsappOnly)
+            )
+        }
+
+        // #114: location answers.
+        if (lower in WHERE_AM_I_COMMANDS) {
+            return QuickCommand(
+                "direct_reply",
+                JSONObject(),
+                directReply = locationReply(context)
+            )
+        }
+        Regex("(?i)^(?:share|send) my location (?:with|to) (.+)$")
+            .find(text)?.let { match ->
+                val fix = if (LocationHelper.hasPermission(context)) {
+                    LocationHelper.lastKnownFix(context)
+                } else {
+                    null
+                }
+                return if (fix != null) {
+                    QuickCommand(
+                        "whatsapp_message",
+                        JSONObject()
+                            .put("contact", match.groupValues[1].trim())
+                            .put(
+                                "message",
+                                "My location: " + LocationHelper.mapsLink(fix)
+                            )
+                    )
+                } else {
+                    QuickCommand(
+                        "direct_reply",
+                        JSONObject(),
+                        directReply = locationReply(context)
+                    )
+                }
+            }
+
+        // #111: download helper.
+        Regex("(?i)^download (https?://\\S+)$").find(text)?.let { match ->
+            return QuickCommand(
+                "download_url",
+                JSONObject().put("url", match.groupValues[1].trim())
+            )
+        }
+
+        // #112: call controls (the tool checks the permission).
+        if (lower in ANSWER_CALL_COMMANDS) {
+            return QuickCommand("call_answer", JSONObject())
+        }
+        if (lower in REJECT_CALL_COMMANDS) {
+            return QuickCommand("call_reject", JSONObject())
+        }
+
         Regex("(?i)^open\\s+(.+)$").find(text)?.let { match ->
             val app = match.groupValues[1].trim()
             // Avoid swallowing ordinary model requests that merely begin
@@ -1718,6 +2389,38 @@ object AgentPipeline {
     private val SHARE_SCREENSHOT_COMMANDS = setOf(
         "share screenshot", "share this screenshot", "share the screenshot",
         "share this page", "share page", "share screen", "share this screen"
+    )
+
+    /** v2.0.0 (#50): unread-reader commands. */
+    private val READ_WHATSAPP_COMMANDS = setOf(
+        "read my whatsapp messages", "read my whatsapp",
+        "read whatsapp messages", "whatsapp messages",
+        "read my unread whatsapp messages"
+    )
+
+    private val READ_ALL_NOTIF_COMMANDS = setOf(
+        "read my notifications", "read notifications",
+        "who messaged me", "who texted me", "any new messages",
+        "read my messages", "check my notifications",
+        "what are my notifications"
+    )
+
+    /** v2.0.0 (#114): location queries. */
+    private val WHERE_AM_I_COMMANDS = setOf(
+        "where am i", "what is my location", "what's my location",
+        "my location", "where am i now", "current location",
+        "tell me my location"
+    )
+
+    /** v2.0.0 (#112): call controls. */
+    private val ANSWER_CALL_COMMANDS = setOf(
+        "answer the call", "answer call", "pick up the call",
+        "pick up", "take the call", "accept the call"
+    )
+
+    private val REJECT_CALL_COMMANDS = setOf(
+        "reject the call", "reject call", "decline the call",
+        "decline call", "end the call", "hang up", "cut the call"
     )
 
     private val SILENT_ON_COMMANDS = setOf(

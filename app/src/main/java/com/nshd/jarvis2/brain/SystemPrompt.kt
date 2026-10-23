@@ -13,9 +13,12 @@ object PersonaPrompts {
 
     /** Builds the full system prompt: persona + identity + language + memory. */
     fun build(settings: JarvisSettings, facts: List<Fact>, codeMode: Boolean): String {
+        // Plan #78 (v2.0.0): the ACTIVE persona may come from the
+        // schedule (or today's manual override), not the stored pick.
+        val activePersona = PersonaSchedule.effectivePersona(settings)
         val base = when {
-            settings.persona == PERSONA_GIRLFRIEND -> girlfriend(settings)
-            settings.persona == PERSONA_CUSTOM &&
+            activePersona == PERSONA_GIRLFRIEND -> girlfriend(settings)
+            activePersona == PERSONA_CUSTOM &&
                 settings.customPersonaPrompt.isNotBlank() -> custom(settings)
             else -> jarvisPro(settings)
         }
@@ -119,4 +122,48 @@ object PersonaPrompts {
             "him as ${s.callsign}. Be concise and sharp: lead with the answer, add " +
             "detail only when it earns its place, anticipate the next useful step. " +
             "Professional warmth, dry humour when it fits, no corporate filler."
+}
+
+/**
+ * Plan #78 (v2.0.0): persona schedules. When enabled, the day
+ * window ([JarvisSettings.personaDayStartHour] until
+ * [JarvisSettings.personaDayEndHour]) runs the day persona and the
+ * rest of the day runs the night persona — e.g. Jarvis Pro 9–18,
+ * Girlfriend Mode in the evenings. A manual persona pick made while
+ * the schedule is on is stored as an override that wins for the
+ * rest of that calendar day (MainActivity captures it).
+ */
+object PersonaSchedule {
+
+    fun effectivePersona(
+        settings: JarvisSettings,
+        now: java.util.Calendar = java.util.Calendar.getInstance()
+    ): String {
+        if (settings.personaOverride.isNotBlank() &&
+            settings.personaOverrideDay == todayKey(now)
+        ) {
+            return settings.personaOverride
+        }
+        if (!settings.personaScheduleEnabled) return settings.persona
+        val hour = now.get(java.util.Calendar.HOUR_OF_DAY)
+        val start = settings.personaDayStartHour.coerceIn(0, 23)
+        val end = settings.personaDayEndHour.coerceIn(0, 23)
+        val inDayWindow = if (start <= end) {
+            hour in start until end
+        } else {
+            hour >= start || hour < end
+        }
+        return if (inDayWindow) {
+            settings.personaDayPersona
+        } else {
+            settings.personaNightPersona
+        }
+    }
+
+    private fun todayKey(cal: java.util.Calendar): String =
+        "%04d-%02d-%02d".format(
+            cal.get(java.util.Calendar.YEAR),
+            cal.get(java.util.Calendar.MONTH) + 1,
+            cal.get(java.util.Calendar.DAY_OF_MONTH)
+        )
 }

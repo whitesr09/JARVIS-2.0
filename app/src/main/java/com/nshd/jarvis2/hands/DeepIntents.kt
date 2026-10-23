@@ -1173,6 +1173,56 @@ class DeepIntents(context: Context) {
     }
 
     /**
+     * v2.0.0 (#49): WhatsApp GROUP message — open WhatsApp, find the
+     * group by name (chat list first, then the Search flow), open it
+     * and type + send via [typeAndSendInOpenChat]. The gate +
+     * SendPermit are handled by ToolExecutor, exactly like a 1:1 send.
+     */
+    suspend fun whatsappGroupMessage(groupName: String, message: String): ActionResult {
+        val pkg = "com.whatsapp"
+        if (!isPackageInstalled(pkg)) {
+            return ActionResult(false, "WhatsApp is not installed.")
+        }
+        val opened = openApp("WhatsApp")
+        if (!opened.success) return opened
+        HandsActions.waitForPackage(pkg, 3_000)
+        HandsActions.waitForSettle(1_200)
+        val service = JarvisAccessibilityService.instance
+            ?: return ActionResult(false, "Accessibility is not enabled.")
+        val reader = service.screenReader()
+        // The group may already be visible in the chat list.
+        var row = reader.findByText(groupName)
+        if (row == null) {
+            val search = reader.snapshot().firstOrNull {
+                (it.desc.contains("search", ignoreCase = true) ||
+                    it.viewId.endsWith("menuitem_search")) && it.clickable
+            }
+            if (search != null) {
+                HandsActions.clickElement(search.index)
+                HandsActions.waitForSettle(800)
+                val field = reader.snapshot().firstOrNull { it.editable }
+                if (field != null) {
+                    HandsActions.clickElement(field.index)
+                    HandsActions.setTextOnFocused(groupName)
+                    HandsActions.waitForSettle(1_200)
+                }
+            }
+            row = reader.findByText(groupName)
+        }
+        val groupRow = row ?: return ActionResult(
+            false,
+            "WhatsApp opened, but no group named \"$groupName\" was found."
+        )
+        val tappedRow = HandsActions.clickElement(groupRow.index)
+        if (!tappedRow.success) {
+            return ActionResult(false, "The group chat could not be opened.")
+        }
+        HandsActions.waitForSettle(1_200)
+        TaskState.throwIfStopRequested()
+        return typeAndSendInOpenChat(pkg, message)
+    }
+
+    /**
      * #45: Instagram DM — open Instagram, go to the inbox, search the
      * contact, open the thread, type + send (gate already approved by
      * ToolExecutor; permit granted there too). Best-effort staged

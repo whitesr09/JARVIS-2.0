@@ -193,6 +193,49 @@ fun JarvisApp(
             }
         }
 
+        // v2.0.0 (#113): headset / Bluetooth media-button toggle —
+        // the same toggle the overlay bubble performs: stop a live
+        // session, or start a background one via the wake path.
+        val voiceToggleRequested by
+            AppNavRequests.voiceToggleRequested.collectAsState()
+        LaunchedEffect(voiceToggleRequested) {
+            if (AppNavRequests.consumeVoiceToggleRequest()) {
+                val status = voiceState.status
+                val voiceActive = status !=
+                    com.nshd.jarvis2.voice.VoiceStatus.IDLE &&
+                    status != com.nshd.jarvis2.voice.VoiceStatus.ERROR
+                if (voiceActive) {
+                    VoiceSessionManager.stop()
+                } else {
+                    runCatching {
+                        VoiceSessionManager.startFromWake(appContext)
+                    }
+                }
+            }
+        }
+
+        // v2.0.0 (#115): app-open routines fire once per process
+        // (RoutineRunner self-gates to once a day per routine).
+        LaunchedEffect(Unit) {
+            withContext(Dispatchers.IO) {
+                com.nshd.jarvis2.core.RoutineRunner
+                    .maybeRunOnAppOpen(appContext)
+            }
+        }
+
+        // v2.0.0 (#51): a scheduled message came due — show its draft
+        // for review (the dialog renders below, next to What's New).
+        var dueScheduledId by remember { mutableStateOf<Long?>(null) }
+        val scheduledRequested by
+            AppNavRequests.scheduledRequested.collectAsState()
+        LaunchedEffect(scheduledRequested) {
+            AppNavRequests.consumeScheduledRequest()?.let { id ->
+                dueScheduledId = id
+                tab = Tab.CHAT
+                subScreen = SubScreen.NONE
+            }
+        }
+
         // F5.1: while the keyboard is up, the floating nav is hidden
         // (plain conditional — no animation state to glitch while
         // typing) so it can never overlap a composer; the Scaffold
@@ -366,27 +409,31 @@ fun JarvisApp(
                 if (showWhatsNew) {
                     AlertDialog(
                         onDismissRequest = { showWhatsNew = false },
-                        title = { Text("What's new in v1.9.0") },
+                        title = { Text("What's new in v2.0.0") },
                         text = {
                             Text(
-                                "More Powers: new gesture tools " +
-                                    "(long-press, drag, pinch, sliders), " +
-                                    "clipboard tools, read-this-page and " +
-                                    "an undo for text edits. WhatsApp " +
-                                    "photo sharing and open-chat replies, " +
-                                    "Instagram, Telegram, SMS and Gmail " +
-                                    "sends — all behind the confirm " +
-                                    "gate. Alarms, timers and calendar " +
-                                    "events by voice; quick notes; " +
-                                    "hold-to-talk; wake sensitivity; " +
-                                    "DND respect; a memory review queue " +
-                                    "and duplicate tidy; chat export, " +
-                                    "markdown tables and HTML preview; " +
-                                    "12 new avatars, launcher shortcuts " +
-                                    "and a Quick Settings tile. Plus a " +
-                                    "permission health " +
-                                    "dashboard, full backup/restore " +
-                                    "and an update checker."
+                                "Brain Upgrade: Jarvis can now learn. " +
+                                    "Teach it \"when I say X, do Y\", save " +
+                                    "a finished task as a quick command " +
+                                    "and replay it with no model call, " +
+                                    "build named routines that run on " +
+                                    "wake or app-open, and schedule " +
+                                    "WhatsApp messages (always confirmed " +
+                                    "again before they send). An on-device " +
+                                    "intent classifier answers paraphrases " +
+                                    "offline; form-filling proposes " +
+                                    "values from Memory Core; only " +
+                                    "topic-relevant memories enter the " +
+                                    "prompt now. Plus: your own wake " +
+                                    "phrase, persona schedules, group " +
+                                    "broadcasts, an unread-message " +
+                                    "reader, image questions in chat, " +
+                                    "call answer/reject by voice, " +
+                                    "headset-button wake, location " +
+                                    "answers, a download helper and a " +
+                                    "model A/B test in Settings. (Also " +
+                                    "includes the v1.9.1 voice-crash " +
+                                    "hotfix.)"
                             )
                         },
                         confirmButton = {
@@ -403,6 +450,59 @@ fun JarvisApp(
                             ) { Text("Got it") }
                         }
                     )
+                }
+                // v2.0.0 (#51): due scheduled-message draft. "Send now"
+                // injects the send into Chat, where it re-enters the
+                // normal pipeline and hits the always-confirm gate
+                // (recipient + full text) before anything is sent.
+                dueScheduledId?.let { dueId ->
+                    val item = com.nshd.jarvis2.core.BrainStore
+                        .getScheduled(appContext, dueId)
+                    if (item == null) {
+                        dueScheduledId = null
+                    } else {
+                        AlertDialog(
+                            onDismissRequest = { dueScheduledId = null },
+                            title = { Text("Scheduled message due ⏰") },
+                            text = {
+                                Text(
+                                    "To: ${item.contact}\n\n" +
+                                        "Message: \"${item.message}\"\n\n" +
+                                        "Sending still asks you to " +
+                                        "confirm the recipient and text."
+                                )
+                            },
+                            confirmButton = {
+                                Button(
+                                    onClick = {
+                                        com.nshd.jarvis2.core.BrainStore
+                                            .removeScheduled(appContext, dueId)
+                                        dueScheduledId = null
+                                        AppNavRequests.requestChatText(
+                                            "message ${item.contact}: " +
+                                                item.message
+                                        )
+                                    }
+                                ) { Text("Send now") }
+                            },
+                            dismissButton = {
+                                Row {
+                                    TextButton(
+                                        onClick = {
+                                            com.nshd.jarvis2.core.BrainStore
+                                                .removeScheduled(appContext, dueId)
+                                            com.nshd.jarvis2.core.ScheduledAlarms
+                                                .cancel(appContext, dueId)
+                                            dueScheduledId = null
+                                        }
+                                    ) { Text("Delete") }
+                                    TextButton(
+                                        onClick = { dueScheduledId = null }
+                                    ) { Text("Later") }
+                                }
+                            }
+                        )
+                    }
                 }
             }
         }

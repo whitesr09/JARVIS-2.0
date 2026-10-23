@@ -63,14 +63,22 @@ interface AiProvider {
      * accumulation (full content + any tool calls). The default
      * implementation degrades to a single-shot call and emits the full
      * content once, so non-streaming providers still work.
+     *
+     * Plan #20 (v2.0.0): [onToolCallReady] fires the moment a streamed
+     * tool call's argument JSON first parses as complete — before the
+     * stream's tail (final content chunks / [DONE]) has arrived — so
+     * the agent loop can surface the decision (HUD event + timing)
+     * immediately instead of waiting for the full response.
      */
     suspend fun chatStream(
         messages: List<ChatMsg>,
         model: String,
         tools: JSONArray?,
-        onDelta: (String) -> Unit
+        onDelta: (String) -> Unit,
+        onToolCallReady: (ToolCall) -> Unit = {}
     ): ModelReply {
         val reply = chatWithTools(messages, model, tools)
+        reply.toolCalls.forEach(onToolCallReady)
         if (reply.content.isNotBlank()) onDelta(reply.content)
         return reply
     }
@@ -242,7 +250,8 @@ class OpenAiCompatibleProvider(
         messages: List<ChatMsg>,
         model: String,
         tools: JSONArray?,
-        onDelta: (String) -> Unit
+        onDelta: (String) -> Unit,
+        onToolCallReady: (ToolCall) -> Unit
     ): ModelReply = withContext(Dispatchers.IO) {
         if (baseUrl.isBlank()) throw AiException("No base URL configured")
         if (apiKey.isBlank()) throw AiException("No API key configured")
@@ -284,6 +293,7 @@ class OpenAiCompatibleProvider(
                         "$id model=$model stream rejected (HTTP 400) — retrying non-streamed"
                     )
                     val reply = chatWithTools(messages, model, tools)
+                    reply.toolCalls.forEach(onToolCallReady)
                     if (reply.content.isNotBlank()) onDelta(reply.content)
                     return@withContext reply
                 }
@@ -299,6 +309,9 @@ class OpenAiCompatibleProvider(
                 ?: throw AiException("Empty streaming response")
             val content = StringBuilder()
             val toolBuilders = sortedMapOf<Int, ToolCallBuilder>()
+            // Plan #20: indices whose argument JSON has already closed
+            // and been announced via onToolCallReady.
+            val readyAnnounced = mutableSetOf<Int>()
             var emittedAny = false
             var sawDone = false
             try {
@@ -342,6 +355,23 @@ class OpenAiCompatibleProvider(
                             is String -> builder.arguments.append(argsPart)
                             null -> Unit
                             else -> builder.arguments.append(argsPart.toString())
+                        }
+                        // Plan #20: the moment this call's accumulated
+                        // arguments parse as complete JSON, announce
+                        // the decision — the stream tail (remaining
+                        // content, [DONE]) no longer delays it.
+                        if (index !in readyAnnounced &&
+                            builder.name.isNotBlank() &&
+                            isCompleteJson(builder.arguments.toString())
+                        ) {
+                            readyAnnounced += index
+                            onToolCallReady(
+                                ToolCall(
+                                    id = builder.id.ifBlank { "call_$index" },
+                                    name = builder.name.toString(),
+                                    argumentsJson = builder.arguments.toString()
+                                )
+                            )
                         }
                     }
                 }
@@ -395,6 +425,22 @@ class OpenAiCompatibleProvider(
         var id: String = ""
         val name = StringBuilder()
         val arguments = StringBuilder()
+    }
+
+    /** Plan #20: does [text] parse as one complete JSON object/array? */
+    private fun isCompleteJson(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.length < 2) return false
+        return try {
+            when (trimmed.first()) {
+                '{' -> JSONObject(trimmed)
+                '[' -> JSONArray(trimmed)
+                else -> return false
+            }
+            true
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun serializeMessages(messages: List<ChatMsg>): JSONArray {

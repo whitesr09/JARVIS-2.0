@@ -13,6 +13,7 @@
     <uses-permission android:name="android.permission.CALL_PHONE" />
     <!-- Plan #11: lets a voice session notice a phone call and resume after it. -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -116,6 +117,26 @@
             android:name=".service.WakeWordService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- v2.0.0 (#86/#50): opt-in notification listener — powers
+             the unread reader ("read my WhatsApp messages" / "who
+             messaged me?"). Inert until the user both flips the
+             Settings toggle AND grants Notification Access. -->
+        <service
+            android:name=".service.JarvisNotificationListener"
+            android:exported="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- v2.0.0 (#51): scheduled-message alarm — posts the due
+             notification only; the send itself re-enters the gated
+             in-app flow. -->
+        <receiver
+            android:name=".service.ScheduledMessageReceiver"
+            android:exported="false" />
 
         <!-- F5: shares the exported log file (cacheDir/jarvis-log.txt)
              from the App Logs viewer. -->

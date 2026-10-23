@@ -131,9 +131,22 @@ class FailoverRouter(
             // F5.1: first line of the most recent tool result — used
             // to say what DID happen if the model dies mid-task (E3).
             var lastToolOutcome: String? = null
+            // v2.0.0 (#20): tool calls whose decision was already
+            // surfaced mid-stream (their argument JSON closed before
+            // the response tail arrived) — execution below must not
+            // fire a duplicate STARTED event for them.
+            val earlyAnnounced = mutableSetOf<String>()
+            // v2.0.0: loop guard — exact (tool, arguments) signatures
+            // executed this turn; a third identical execution is a
+            // spin, not progress, and is refused.
+            val signatureCounts = mutableMapOf<String, Int>()
+            // v2.0.0: dynamic step budget — a turn that keeps making
+            // successful progress earns more steps (up to HARD_CAP);
+            // a stalled or failing turn keeps the configured budget.
+            var stepBudget = maxSteps.coerceAtLeast(1)
             try {
                 var step = 0
-                while (step < maxSteps.coerceAtLeast(1)) {
+                while (step < stepBudget) {
                     // F6: keep the step prompt lean — tool results
                     // older than the last 6 steps collapse to their
                     // first line (the model rarely re-reads an old
@@ -147,7 +160,19 @@ class FailoverRouter(
                         tools = ToolRegistry.openAiTools(),
                         providerLabel = config.label,
                         toolsExecuted = { executedAnyTool },
-                        onDelta = onAssistantDelta
+                        onDelta = onAssistantDelta,
+                        onToolCallReady = { call ->
+                            // #20: the decision is known NOW — surface
+                            // it (HUD chip + timing) without waiting
+                            // for the stream tail.
+                            if (earlyAnnounced.add(call.id)) {
+                                AppLog.d(
+                                    "Agent",
+                                    "streaming decision ready early: ${call.name}"
+                                )
+                                onEvent(ToolEvent(ToolEventKind.STARTED, call.name))
+                            }
+                        }
                     )
                     val modelMs = System.currentTimeMillis() - modelStartedAt
                     if (reply.toolCalls.isEmpty()) {
@@ -168,12 +193,43 @@ class FailoverRouter(
 
                     var actionMs = 0L
                     var terminalReply: String? = null
+                    var loopGuardTripped = false
+                    var stepAllSucceeded = reply.toolCalls.isNotEmpty()
                     for (call in reply.toolCalls) {
-                        onEvent(ToolEvent(ToolEventKind.STARTED, call.name))
+                        if (call.id !in earlyAnnounced) {
+                            onEvent(ToolEvent(ToolEventKind.STARTED, call.name))
+                        }
                         val args = try {
                             JSONObject(call.argumentsJson.ifBlank { "{}" })
                         } catch (e: Exception) {
                             JSONObject()
+                        }
+                        // v2.0.0 loop guard: the ExecutionLedger
+                        // already prevents a literal re-execution, but
+                        // a model can still burn every step asking for
+                        // the same action — the third identical ask is
+                        // refused and the turn wraps up with a summary.
+                        val signature = call.name + "|" +
+                            call.argumentsJson.ifBlank { "{}" }
+                        val signatureCount = (signatureCounts[signature] ?: 0) + 1
+                        signatureCounts[signature] = signatureCount
+                        if (signatureCount > 2) {
+                            loopGuardTripped = true
+                            stepAllSucceeded = false
+                            AppLog.w(
+                                "Agent",
+                                "loop guard: ${call.name} asked a 3rd time " +
+                                    "with identical arguments — refusing"
+                            )
+                            conversation += ChatMsg(
+                                role = "tool",
+                                content = "Loop guard: this exact action was " +
+                                    "already performed twice this turn and " +
+                                    "will not be run again. Summarise the " +
+                                    "current state for the user instead.",
+                                toolCallId = call.id
+                            )
+                            continue
                         }
                         val toolStartedAt = System.currentTimeMillis()
                         // v1.9.0 (#27): action batching — when one
@@ -203,6 +259,7 @@ class FailoverRouter(
                                 "in ${toolMs}ms"
                         )
                         executedAnyTool = true
+                        if (!result.success) stepAllSucceeded = false
                         lastToolOutcome = result.message.lineSequence()
                             .firstOrNull()?.trim()?.trimEnd('.')
                             ?.takeIf { it.isNotBlank() }
@@ -253,7 +310,22 @@ class FailoverRouter(
                             "tool=${reply.toolCalls.joinToString(",") { it.name }}"
                     )
                     terminalReply?.let { return it }
+                    // v2.0.0 loop guard: stop stepping and let the
+                    // summary call below explain the state.
+                    if (loopGuardTripped) break
                     step++
+                    // v2.0.0 dynamic step budget: progress earns
+                    // headroom (bounded); failure does not.
+                    if (step >= stepBudget && stepAllSucceeded &&
+                        stepBudget < HARD_STEP_CAP
+                    ) {
+                        stepBudget = minOf(stepBudget + 4, HARD_STEP_CAP)
+                        AppLog.i(
+                            "Agent",
+                            "step budget extended to $stepBudget — " +
+                                "the task is still progressing"
+                        )
+                    }
                 }
 
                 onEvent(
@@ -340,12 +412,15 @@ class FailoverRouter(
         tools: JSONArray?,
         providerLabel: String,
         toolsExecuted: () -> Boolean,
-        onDelta: (String) -> Unit
+        onDelta: (String) -> Unit,
+        onToolCallReady: (ToolCall) -> Unit = {}
     ): ModelReply {
         var retriesUsed = 0
         while (true) {
             try {
-                return provider.chatStream(messages, model, tools, onDelta)
+                return provider.chatStream(
+                    messages, model, tools, onDelta, onToolCallReady
+                )
             } catch (e: Exception) {
                 val detail = e.message ?: "unexpected error"
                 val maxRetries = if (toolsExecuted()) 2 else 1
@@ -489,6 +564,9 @@ class FailoverRouter(
     }
 
     companion object {
+        /** v2.0.0: dynamic step budget hard cap (see agentLoop). */
+        private const val HARD_STEP_CAP = 16
+
         /** F6: suffix marking an already-compacted old tool result. */
         private const val COMPACTED_MARKER = " […]"
 

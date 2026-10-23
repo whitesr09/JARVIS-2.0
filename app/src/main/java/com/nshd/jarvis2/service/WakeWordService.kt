@@ -10,6 +10,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
@@ -68,6 +70,9 @@ class WakeWordService : Service(), RecognitionListener {
     private var lastWakeAtMs = 0L
 
     private var batteryReceiver: BroadcastReceiver? = null
+
+    /** Plan #113 (v2.0.0): headset / Bluetooth media-button session. */
+    private var mediaSession: MediaSession? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private val chime = ChimePlayer()
 
@@ -83,6 +88,7 @@ class WakeWordService : Service(), RecognitionListener {
         // first in the process installs the handler).
         com.nshd.jarvis2.CrashLogger.install(this)
         running = true
+        setupMediaSession()
         createNotificationChannel()
         startForegroundCompat("Starting wake-word listener…")
         WakeWordControl.registerSessionHook { active ->
@@ -129,6 +135,8 @@ class WakeWordService : Service(), RecognitionListener {
         running = false
         WakeWordControl.setWakeMicHeld(false)
         WakeWordControl.clearSessionHook()
+        runCatching { mediaSession?.release() }
+        mediaSession = null
         batteryReceiver?.let { runCatching { unregisterReceiver(it) } }
         batteryReceiver = null
         releaseWakeLock()
@@ -176,7 +184,28 @@ class WakeWordService : Service(), RecognitionListener {
                     return@launch
                 }
                 val loadedModel = Model(VoskModelManager.modelPath(this@WakeWordService))
-                val rec = Recognizer(loadedModel, SAMPLE_RATE, GRAMMAR)
+                // Plan #10 (v2.0.0): his own wake phrase joins the
+                // grammar when set. If the phrase breaks grammar
+                // construction (a word outside the small model's
+                // vocabulary can do that), fall back to the built-in
+                // grammar — the wake word must never die over it.
+                val customPhrase = customWakePhrase()
+                val rec = if (customPhrase.isNotBlank()) {
+                    try {
+                        Recognizer(
+                            loadedModel, SAMPLE_RATE, grammarWith(customPhrase)
+                        )
+                    } catch (e: Exception) {
+                        com.nshd.jarvis2.core.AppLog.w(
+                            "Wake",
+                            "custom wake phrase grammar failed " +
+                                "(${e.message}) — using built-in phrases"
+                        )
+                        Recognizer(loadedModel, SAMPLE_RATE, GRAMMAR)
+                    }
+                } else {
+                    Recognizer(loadedModel, SAMPLE_RATE, GRAMMAR)
+                }
                 val speech = SpeechService(rec, SAMPLE_RATE)
                 model = loadedModel
                 recognizer = rec
@@ -291,6 +320,27 @@ class WakeWordService : Service(), RecognitionListener {
         // Grammar recognizer sessions don't time out in practice; ignore.
     }
 
+    /**
+     * Plan #10 (v2.0.0): the user's custom wake phrase from settings
+     * (sanitized: lowercase letters/spaces, 2–5 words — the small
+     * offline model's vocabulary is limited, and the Settings UI
+     * says to prefer common English words).
+     */
+    private fun customWakePhrase(): String {
+        val raw = getSharedPreferences("jarvis_settings", MODE_PRIVATE)
+            .getString("custom_wake_phrase", "") ?: ""
+        val clean = raw.lowercase()
+            .replace(Regex("[^a-z\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        val words = clean.split(" ").filter { it.isNotBlank() }
+        return if (words.size in 2..5) clean else ""
+    }
+
+    /** Grammar JSON: the built-in phrases + [phrase] + [unk]. */
+    private fun grammarWith(phrase: String): String =
+        "[\"hey jarvis\", \"hey jarves\", \"jarvis\", \"$phrase\", \"[unk]\"]"
+
     private fun checkWakePhrase(hypothesis: String?) {
         if (hypothesis.isNullOrBlank()) return
         val json = try {
@@ -299,7 +349,10 @@ class WakeWordService : Service(), RecognitionListener {
             return
         }
         val text = json.optString("text").trim().lowercase()
-        if (text.contains("hey jarvis") || text == "jarvis") {
+        val customPhrase = customWakePhrase()
+        val heardCustom = customPhrase.isNotBlank() &&
+            (text == customPhrase || text.contains(customPhrase))
+        if (text.contains("hey jarvis") || text == "jarvis" || heardCustom) {
             val now = System.currentTimeMillis()
             if (now - lastWakeAtMs < WAKE_DEBOUNCE_MS) return
             // v1.9.0 (#9): sensitivity gate — the recognizer's word
@@ -390,6 +443,12 @@ class WakeWordService : Service(), RecognitionListener {
         } catch (e: Exception) {
             false
         }
+        if (started) {
+            // v2.0.0 (#115): on-wake routines (e.g. a morning greeting
+            // routine) fire alongside the session start.
+            com.nshd.jarvis2.brain.RoutineRunner
+                .maybeRunOnWake(applicationContext)
+        }
         if (!started) {
             pauseReasons -= REASON_WAKE_TRANSIENT
             applyEngineState()
@@ -469,6 +528,70 @@ class WakeWordService : Service(), RecognitionListener {
         if (lock != null) {
             runCatching { if (lock.isHeld) lock.release() }
         }
+    }
+
+    // ── Headset / Bluetooth media button (plan #113) ────────────────
+
+    /**
+     * An ACTIVE media session makes this service the target of
+     * headset and Bluetooth media buttons: a play/pause press starts
+     * (or stops) a voice session, exactly like saying the wake word.
+     * The session carries no media metadata and no audio focus games —
+     * it exists purely as the button target, and only while the wake
+     * service itself is running.
+     */
+    private fun setupMediaSession() {
+        runCatching {
+            val session = MediaSession(this, "jarvis_headset")
+            session.setCallback(object : MediaSession.Callback() {
+                override fun onPlay() = onHeadsetButton()
+                override fun onPause() = onHeadsetButton()
+                override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                    val keyEvent = mediaButtonIntent
+                        .getParcelableExtra<android.view.KeyEvent>(
+                            Intent.EXTRA_KEY_EVENT
+                        )
+                    if (keyEvent?.action == android.view.KeyEvent.ACTION_DOWN) {
+                        onHeadsetButton()
+                        return true
+                    }
+                    return super.onMediaButtonEvent(mediaButtonIntent)
+                }
+            })
+            session.setPlaybackState(
+                PlaybackState.Builder()
+                    .setActions(
+                        PlaybackState.ACTION_PLAY or
+                            PlaybackState.ACTION_PAUSE or
+                            PlaybackState.ACTION_PLAY_PAUSE
+                    )
+                    .setState(PlaybackState.STATE_PAUSED, 0, 1f)
+                    .build()
+            )
+            session.isActive = true
+            mediaSession = session
+            com.nshd.jarvis2.core.AppLog.i(
+                "Wake", "headset media-button session active (plan #113)"
+            )
+        }.onFailure {
+            com.nshd.jarvis2.core.AppLog.w(
+                "Wake", "media session setup failed: ${it.message}"
+            )
+        }
+    }
+
+    /** Headset press: toggle the voice session, like the wake word. */
+    private fun onHeadsetButton() {
+        com.nshd.jarvis2.core.AppLog.i("Wake", "headset button pressed")
+        // Route through the same start/stop entry the overlay uses:
+        // the main activity owns the session toggle + wake-hook runs.
+        val intent = Intent(this, com.nshd.jarvis2.MainActivity::class.java)
+            .setAction(com.nshd.jarvis2.MainActivity.ACTION_TOGGLE_VOICE)
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+            )
+        runCatching { startActivity(intent) }
     }
 
     // ── Battery awareness ──────────────────────────────────────────────

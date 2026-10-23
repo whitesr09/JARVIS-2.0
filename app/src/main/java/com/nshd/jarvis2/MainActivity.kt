@@ -71,7 +71,23 @@ data class JarvisSettings(
     /** Plan #14: push-to-talk — hold the orb/mic to talk, release to send. */
     val pttMode: Boolean = false,
     /** Plan #9: wake-word sensitivity — "LOW" / "NORMAL" / "HIGH". */
-    val wakeSensitivity: String = "NORMAL"
+    val wakeSensitivity: String = "NORMAL",
+    /**
+     * Plan #78 (v2.0.0): persona schedule — during the day window the
+     * [personaDayPersona] is active, outside it [personaNightPersona].
+     * A manual persona pick while the schedule is on becomes a
+     * one-day [personaOverride] (manual override wins, per the plan).
+     */
+    val personaScheduleEnabled: Boolean = false,
+    val personaDayPersona: String = "Jarvis Pro",
+    val personaNightPersona: String = "Girlfriend Mode",
+    val personaDayStartHour: Int = 9,
+    val personaDayEndHour: Int = 18,
+    /** Manual persona override ("" = none) + the day it was set ("yyyy-MM-dd"). */
+    val personaOverride: String = "",
+    val personaOverrideDay: String = "",
+    /** Plan #10 (v2.0.0): his own extra wake phrase ("" = Hey Jarvis only). */
+    val customWakePhrase: String = ""
 )
 
 class MainActivity : ComponentActivity() {
@@ -143,10 +159,26 @@ class MainActivity : ComponentActivity() {
             JarvisApp(
                 settings = settings,
                 onSettingsChange = { updated ->
-                    val themeChanged = updated.theme != settings.theme ||
-                        updated.customBgHex != settings.customBgHex
-                    settings = updated
-                    saveSettings(updated)
+                    // Plan #78: a manual persona pick while the
+                    // schedule is ON is a one-day override, not a
+                    // rewrite of the schedule's base choice (manual
+                    // override wins until tomorrow).
+                    var effective = updated
+                    if (updated.personaScheduleEnabled &&
+                        updated.persona != settings.persona &&
+                        updated.personaOverride == settings.personaOverride
+                    ) {
+                        effective = updated.copy(
+                            persona = settings.persona,
+                            personaOverride = updated.persona,
+                            personaOverrideDay =
+                                com.nshd.jarvis2.core.BrainStore.todayKey()
+                        )
+                    }
+                    val themeChanged = effective.theme != settings.theme ||
+                        effective.customBgHex != settings.customBgHex
+                    settings = effective
+                    saveSettings(effective)
                     // D3: a running overlay re-reads its HUD palette on
                     // start, so a theme change re-skins the HUD live.
                     if (themeChanged && FloatingOverlayService.isRunning()) {
@@ -176,6 +208,13 @@ class MainActivity : ComponentActivity() {
     /** The floating overlay bubble asks for the Voice screen via this extra. */
     private fun handleNavIntent(intent: Intent?) {
         if (intent == null) return
+        // v2.0.0 (#113): a headset / Bluetooth media-button press
+        // (routed here by WakeWordService's media session) toggles
+        // the voice session — JarvisApp consumes the request.
+        if (intent.action == ACTION_TOGGLE_VOICE) {
+            AppNavRequests.requestVoiceToggle()
+            intent.action = null
+        }
         // Wake-word launches must punch through the lock screen: the flags
         // have to be set before the content shows (API 27+ activity calls).
         if (intent.getBooleanExtra(EXTRA_FROM_WAKE, false)) {
@@ -188,6 +227,14 @@ class MainActivity : ComponentActivity() {
         if (intent.getBooleanExtra(EXTRA_OPEN_VOICE, false) == true) {
             AppNavRequests.requestVoice()
             intent.removeExtra(EXTRA_OPEN_VOICE)
+        }
+        // v2.0.0 (#51): a scheduled message came due — JarvisApp
+        // shows the draft for review; the send re-enters the gated
+        // flow (recipient + text confirmed again at fire time).
+        val scheduledId = intent.getLongExtra(EXTRA_SCHEDULED_ID, -1L)
+        if (scheduledId > 0) {
+            AppNavRequests.requestScheduled(scheduledId)
+            intent.removeExtra(EXTRA_SCHEDULED_ID)
         }
         // v1.9.0: launcher static shortcuts + the QS tile carry their
         // target screen in this extra ("voice" / "chat" / "handsfree"
@@ -248,7 +295,16 @@ class MainActivity : ComponentActivity() {
             customPersonaPrompt = prefs.getString(KEY_CUSTOM_PERSONA_PROMPT, "") ?: "",
             dndRespect = prefs.getBoolean(KEY_DND_RESPECT, true),
             pttMode = prefs.getBoolean(KEY_PTT_MODE, false),
-            wakeSensitivity = prefs.getString(KEY_WAKE_SENSITIVITY, "NORMAL") ?: "NORMAL"
+            wakeSensitivity = prefs.getString(KEY_WAKE_SENSITIVITY, "NORMAL") ?: "NORMAL",
+            personaScheduleEnabled = prefs.getBoolean(KEY_PERSONA_SCHEDULE, false),
+            personaDayPersona = prefs.getString(KEY_PERSONA_DAY, "Jarvis Pro") ?: "Jarvis Pro",
+            personaNightPersona = prefs.getString(KEY_PERSONA_NIGHT, "Girlfriend Mode")
+                ?: "Girlfriend Mode",
+            personaDayStartHour = prefs.getInt(KEY_PERSONA_DAY_START, 9),
+            personaDayEndHour = prefs.getInt(KEY_PERSONA_DAY_END, 18),
+            personaOverride = prefs.getString(KEY_PERSONA_OVERRIDE, "") ?: "",
+            personaOverrideDay = prefs.getString(KEY_PERSONA_OVERRIDE_DAY, "") ?: "",
+            customWakePhrase = prefs.getString(KEY_CUSTOM_WAKE_PHRASE, "") ?: ""
         )
     }
 
@@ -283,10 +339,22 @@ class MainActivity : ComponentActivity() {
             .putBoolean(KEY_DND_RESPECT, s.dndRespect)
             .putBoolean(KEY_PTT_MODE, s.pttMode)
             .putString(KEY_WAKE_SENSITIVITY, s.wakeSensitivity)
+            .putBoolean(KEY_PERSONA_SCHEDULE, s.personaScheduleEnabled)
+            .putString(KEY_PERSONA_DAY, s.personaDayPersona)
+            .putString(KEY_PERSONA_NIGHT, s.personaNightPersona)
+            .putInt(KEY_PERSONA_DAY_START, s.personaDayStartHour)
+            .putInt(KEY_PERSONA_DAY_END, s.personaDayEndHour)
+            .putString(KEY_PERSONA_OVERRIDE, s.personaOverride)
+            .putString(KEY_PERSONA_OVERRIDE_DAY, s.personaOverrideDay)
+            .putString(KEY_CUSTOM_WAKE_PHRASE, s.customWakePhrase)
             .apply()
     }
 
     companion object {
+        /** v2.0.0 (#113): headset media-button toggle (WakeWordService). */
+        const val ACTION_TOGGLE_VOICE = "com.nshd.jarvis2.action.TOGGLE_VOICE"
+        /** v2.0.0 (#51): a due scheduled message's id (notification tap). */
+        const val EXTRA_SCHEDULED_ID = "scheduled_id"
         const val EXTRA_OPEN_VOICE = "open_voice"
         /** v1.9.0: shortcut/tile target screen (see handleNavIntent). */
         const val EXTRA_OPEN_SCREEN = "open_screen"
@@ -322,5 +390,13 @@ class MainActivity : ComponentActivity() {
         private const val KEY_DND_RESPECT = "dnd_respect"
         private const val KEY_PTT_MODE = "ptt_mode"
         private const val KEY_WAKE_SENSITIVITY = "wake_sensitivity"
+        private const val KEY_PERSONA_SCHEDULE = "persona_schedule_enabled"
+        private const val KEY_PERSONA_DAY = "persona_day_persona"
+        private const val KEY_PERSONA_NIGHT = "persona_night_persona"
+        private const val KEY_PERSONA_DAY_START = "persona_day_start_hour"
+        private const val KEY_PERSONA_DAY_END = "persona_day_end_hour"
+        private const val KEY_PERSONA_OVERRIDE = "persona_override"
+        private const val KEY_PERSONA_OVERRIDE_DAY = "persona_override_day"
+        private const val KEY_CUSTOM_WAKE_PHRASE = "custom_wake_phrase"
     }
 }

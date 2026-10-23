@@ -185,6 +185,32 @@ fun PermissionsScreen(onBack: () -> Unit) {
                     )
                 )
             }
+        ),
+        PermissionItem(
+            title = "Answer / Reject Calls by Voice",
+            description = "Say \"answer the call\" or \"reject the call\" " +
+                "while the phone rings (v2.0.0)",
+            granted = has(Manifest.permission.ANSWER_PHONE_CALLS),
+            actionLabel = "Grant",
+            onAction = {
+                permissionLauncher.launch(
+                    arrayOf(Manifest.permission.ANSWER_PHONE_CALLS)
+                )
+            }
+        ),
+        PermissionItem(
+            title = "Notification Access",
+            description = "Powers the unread reader — \"read my " +
+                "WhatsApp messages\" (opt-in, v2.0.0; also flip the " +
+                "toggle in Settings → Brain Upgrade)",
+            granted = NotificationManagerCompat
+                .getEnabledListenerPackages(context).contains(pkg),
+            actionLabel = "Manage",
+            onAction = {
+                openIntent(
+                    Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                )
+            }
         )
     )
 

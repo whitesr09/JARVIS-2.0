@@ -41,4 +41,52 @@ object AppNavRequests {
         _screenRequested.value = null
         return target
     }
+
+    // ── v2.0.0 (#113): headset / Bluetooth media-button toggle ──────
+    private val _voiceToggleRequested = MutableStateFlow(false)
+    val voiceToggleRequested: StateFlow<Boolean> = _voiceToggleRequested.asStateFlow()
+
+    fun requestVoiceToggle() {
+        _voiceToggleRequested.value = true
+    }
+
+    /** Returns true (and clears the flag) when a toggle is pending. */
+    fun consumeVoiceToggleRequest(): Boolean {
+        if (!_voiceToggleRequested.value) return false
+        _voiceToggleRequested.value = false
+        return true
+    }
+
+    // ── v2.0.0 (#51): a scheduled message came due ───────────────────
+    private val _scheduledRequested = MutableStateFlow<Long?>(null)
+    val scheduledRequested: StateFlow<Long?> = _scheduledRequested.asStateFlow()
+
+    fun requestScheduled(id: Long) {
+        _scheduledRequested.value = id
+    }
+
+    /** Returns (and clears) the due scheduled message id, if any. */
+    fun consumeScheduledRequest(): Long? {
+        val id = _scheduledRequested.value
+        _scheduledRequested.value = null
+        return id
+    }
+
+    // ── v2.0.0 (#51): inject a command into Chat as if typed ─────────
+    // Used by the due-draft dialog's "Send now": the text re-enters
+    // the normal pipeline, so the send is gated (recipient + full
+    // text) exactly like a freshly spoken command.
+    private val _chatTextRequested = MutableStateFlow<String?>(null)
+    val chatTextRequested: StateFlow<String?> = _chatTextRequested.asStateFlow()
+
+    fun requestChatText(text: String) {
+        _chatTextRequested.value = text
+    }
+
+    /** Returns (and clears) the pending chat text, if any. */
+    fun consumeChatTextRequest(): String? {
+        val text = _chatTextRequested.value
+        _chatTextRequested.value = null
+        return text
+    }
 }

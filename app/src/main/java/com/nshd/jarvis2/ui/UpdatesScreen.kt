@@ -91,6 +91,35 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v2.0.0 — Brain Upgrade: Jarvis learns",
+            body = "The final phase of the Next-100 plan (all 115 " +
+                "items now shipped). Learned macros: finish a task " +
+                "twice and Jarvis offers to save it — then \"save " +
+                "that as a command called …\" records the exact tool " +
+                "sequence and replays it later with NO model call " +
+                "(any send inside still asks you to confirm first). " +
+                "Custom quick commands: \"when I say X, do Y\". " +
+                "Routines: named multi-step routines that run by " +
+                "voice, on wake, or on app-open. Scheduled WhatsApp " +
+                "messages are gated when you schedule them AND " +
+                "confirmed again at fire time — they are drafts, " +
+                "never auto-sent. An on-device intent classifier " +
+                "answers paraphrases of the top commands with no " +
+                "network at all, and agent steps now act on streamed " +
+                "tool calls the moment their JSON closes. Also: your " +
+                "own custom wake phrase, persona schedules (Pro by " +
+                "day, Girlfriend Mode by night — a manual pick wins " +
+                "for the day), form-filling that proposes values " +
+                "from Memory Core behind one confirm, only " +
+                "topic-relevant memories entering the prompt, " +
+                "WhatsApp group broadcasts, the opt-in unread " +
+                "reader, image questions in chat, a model A/B test " +
+                "in Settings, voice call answer/reject, headset-" +
+                "button wake, location answers and a download helper."
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+
+        InfoCard(
             title = "v1.9.1 — Hotfix",
             body = "Fix: voice crash when Live fell back to the " +
                 "Universal engine (missing ACCESS_NETWORK_STATE " +
