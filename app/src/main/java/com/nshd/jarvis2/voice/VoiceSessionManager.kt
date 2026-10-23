@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Looper
 import android.os.SystemClock
 import android.telephony.PhoneStateListener
+import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.CrashLogger
@@ -668,8 +669,8 @@ object VoiceSessionManager {
             callWatchManager = tm
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val callback = object :
-                    TelephonyManager.TelephonyCallback(),
-                    TelephonyManager.TelephonyCallback.CallStateListener {
+                    TelephonyCallback(),
+                    TelephonyCallback.CallStateListener {
                     override fun onCallStateChanged(state: Int) {
                         handleCallStateChange(state)
                     }
@@ -706,7 +707,7 @@ object VoiceSessionManager {
         if (watch == null || tm == null) return
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                watch is TelephonyManager.TelephonyCallback
+                watch is TelephonyCallback
             ) {
                 tm.unregisterTelephonyCallback(watch)
             } else if (watch is PhoneStateListener) {

@@ -305,7 +305,6 @@ fun SettingsScreen(
             showBackup = false
             summary.onSuccess { s ->
                 restoreJsonText = ""
-                refreshPrivacyCounts()
                 info = InfoDialog(
                     "Backup restored",
                     "Applied ${s.settingsApplied} settings and added " +
