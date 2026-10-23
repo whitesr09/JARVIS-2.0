@@ -1,10 +1,15 @@
 package com.nshd.jarvis2.ui
 
+import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -93,6 +98,13 @@ fun HandsFreeScreen(
     var batteryFree by remember {
         mutableStateOf(A11yStatus.isIgnoringBatteryOptimizations(context))
     }
+    // Plan #84: permission-health states, refreshed on ON_RESUME below.
+    var micGranted by remember { mutableStateOf(hasRuntimePermission(context, Manifest.permission.RECORD_AUDIO)) }
+    var contactsGranted by remember { mutableStateOf(hasRuntimePermission(context, Manifest.permission.READ_CONTACTS)) }
+    var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var notificationsOn by remember {
+        mutableStateOf(NotificationManagerCompat.from(context).areNotificationsEnabled())
+    }
     var screenPreview by remember { mutableStateOf<String?>(null) }
     var torchOn by remember { mutableStateOf(false) }
     // F8 (#106): self-test results (null = dialog closed).
@@ -105,6 +117,11 @@ fun HandsFreeScreen(
             if (event == Lifecycle.Event.ON_RESUME) {
                 a11yEnabled = A11yStatus.isEnabled(context)
                 batteryFree = A11yStatus.isIgnoringBatteryOptimizations(context)
+                micGranted = hasRuntimePermission(context, Manifest.permission.RECORD_AUDIO)
+                contactsGranted = hasRuntimePermission(context, Manifest.permission.READ_CONTACTS)
+                overlayGranted = Settings.canDrawOverlays(context)
+                notificationsOn =
+                    NotificationManagerCompat.from(context).areNotificationsEnabled()
             }
         }
         activity?.lifecycle?.addObserver(observer)
@@ -390,6 +407,98 @@ fun HandsFreeScreen(
                 }
                 OutlinedButton(onClick = onOpenPermissions) { Text("Open") }
             }
+        }
+
+        // ── Plan #84: Permission Health dashboard ──────────────────────
+        SectionLabel(
+            text = "PERMISSION HEALTH",
+            modifier = Modifier.padding(
+                top = JarvisDimens.sectionGap,
+                bottom = JarvisDimens.spaceSm
+            )
+        )
+        GlassCard {
+            val healthOk = listOf(
+                a11yEnabled, overlayGranted, micGranted,
+                notificationsOn, batteryFree, contactsGranted
+            ).count { it }
+            Text(
+                text = "$healthOk of 6 healthy — phone brand detected: " +
+                    phoneBrandLabel(),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = if (healthOk == 6) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.error
+                }
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            PermissionHealthRow(
+                title = "Accessibility",
+                ok = a11yEnabled,
+                detail = "Digital hands: read screens, tap, type",
+                onFix = { openAccessibilitySettings() }
+            )
+            PermissionHealthRow(
+                title = "Overlay (draw over apps)",
+                ok = overlayGranted,
+                detail = "Floating avatar + task panel",
+                onFix = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:${context.packageName}")
+                            )
+                        )
+                    }
+                }
+            )
+            PermissionHealthRow(
+                title = "Microphone",
+                ok = micGranted,
+                detail = "Voice sessions and the wake word",
+                onFix = onOpenPermissions
+            )
+            PermissionHealthRow(
+                title = "Notifications",
+                ok = notificationsOn,
+                detail = "Wake + hands-off alerts can reach you",
+                onFix = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                .putExtra(
+                                    Settings.EXTRA_APP_PACKAGE,
+                                    context.packageName
+                                )
+                        )
+                    }
+                }
+            )
+            PermissionHealthRow(
+                title = "Battery exemption",
+                ok = batteryFree,
+                detail = "Unrestricted — the system won't freeze Jarvis",
+                onFix = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:${context.packageName}")
+                            )
+                        )
+                    }
+                }
+            )
+            PermissionHealthRow(
+                title = "Contacts",
+                ok = contactsGranted,
+                detail = "Call and message people by name",
+                onFix = onOpenPermissions,
+                last = true
+            )
         }
 
         // ── Digital Hands tools (moved from Settings) ──────────────────
@@ -685,26 +794,111 @@ private fun KeepAliveStep(
     }
 }
 
+/** Plan #84 helper: runtime-permission check for the health rows. */
+private fun hasRuntimePermission(context: Context, permission: String): Boolean =
+    ContextCompat.checkSelfPermission(context, permission) ==
+        PackageManager.PERMISSION_GRANTED
+
+/** Plan #85: friendly brand label for the detected manufacturer. */
+private fun phoneBrandLabel(): String {
+    val maker = Build.MANUFACTURER.lowercase()
+    return when {
+        maker.contains("vivo") || maker.contains("iqoo") -> "Vivo / iQOO"
+        maker.contains("samsung") -> "Samsung"
+        maker.contains("xiaomi") || maker.contains("redmi") ||
+            maker.contains("poco") -> "Xiaomi"
+        maker.isBlank() -> "Android"
+        else -> Build.MANUFACTURER.replaceFirstChar { it.uppercase() }
+    }
+}
+
+/** Plan #84: one health row — status glyph, detail, one-tap Fix. */
+@Composable
+private fun PermissionHealthRow(
+    title: String,
+    ok: Boolean,
+    detail: String,
+    onFix: () -> Unit,
+    last: Boolean = false
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = if (ok) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+            contentDescription = null,
+            tint = if (ok) {
+                JarvisSemanticColors.success
+            } else {
+                MaterialTheme.colorScheme.error
+            },
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (!ok) {
+            OutlinedButton(onClick = onFix) { Text("Fix") }
+        } else {
+            Text(
+                text = "OK",
+                style = MaterialTheme.typography.labelMedium,
+                color = JarvisSemanticColors.success,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+    if (!last) {
+        Spacer(modifier = Modifier.height(2.dp))
+    }
+}
+
 /**
- * Opens the OEM autostart manager. Vivo/iQOO ship it inside their
- * permission manager; other builds fall back to this app's App info
+ * Opens the OEM autostart manager for the detected brand (Plan #85).
+ * Vivo/iQOO ship it inside their permission manager; Xiaomi inside
+ * MIUI Security Center; Samsung inside Device Care. Everything is
+ * attempted defensively — the final fallback is this app's App info
  * page, from where autostart can usually be reached.
  */
 private fun openAutostartSettings(context: Context) {
-    val vivoIntent = Intent().setComponent(
+    val candidates = listOf(
+        // Vivo / iQOO
         ComponentName(
             "com.vivo.permissionmanager",
             "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
-        )
-    )
-    if (runCatching { context.startActivity(vivoIntent) }.isSuccess) return
-    val iqooIntent = Intent().setComponent(
+        ),
         ComponentName(
             "com.iqoo.secure",
             "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"
+        ),
+        // Xiaomi / Redmi / Poco (MIUI)
+        ComponentName(
+            "com.miui.securitycenter",
+            "com.miui.permcenter.autostart.AutoStartManagementActivity"
+        ),
+        // Samsung Device Care battery page
+        ComponentName(
+            "com.samsung.android.lool",
+            "com.samsung.android.sm.ui.battery.BatteryActivity"
         )
     )
-    if (runCatching { context.startActivity(iqooIntent) }.isSuccess) return
+    for (component in candidates) {
+        val intent = Intent().setComponent(component)
+        if (runCatching { context.startActivity(intent) }.isSuccess) return
+    }
     runCatching {
         context.startActivity(
             Intent(

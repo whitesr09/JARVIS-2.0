@@ -1,8 +1,16 @@
 package com.nshd.jarvis2.ui
 
+import android.content.Intent
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,10 +33,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -43,6 +55,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -56,7 +69,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.nshd.jarvis2.JarvisSettings
@@ -64,12 +79,18 @@ import com.nshd.jarvis2.brain.AgentPipeline
 import com.nshd.jarvis2.brain.ProviderStore
 import com.nshd.jarvis2.brain.ToolEvent
 import com.nshd.jarvis2.brain.ToolEventKind
+import com.nshd.jarvis2.hands.TaskState
+import com.nshd.jarvis2.hands.TaskStoppedException
+import com.nshd.jarvis2.memory.MemoryCategories
 import com.nshd.jarvis2.memory.MemoryDb
+import com.nshd.jarvis2.voice.UniversalVoice
 import com.nshd.jarvis2.voice.VoiceMode
 import com.nshd.jarvis2.voice.VoiceSessionManager
 import com.nshd.jarvis2.voice.VoiceStatus
 import java.util.Calendar
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -77,8 +98,13 @@ private data class UiMessage(
     val fromUser: Boolean,
     val text: String,
     val caption: String? = null,
-    val isTool: Boolean = false
+    val isTool: Boolean = false,
+    /** MemoryDb chat_messages row id (0 = not persisted / not yet known). */
+    val id: Long = 0L
 )
+
+/** #65/#66: actions offered by a chat bubble's long-press menu. */
+private enum class BubbleAction { COPY, SPEAK, SAVE, SHARE, EDIT, REGENERATE }
 
 private enum class ChatMode { JARVIS, CODE }
 
@@ -110,6 +136,63 @@ fun ChatScreen(
     val voiceState by VoiceSessionManager.uiState.collectAsState()
     val messages = remember { mutableStateListOf<UiMessage>() }
     val listState = rememberLazyListState()
+    val clipboard = LocalClipboardManager.current
+
+    // #65: lazy standalone TTS for the bubble "Speak" action.
+    var bubbleTts by remember { mutableStateOf<TextToSpeech?>(null) }
+    var pendingSpeak by remember { mutableStateOf<String?>(null) }
+    // Transient hint line (save confirmations, dictation errors).
+    var hint by remember { mutableStateOf<String?>(null) }
+    // #66: list index of the user turn being edited (applied on send).
+    var pendingEditIndex by remember { mutableStateOf(-1) }
+    // #67: chat search state.
+    var searchOpen by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var matchPos by remember { mutableStateOf(0) }
+    // #69: when the current stream started (tok/s label).
+    var streamStartedAt by remember { mutableStateOf(0L) }
+    // #72: inline dictation state (recognizer is main-thread only).
+    var dictating by remember { mutableStateOf(false) }
+    var dictRecognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
+    var dictBase by remember { mutableStateOf("") }
+
+    // #67: indices of messages matching the current search query.
+    val trimmedQuery = searchQuery.trim()
+    val searchMatches: List<Int> =
+        if (searchOpen && trimmedQuery.isNotEmpty()) {
+            messages.indices.filter { i ->
+                !messages[i].isTool &&
+                    messages[i].text.contains(trimmedQuery, ignoreCase = true)
+            }
+        } else {
+            emptyList()
+        }
+
+    // #65/#72: release the standalone TTS + recognizer with the screen.
+    DisposableEffect(Unit) {
+        onDispose {
+            bubbleTts?.let { tts ->
+                runCatching { tts.stop() }
+                runCatching { tts.shutdown() }
+            }
+            dictRecognizer?.let { rec -> runCatching { rec.destroy() } }
+        }
+    }
+
+    LaunchedEffect(hint) {
+        if (hint != null) {
+            delay(3_000)
+            hint = null
+        }
+    }
+
+    // #67: a new query jumps to its first match.
+    LaunchedEffect(searchQuery, searchOpen) {
+        if (searchOpen && searchMatches.isNotEmpty()) {
+            matchPos = 0
+            listState.animateScrollToItem(searchMatches[0])
+        }
+    }
 
     // Live streaming bubble: deltas accumulate in a plain buffer (written
     // from the streaming thread); the Compose state is refreshed at most
@@ -131,6 +214,14 @@ fun ChatScreen(
         synchronized(streamBuffer) { streamBuffer.setLength(0) }
         streamingText = ""
         lastStreamUiUpdate = 0L
+    }
+
+    /** #69: rough tokens/sec for the live stream (≈4 chars per token). */
+    fun currentTokPerSec(): Int {
+        if (streamStartedAt <= 0L || streamingText.isEmpty()) return 0
+        val elapsedSec = ((System.currentTimeMillis() - streamStartedAt) / 1000.0)
+            .coerceAtLeast(0.5)
+        return ((streamingText.length / 4.0) / elapsedSec).toInt()
     }
 
     fun greeting(): UiMessage = UiMessage(
@@ -155,7 +246,8 @@ fun ChatScreen(
                         } else {
                             stored.content
                         },
-                        isTool = stored.role == "tool"
+                        isTool = stored.role == "tool",
+                        id = stored.id
                     )
                 )
             }
@@ -176,9 +268,18 @@ fun ChatScreen(
     }
 
     fun appendAssistant(text: String, caption: String? = null, persist: Boolean = true) {
-        messages.add(UiMessage(fromUser = false, text = text, caption = caption))
+        val msg = UiMessage(fromUser = false, text = text, caption = caption)
+        messages.add(msg)
         if (persist) {
-            scope.launch(Dispatchers.IO) { db.addMessage("assistant", text) }
+            scope.launch(Dispatchers.IO) {
+                val newId = db.addMessage("assistant", text)
+                if (newId > 0) {
+                    withContext(Dispatchers.Main) {
+                        val idx = messages.indexOfFirst { it === msg }
+                        if (idx >= 0) messages[idx] = messages[idx].copy(id = newId)
+                    }
+                }
+            }
         }
     }
 
@@ -190,16 +291,15 @@ fun ChatScreen(
         messages.add(UiMessage(fromUser = false, text = event.chipText, isTool = true))
     }
 
-    fun send() {
-        val text = input.trim()
-        if (text.isEmpty() || sending) return
-        input = ""
-        messages.add(UiMessage(fromUser = true, text = text))
-        scope.launch(Dispatchers.IO) { db.addMessage("user", text) }
-
-        // Shared pipeline: memory commands → quick phone commands → agent loop.
+    /**
+     * The one pipeline invocation path — used by send(), by #66
+     * regenerate, and (via its text) by a pending edit's resend.
+     * Shared pipeline: memory commands → quick phone commands → agent loop.
+     */
+    fun launchPipeline(text: String) {
         sending = true
         resetStream()
+        streamStartedAt = System.currentTimeMillis()
         val codeMode = mode == ChatMode.CODE
         val appContext = context.applicationContext
         scope.launch {
@@ -218,6 +318,12 @@ fun ChatScreen(
                 // once as the permanent bubble and retire the live one.
                 streamingText = synchronized(streamBuffer) { streamBuffer.toString() }
                 appendAssistant(reply)
+            } catch (e: TaskStoppedException) {
+                // #61/#69: a user stop is not an error — short reply only.
+                appendAssistant("Stopped.")
+            } catch (e: CancellationException) {
+                // #69: Stop button / overlay abort cancels this job.
+                appendAssistant("Stopped.")
             } catch (e: Exception) {
                 // F5 error hygiene: the raw exception goes to AppLog;
                 // the chat bubble is the friendly headline only.
@@ -237,6 +343,191 @@ fun ChatScreen(
             }
         }
     }
+
+    fun send() {
+        val text = input.trim()
+        if (text.isEmpty() || sending) return
+        input = ""
+        // #66 edit-and-resend: a pending edit REPLACES its turn now —
+        // the edited user message and everything after it leave the UI
+        // list AND MemoryDb history (real per-row deletes by id).
+        if (pendingEditIndex in messages.indices) {
+            val cut = pendingEditIndex
+            pendingEditIndex = -1
+            val removedIds = messages.drop(cut).map { it.id }.filter { it > 0 }
+            while (messages.size > cut) messages.removeAt(messages.lastIndex)
+            if (removedIds.isNotEmpty()) {
+                scope.launch(Dispatchers.IO) {
+                    removedIds.forEach { id -> db.deleteMessage(id) }
+                }
+            }
+        }
+        val userMsg = UiMessage(fromUser = true, text = text)
+        messages.add(userMsg)
+        scope.launch(Dispatchers.IO) {
+            val newId = db.addMessage("user", text)
+            if (newId > 0) {
+                withContext(Dispatchers.Main) {
+                    val idx = messages.indexOfFirst { it === userMsg }
+                    if (idx >= 0) messages[idx] = messages[idx].copy(id = newId)
+                }
+            }
+        }
+        launchPipeline(text)
+    }
+
+    /** #66: re-run the pipeline on the last user text; the old reply stays. */
+    fun regenerate() {
+        if (sending) return
+        val lastUser = messages.lastOrNull { it.fromUser && !it.isTool }?.text
+            ?: return
+        launchPipeline(lastUser)
+    }
+
+    /** #65: read a bubble aloud with a lazy standalone TTS (main thread). */
+    fun speakText(text: String) {
+        val existing = bubbleTts
+        if (existing != null) {
+            existing.stop()
+            existing.speak(text, TextToSpeech.QUEUE_FLUSH, null, "bubble-speak")
+            return
+        }
+        pendingSpeak = text
+        bubbleTts = TextToSpeech(context.applicationContext) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                pendingSpeak?.let { pending ->
+                    bubbleTts?.speak(
+                        pending, TextToSpeech.QUEUE_FLUSH, null, "bubble-speak"
+                    )
+                }
+            }
+            pendingSpeak = null
+        }
+    }
+
+    /** #72: stop the inline dictation recognizer (main thread). */
+    fun stopDictation() {
+        dictating = false
+        dictRecognizer?.let { rec -> runCatching { rec.stopListening() } }
+    }
+
+    /** #72: mic button — SpeechRecognizer writes into the composer. */
+    fun toggleDictation() {
+        if (dictating) {
+            stopDictation()
+            return
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            hint = FriendlyErrors.map(
+                "Speech recognition is not available on this device"
+            ).headline
+            return
+        }
+        // A finished/wedged recognizer is replaced, never reused blindly.
+        dictRecognizer?.let { old -> runCatching { old.destroy() } }
+        dictRecognizer = null
+        dictBase = input
+        try {
+            val rec = SpeechRecognizer.createSpeechRecognizer(context.applicationContext)
+            dictRecognizer = rec
+            rec.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {}
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() {}
+                override fun onPartialResults(partialResults: Bundle?) {
+                    partialResults
+                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()
+                        ?.let { heard -> input = joinDictation(dictBase, heard) }
+                }
+
+                override fun onResults(results: Bundle?) {
+                    results
+                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()
+                        ?.let { heard -> input = joinDictation(dictBase, heard) }
+                    dictating = false
+                }
+
+                override fun onError(error: Int) {
+                    dictating = false
+                    hint = FriendlyErrors.map(
+                        "Speech recognition error ($error)"
+                    ).headline
+                }
+
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                )
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE,
+                    UniversalVoice.sttLanguageTag(settings.language)
+                )
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            }
+            dictating = true
+            rec.startListening(intent)
+        } catch (e: Exception) {
+            dictating = false
+            hint = FriendlyErrors.map("Speech recognition failed to start").headline
+        }
+    }
+
+    /** #65/#66: one handler for every bubble-menu action. */
+    fun onBubbleAction(action: BubbleAction, msg: UiMessage, index: Int) {
+        when (action) {
+            BubbleAction.COPY -> {
+                clipboard.setText(AnnotatedString(msg.text))
+                hint = "Copied"
+            }
+
+            BubbleAction.SPEAK -> speakText(msg.text)
+            BubbleAction.SAVE -> {
+                scope.launch(Dispatchers.IO) {
+                    db.addFact(MemoryCategories.PERSONAL, msg.text)
+                }
+                hint = "Saved to Memory"
+            }
+
+            BubbleAction.SHARE -> {
+                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, msg.text)
+                }
+                context.startActivity(
+                    Intent.createChooser(shareIntent, "Share message")
+                )
+            }
+
+            BubbleAction.EDIT -> {
+                input = msg.text
+                pendingEditIndex = index
+                hint = "Editing — press send to replace that turn"
+            }
+
+            BubbleAction.REGENERATE -> regenerate()
+        }
+    }
+
+    /** #67: jump to the next/previous search match (wraps around). */
+    fun goToMatch(delta: Int) {
+        if (searchMatches.isEmpty()) return
+        val size = searchMatches.size
+        val next = ((matchPos + delta) % size + size) % size
+        matchPos = next
+        scope.launch { listState.animateScrollToItem(searchMatches[next]) }
+    }
+
+    // #66: which bubbles may offer Edit / Regenerate.
+    val lastUserIndex = messages.indexOfLast { it.fromUser && !it.isTool }
+    val lastAssistantIndex = messages.indexOfLast { !it.fromUser && !it.isTool }
 
     // F5.1: imePadding lifts the whole column — composer included —
     // above the keyboard. The floating-nav clearance is NOT baked in
@@ -268,7 +559,8 @@ fun ChatScreen(
                     expanded = headerMenuOpen,
                     onDismiss = { headerMenuOpen = false },
                     onClear = { showClearConfirm = true },
-                    onOpenVoice = onOpenVoice
+                    onOpenVoice = onOpenVoice,
+                    onSearch = { searchOpen = true }
                 )
             }
             Column(
@@ -316,6 +608,64 @@ fun ChatScreen(
             }
         }
 
+        // #67: search bar — count + prev/next jump between matches;
+        // matched bubbles render highlighted (see MessageBubble).
+        if (searchOpen) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search this chat") },
+                    singleLine = true,
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        disabledIndicatorColor = Color.Transparent
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = if (searchMatches.isEmpty()) {
+                        "0/0"
+                    } else {
+                        "${matchPos + 1}/${searchMatches.size}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                IconButton(onClick = { goToMatch(-1) }) {
+                    Icon(
+                        imageVector = Icons.Filled.KeyboardArrowUp,
+                        contentDescription = "Previous match"
+                    )
+                }
+                IconButton(onClick = { goToMatch(1) }) {
+                    Icon(
+                        imageVector = Icons.Filled.KeyboardArrowDown,
+                        contentDescription = "Next match"
+                    )
+                }
+                IconButton(onClick = {
+                    searchOpen = false
+                    searchQuery = ""
+                    matchPos = 0
+                }) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Close search"
+                    )
+                }
+            }
+        }
+
         LazyColumn(
             state = listState,
             modifier = Modifier
@@ -324,18 +674,37 @@ fun ChatScreen(
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            itemsIndexed(messages) { _, msg ->
+            itemsIndexed(messages) { index, msg ->
                 AppearOnEntry {
-                    MessageBubble(msg)
+                    MessageBubble(
+                        msg = msg,
+                        highlight = index in searchMatches,
+                        canEdit = index == lastUserIndex,
+                        canRegenerate = index == lastAssistantIndex,
+                        onAction = { action, m -> onBubbleAction(action, m, index) }
+                    )
                 }
             }
             if (sending) {
                 item {
                     if (streamingText.isNotEmpty()) {
-                        // Live bubble: the reply growing in real time.
-                        MessageBubble(
-                            UiMessage(fromUser = false, text = streamingText)
-                        )
+                        // Live bubble: the reply growing in real time,
+                        // with the #69 tokens/sec mini-label under it.
+                        Column {
+                            MessageBubble(
+                                msg = UiMessage(fromUser = false, text = streamingText),
+                                menuEnabled = false
+                            )
+                            val tokPerSec = currentTokPerSec()
+                            if (tokPerSec > 0) {
+                                Text(
+                                    text = "≈$tokPerSec tok/s",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 6.dp, top = 2.dp)
+                                )
+                            }
+                        }
                     } else {
                         Box(
                             modifier = Modifier.fillMaxWidth(),
@@ -361,6 +730,46 @@ fun ChatScreen(
         }
 
         Spacer(modifier = Modifier.height(8.dp))
+
+        // #69: while a reply is running, an always-visible Stop row —
+        // cooperative stop flag AND job cancellation together.
+        if (sending) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = {
+                    TaskState.requestStop()
+                    TaskState.abort()
+                }) {
+                    Text(
+                        text = "■ Stop",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                val tokPerSec = currentTokPerSec()
+                if (tokPerSec > 0) {
+                    Text(
+                        text = "≈$tokPerSec tok/s",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        // Transient hint line (#65 save confirmations, #72 dictation errors).
+        hint?.let { hintText ->
+            Text(
+                text = hintText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+            )
+        }
 
         // Composer CARD (F4): glass surface holding the text field, the
         // mode pills, an options (+) button and a gradient send circle.
@@ -420,7 +829,25 @@ fun ChatScreen(
                             expanded = composerMenuOpen,
                             onDismiss = { composerMenuOpen = false },
                             onClear = { showClearConfirm = true },
-                            onOpenVoice = onOpenVoice
+                            onOpenVoice = onOpenVoice,
+                            onSearch = { searchOpen = true }
+                        )
+                    }
+                    // #72: inline dictation — fills the composer, never
+                    // opens the Voice screen. Tap again to stop.
+                    IconButton(onClick = { toggleDictation() }) {
+                        Icon(
+                            imageVector = Icons.Filled.Mic,
+                            contentDescription = if (dictating) {
+                                "Stop dictation"
+                            } else {
+                                "Dictate"
+                            },
+                            tint = if (dictating) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         )
                     }
                     Spacer(modifier = Modifier.width(4.dp))
@@ -474,6 +901,9 @@ fun ChatScreen(
             confirmButton = {
                 TextButton(onClick = {
                     showClearConfirm = false
+                    pendingEditIndex = -1
+                    searchOpen = false
+                    searchQuery = ""
                     scope.launch {
                         withContext(Dispatchers.IO) { db.clearChat() }
                         messages.clear()
@@ -530,9 +960,20 @@ private fun ChatOptionsMenu(
     expanded: Boolean,
     onDismiss: () -> Unit,
     onClear: () -> Unit,
-    onOpenVoice: () -> Unit
+    onOpenVoice: () -> Unit,
+    onSearch: () -> Unit = {}
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuItem(
+            text = { Text("Search chat") },
+            onClick = {
+                onDismiss()
+                onSearch()
+            },
+            leadingIcon = {
+                Icon(imageVector = Icons.Filled.Search, contentDescription = null)
+            }
+        )
         DropdownMenuItem(
             text = { Text("Clear chat") },
             onClick = {
@@ -571,8 +1012,20 @@ private fun cleanLegacyToolLine(raw: String): String {
     return if (text.length <= 90) text else text.take(87).trimEnd() + "…"
 }
 
+/** #72: append dictated text to what was already in the composer. */
+private fun joinDictation(base: String, heard: String): String =
+    if (base.isBlank()) heard else base.trimEnd() + " " + heard
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageBubble(msg: UiMessage) {
+private fun MessageBubble(
+    msg: UiMessage,
+    highlight: Boolean = false,
+    canEdit: Boolean = false,
+    canRegenerate: Boolean = false,
+    menuEnabled: Boolean = true,
+    onAction: (BubbleAction, UiMessage) -> Unit = { _, _ -> }
+) {
     if (msg.isTool) {
         // Tool activity = one small CENTERED status pill (F2), visually
         // distinct from conversation bubbles.
@@ -592,33 +1045,110 @@ private fun MessageBubble(msg: UiMessage) {
         }
         return
     }
+    // #65: long-press opens the bubble action menu; #67: a search
+    // match renders with a highlighted container + tertiary border.
+    var menuOpen by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier.fillMaxWidth(),
         contentAlignment = if (msg.fromUser) Alignment.CenterEnd else Alignment.CenterStart
     ) {
         Column(modifier = Modifier.widthIn(max = 320.dp)) {
-            Card(
-                shape = RoundedCornerShape(
-                    topStart = JarvisDimens.radiusCard, topEnd = JarvisDimens.radiusCard,
-                    bottomStart = if (msg.fromUser) JarvisDimens.radiusCard else 6.dp,
-                    bottomEnd = if (msg.fromUser) 6.dp else JarvisDimens.radiusCard
-                ),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (msg.fromUser) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.surface
-                )
-            ) {
-                Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    if (msg.fromUser) {
-                        Text(
-                            text = msg.text,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onPrimary
+            Box {
+                Card(
+                    modifier = if (menuEnabled) {
+                        Modifier.combinedClickable(
+                            onClick = {},
+                            onLongClick = { menuOpen = true }
                         )
                     } else {
-                        MarkdownText(
-                            content = msg.text,
-                            textColor = MaterialTheme.colorScheme.onSurface
+                        Modifier
+                    },
+                    shape = RoundedCornerShape(
+                        topStart = JarvisDimens.radiusCard, topEnd = JarvisDimens.radiusCard,
+                        bottomStart = if (msg.fromUser) JarvisDimens.radiusCard else 6.dp,
+                        bottomEnd = if (msg.fromUser) 6.dp else JarvisDimens.radiusCard
+                    ),
+                    colors = CardDefaults.cardColors(
+                        containerColor = when {
+                            highlight -> MaterialTheme.colorScheme.tertiaryContainer
+                            msg.fromUser -> MaterialTheme.colorScheme.primary
+                            else -> MaterialTheme.colorScheme.surface
+                        }
+                    ),
+                    border = if (highlight) {
+                        BorderStroke(2.dp, MaterialTheme.colorScheme.tertiary)
+                    } else {
+                        null
+                    }
+                ) {
+                    Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        if (msg.fromUser) {
+                            Text(
+                                text = msg.text,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (highlight) {
+                                    MaterialTheme.colorScheme.onTertiaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onPrimary
+                                }
+                            )
+                        } else {
+                            MarkdownText(
+                                content = msg.text,
+                                textColor = if (highlight) {
+                                    MaterialTheme.colorScheme.onTertiaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                }
+                            )
+                        }
+                    }
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Copy") },
+                        onClick = {
+                            menuOpen = false
+                            onAction(BubbleAction.COPY, msg)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Speak") },
+                        onClick = {
+                            menuOpen = false
+                            onAction(BubbleAction.SPEAK, msg)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Save to Memory") },
+                        onClick = {
+                            menuOpen = false
+                            onAction(BubbleAction.SAVE, msg)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Share") },
+                        onClick = {
+                            menuOpen = false
+                            onAction(BubbleAction.SHARE, msg)
+                        }
+                    )
+                    if (canEdit) {
+                        DropdownMenuItem(
+                            text = { Text("Edit") },
+                            onClick = {
+                                menuOpen = false
+                                onAction(BubbleAction.EDIT, msg)
+                            }
+                        )
+                    }
+                    if (canRegenerate) {
+                        DropdownMenuItem(
+                            text = { Text("Regenerate") },
+                            onClick = {
+                                menuOpen = false
+                                onAction(BubbleAction.REGENERATE, msg)
+                            }
                         )
                     }
                 }

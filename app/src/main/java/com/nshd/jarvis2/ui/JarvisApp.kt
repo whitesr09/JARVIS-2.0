@@ -34,11 +34,14 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -58,9 +61,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nshd.jarvis2.JarvisSettings
+import com.nshd.jarvis2.core.UpdateChecker
 import com.nshd.jarvis2.voice.VoiceSessionManager
 import com.nshd.jarvis2.voice.VoiceStatus
 import com.nshd.jarvis2.voice.VoiceUiState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private enum class Tab { HOME, CHAT, SETTINGS, UPDATES }
 
@@ -80,8 +86,65 @@ fun JarvisApp(
         // normal UI — the report screen is deliberately plain (no orb,
         // no session state) so it renders even when voice is broken.
         val appContext = androidx.compose.ui.platform.LocalContext.current
-        var tab by remember { mutableStateOf(Tab.HOME) }
-        var subScreen by remember { mutableStateOf(SubScreen.NONE) }
+        // Plan #98: relaunch (crash or not) returns to the last screen
+        // the user was on — the crash card, when pending, still shows
+        // FIRST (early return below) and this restore applies after it.
+        val restoredScreen = remember {
+            com.nshd.jarvis2.CrashLogger.lastScreen(appContext)
+        }
+        var tab by remember {
+            mutableStateOf(
+                restoredScreen?.substringBefore(':')
+                    ?.let { name -> Tab.values().firstOrNull { it.name == name } }
+                    ?: Tab.HOME
+            )
+        }
+        var subScreen by remember {
+            mutableStateOf(
+                restoredScreen?.substringAfter(':', "")
+                    ?.let { name -> SubScreen.values().firstOrNull { it.name == name } }
+                    ?: SubScreen.NONE
+            )
+        }
+        LaunchedEffect(tab, subScreen) {
+            com.nshd.jarvis2.CrashLogger.saveLastScreen(
+                appContext, "${tab.name}:${subScreen.name}"
+            )
+        }
+        // Plan #94: keep the process-wide motion mirror in sync.
+        LaunchedEffect(settings.reduceMotion) {
+            MotionSettings.reduceMotion = settings.reduceMotion
+        }
+        // Plan #104: one update check per process, off the main thread.
+        val updateAvailable by UpdateChecker.updateAvailable.collectAsState()
+        LaunchedEffect(Unit) {
+            withContext(Dispatchers.IO) { UpdateChecker.check(appContext) }
+        }
+        // Plan #102: safe-mode banner state (CrashLogger is the store).
+        var safeMode by remember {
+            mutableStateOf(com.nshd.jarvis2.CrashLogger.isSafeMode(appContext))
+        }
+        // Plan #105: "What's new" once per update.
+        val currentVersionCode = remember {
+            runCatching {
+                val info = appContext.packageManager
+                    .getPackageInfo(appContext.packageName, 0)
+                if (android.os.Build.VERSION.SDK_INT >=
+                    android.os.Build.VERSION_CODES.P
+                ) {
+                    info.longVersionCode.toInt()
+                } else {
+                    @Suppress("DEPRECATION")
+                    info.versionCode
+                }
+            }.getOrDefault(0)
+        }
+        var showWhatsNew by remember {
+            mutableStateOf(
+                settings.lastSeenVersionCode in 1 until
+                    currentVersionCode.coerceAtLeast(1)
+            )
+        }
         var showCrashReport by remember {
             mutableStateOf(com.nshd.jarvis2.CrashLogger.hasPendingCrash(appContext))
         }
@@ -132,6 +195,7 @@ fun JarvisApp(
                         tab = tab,
                         onVoiceScreen = subScreen == SubScreen.VOICE,
                         voiceState = voiceState,
+                        updatesBadge = updateAvailable,
                         onTab = {
                             tab = it
                             subScreen = SubScreen.NONE
@@ -141,11 +205,43 @@ fun JarvisApp(
                 }
             }
         ) { padding ->
-            Box(
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
             ) {
+                // Plan #102: safe-mode banner (wake word + overlay stayed
+                // off this boot after repeated startup crashes).
+                if (safeMode) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(
+                                horizontal = 14.dp, vertical = 8.dp
+                            ),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Safe mode — Jarvis crashed 3× " +
+                                    "while starting, so the wake word " +
+                                    "and overlay stayed off.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme
+                                    .colorScheme.onErrorContainer,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = {
+                                    com.nshd.jarvis2.CrashLogger
+                                        .setSafeMode(appContext, false)
+                                    safeMode = false
+                                }
+                            ) { Text("Exit safe mode") }
+                        }
+                    }
+                }
                 val reducedMotion = rememberReducedMotion()
                 // D2 transitions: fade + slight horizontal slide between
                 // tabs and sub-screens (transform/opacity only). State
@@ -179,7 +275,9 @@ fun JarvisApp(
                         }
                     },
                     label = "screenTransition",
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
                 ) { target ->
                     when (target.sub) {
                         SubScreen.PERMISSIONS -> PermissionsScreen(
@@ -249,6 +347,48 @@ fun JarvisApp(
                         }
                     }
                 }
+                // Plan #105: post-update "What's new" card (dialog form),
+                // shown once per version, dismissed into
+                // settings.lastSeenVersionCode.
+                if (showWhatsNew) {
+                    AlertDialog(
+                        onDismissRequest = { showWhatsNew = false },
+                        title = { Text("What's new in v1.8.0") },
+                        text = {
+                            Text(
+                                "Panel, Orb & Feel: the floating panel " +
+                                    "gets a mini progress pill, task " +
+                                    "history, quick Stop/Pause, haptics " +
+                                    "and per-app positions — and Stop " +
+                                    "now truly stops a task mid-flight. " +
+                                    "The orb pulses to Jarvis's own " +
+                                    "voice, adapts its quality to your " +
+                                    "GPU and battery, and warms up for " +
+                                    "Girlfriend Mode. Home shows live " +
+                                    "weather, your next calendar event " +
+                                    "and the gold price. Plus chat " +
+                                    "message actions, search, dictation " +
+                                    "in the composer, \"forget …\" " +
+                                    "commands, a permission health " +
+                                    "dashboard, full backup/restore " +
+                                    "and an update checker."
+                            )
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    showWhatsNew = false
+                                    onSettingsChange(
+                                        settings.copy(
+                                            lastSeenVersionCode =
+                                                currentVersionCode
+                                        )
+                                    )
+                                }
+                            ) { Text("Got it") }
+                        }
+                    )
+                }
             }
         }
     }
@@ -269,6 +409,7 @@ private fun JarvisFloatingNav(
     tab: Tab,
     onVoiceScreen: Boolean,
     voiceState: VoiceUiState,
+    updatesBadge: Boolean = false,
     onTab: (Tab) -> Unit,
     onMic: () -> Unit
 ) {
@@ -319,7 +460,9 @@ private fun JarvisFloatingNav(
                     icon = Icons.Filled.Notifications,
                     label = "Updates",
                     selected = tab == Tab.UPDATES,
-                    badge = true,
+                    // Plan #104: the dot now means "a newer build is
+                    // actually waiting on GitHub" (was decorative).
+                    badge = updatesBadge,
                     modifier = Modifier.weight(1f)
                 ) { onTab(Tab.UPDATES) }
             }

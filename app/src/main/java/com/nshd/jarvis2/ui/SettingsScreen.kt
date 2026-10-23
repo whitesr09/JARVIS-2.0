@@ -155,6 +155,16 @@ fun SettingsScreen(
     var showPersona by remember { mutableStateOf(false) }
     var showLanguage by remember { mutableStateOf(false) }
     var showVoiceEngine by remember { mutableStateOf(false) }
+    // Plan v1.8.0 dialogs: barge-in (#4), TTS voice picker (#7),
+    // chat text size (#93), backup/restore (#101), transparency (#79).
+    var showBargeIn by remember { mutableStateOf(false) }
+    var showTtsVoices by remember { mutableStateOf(false) }
+    var showChatFont by remember { mutableStateOf(false) }
+    var showBackup by remember { mutableStateOf(false) }
+    var showKnows by remember { mutableStateOf(false) }
+    var restoreJsonText by remember { mutableStateOf("") }
+    var ttsVoiceList by remember { mutableStateOf<List<android.speech.tts.Voice>>(emptyList()) }
+    var knowsText by remember { mutableStateOf("") }
     var showTheme by remember { mutableStateOf(false) }
     var showVoice by remember { mutableStateOf(false) }
     var showNameFields by remember { mutableStateOf(false) }
@@ -217,6 +227,124 @@ fun SettingsScreen(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // ── Plan #7: installed device-TTS voices for the picker ────────────
+    fun loadTtsVoices() {
+        runCatching {
+            val engine = ttsPreview ?: TextToSpeech(context.applicationContext) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    runCatching {
+                        ttsVoiceList = (ttsPreview?.voices ?: emptySet())
+                            .sortedBy { it.name }
+                    }
+                }
+            }.also { ttsPreview = it }
+            val ready = runCatching { engine.voices }.getOrNull()
+            if (!ready.isNullOrEmpty()) {
+                ttsVoiceList = ready.sortedBy { it.name }
+            }
+        }
+    }
+
+    /** Plan #7: preview one named voice (or the automatic pick). */
+    fun previewTtsVoice(voiceName: String) {
+        runCatching {
+            val s = latestSettings
+            val text = "Hi ${s.callsign}, this is how I sound now."
+            fun speakWith(engine: TextToSpeech) {
+                runCatching {
+                    if (voiceName.isNotBlank()) {
+                        engine.voices?.firstOrNull { it.name == voiceName }
+                            ?.let { engine.voice = it }
+                    }
+                    engine.setSpeechRate(s.ttsRate)
+                    engine.setPitch(s.ttsPitch)
+                    engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "tts-voice-preview")
+                }
+            }
+            val existing = ttsPreview
+            if (existing != null) {
+                speakWith(existing)
+            } else {
+                ttsPreview = TextToSpeech(context.applicationContext) { status ->
+                    if (status == TextToSpeech.SUCCESS) {
+                        ttsPreview?.let { speakWith(it) }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Plan #101: full backup / restore ───────────────────────────────
+    fun exportBackup() {
+        settingsScope.launch {
+            val json = withContext(Dispatchers.IO) {
+                com.nshd.jarvis2.core.BackupManager.exportJson(context)
+            }
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/json"
+                putExtra(Intent.EXTRA_SUBJECT, "Jarvis full backup")
+                putExtra(Intent.EXTRA_TEXT, json)
+            }
+            runCatching {
+                context.startActivity(Intent.createChooser(intent, "Export Jarvis backup"))
+            }
+        }
+    }
+
+    fun importBackup() {
+        settingsScope.launch {
+            val summary = withContext(Dispatchers.IO) {
+                runCatching {
+                    com.nshd.jarvis2.core.BackupManager.importJson(context, restoreJsonText)
+                }
+            }
+            showBackup = false
+            summary.onSuccess { s ->
+                restoreJsonText = ""
+                refreshPrivacyCounts()
+                info = InfoDialog(
+                    "Backup restored",
+                    "Applied ${s.settingsApplied} settings and added " +
+                        "${s.factsAdded} memories (${s.factsSkipped} duplicates " +
+                        "skipped). ${s.providersListed} provider setups were in " +
+                        "the file — provider KEYS are never exported, so paste " +
+                        "them again under API & Model if this is a new phone. " +
+                        "Restart Jarvis to apply the restored settings."
+                )
+            }.onFailure { e ->
+                info = InfoDialog(
+                    "Restore failed",
+                    e.message ?: "That file could not be read as a Jarvis backup."
+                )
+            }
+        }
+    }
+
+    // ── Plan #79: transparency — the exact prompt + active memories ───
+    fun loadKnowsText() {
+        settingsScope.launch {
+            knowsText = withContext(Dispatchers.IO) {
+                runCatching {
+                    val facts = memoryDb.allFacts(null, null)
+                    buildString {
+                        appendLine("SYSTEM PROMPT (exactly what the model receives)")
+                        appendLine("──────────────────────────────────────────")
+                        append(com.nshd.jarvis2.brain.PersonaPrompts.build(latestSettings, facts, codeMode = false))
+                        appendLine()
+                        appendLine()
+                        appendLine("ACTIVE MEMORIES (${facts.size})")
+                        appendLine("──────────────────────────────────────────")
+                        if (facts.isEmpty()) {
+                            appendLine("(none yet)")
+                        } else {
+                            facts.forEach { appendLine("• [${it.category}] ${it.text}") }
+                        }
+                    }
+                }.getOrDefault("Could not assemble the transparency view.")
             }
         }
     }
@@ -829,6 +957,28 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Test voice")
             }
+            Spacer(modifier = Modifier.height(14.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            // Plan #7: pick the exact installed device voice.
+            GlassRow(
+                icon = Icons.Filled.RecordVoiceOver,
+                title = "Device voice (Universal)",
+                subtitle = settings.ttsVoiceName
+                    .ifBlank { "Automatic — best installed voice" },
+                showDivider = true,
+                onClick = { loadTtsVoices(); showTtsVoices = true }
+            )
+            // Plan #4: how eagerly Jarvis may be interrupted.
+            GlassRow(
+                icon = Icons.Filled.Mic,
+                title = "Interrupt sensitivity",
+                subtitle = when (settings.bargeInSensitivity) {
+                    "LOW" -> "Low — hard to interrupt"
+                    "HIGH" -> "High — interrupt on any word"
+                    else -> "Normal"
+                },
+                onClick = { showBargeIn = true }
+            )
         }
 
         // ── System & Data Engine ───────────────────────────────────────
@@ -854,6 +1004,22 @@ fun SettingsScreen(
                 subtitle = "Search, review and back up learned facts",
                 showDivider = true,
                 onClick = { onOpenMemory() }
+            )
+            // Plan #79: transparency — the exact prompt + memories.
+            GlassRow(
+                icon = Icons.Filled.Visibility,
+                title = "What does Jarvis know?",
+                subtitle = "The exact system prompt and every active memory",
+                showDivider = true,
+                onClick = { loadKnowsText(); showKnows = true }
+            )
+            // Plan #101: one-file backup / restore.
+            GlassRow(
+                icon = Icons.Filled.Storage,
+                title = "Backup & Restore",
+                subtitle = "Settings + memories + provider setups in one file",
+                showDivider = true,
+                onClick = { showBackup = true }
             )
             GlassRow(
                 icon = Icons.Filled.VerifiedUser,
@@ -986,6 +1152,96 @@ fun SettingsScreen(
                 showDivider = true,
                 onClick = { showTheme = true }
             )
+            // Plan #93: chat message text size.
+            GlassRow(
+                icon = Icons.Filled.Edit,
+                title = "Chat text size",
+                subtitle = when (settings.chatFontSize) {
+                    "S" -> "Small"
+                    "L" -> "Large"
+                    else -> "Medium"
+                },
+                showDivider = true,
+                onClick = { showChatFont = true }
+            )
+            // Plan #94: reduce motion switch.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconSquare(icon = Icons.Filled.Visibility)
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Reduce motion",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = "Calms the orb and panel animations",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = settings.reduceMotion,
+                    onCheckedChange = {
+                        onSettingsChange(settings.copy(reduceMotion = it))
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedTrackColor = MaterialTheme.colorScheme.primary,
+                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                        checkedBorderColor = MaterialTheme.colorScheme.primary,
+                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        uncheckedBorderColor = MaterialTheme.colorScheme.outline
+                    )
+                )
+            }
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant,
+                modifier = Modifier.padding(start = 58.dp)
+            )
+            // Plan #58: panel haptic tick switch.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconSquare(icon = Icons.Filled.Fingerprint)
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Panel step haptics",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = "A subtle tick in the floating panel as each plan step completes",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = settings.panelHaptics,
+                    onCheckedChange = {
+                        onSettingsChange(settings.copy(panelHaptics = it))
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedTrackColor = MaterialTheme.colorScheme.primary,
+                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                        checkedBorderColor = MaterialTheme.colorScheme.primary,
+                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        uncheckedBorderColor = MaterialTheme.colorScheme.outline
+                    )
+                )
+            }
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant,
+                modifier = Modifier.padding(start = 58.dp)
+            )
             GlassRow(
                 icon = Icons.Filled.Lock,
                 title = "Privacy & Data Shield",
@@ -1036,7 +1292,7 @@ fun SettingsScreen(
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "JARVIS • v1.7.0",
+                text = "JARVIS • v1.8.0",
                 style = MaterialTheme.typography.labelMedium.copy(
                     letterSpacing = 1.2.sp
                 ),
@@ -1358,6 +1614,183 @@ fun SettingsScreen(
             confirmButton = {
                 TextButton(onClick = { showIdentity = false }) { Text("Done") }
             }
+        )
+    }
+
+    // Plan #4: barge-in sensitivity.
+    if (showBargeIn) {
+        AlertDialog(
+            onDismissRequest = { showBargeIn = false },
+            title = { Text("Interrupt sensitivity") },
+            text = {
+                Column {
+                    PersonaOption(
+                        name = "Low",
+                        desc = "Jarvis keeps talking unless you speak clearly and at length.",
+                        selected = settings.bargeInSensitivity == "LOW"
+                    ) { onSettingsChange(settings.copy(bargeInSensitivity = "LOW")) }
+                    PersonaOption(
+                        name = "Normal",
+                        desc = "Interrupts when you start speaking over a reply.",
+                        selected = settings.bargeInSensitivity == "NORMAL"
+                    ) { onSettingsChange(settings.copy(bargeInSensitivity = "NORMAL")) }
+                    PersonaOption(
+                        name = "High",
+                        desc = "Stops at the first word you say.",
+                        selected = settings.bargeInSensitivity == "HIGH"
+                    ) { onSettingsChange(settings.copy(bargeInSensitivity = "HIGH")) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showBargeIn = false }) { Text("Done") } }
+        )
+    }
+
+    // Plan #7: device TTS voice picker with per-voice preview.
+    if (showTtsVoices) {
+        AlertDialog(
+            onDismissRequest = { showTtsVoices = false },
+            title = { Text("Device voice (Universal)") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .height(420.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    PersonaOption(
+                        name = "Automatic",
+                        desc = "The best installed voice for your language.",
+                        selected = settings.ttsVoiceName.isBlank()
+                    ) {
+                        onSettingsChange(settings.copy(ttsVoiceName = ""))
+                        previewTtsVoice("")
+                    }
+                    if (ttsVoiceList.isEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Loading installed voices… if this stays " +
+                                "empty, no TTS engine on this phone exposes " +
+                                "a voice list.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    ttsVoiceList.forEach { voice ->
+                        PersonaOption(
+                            name = voice.name,
+                            desc = voice.locale.displayName +
+                                if (voice.isNetworkConnectionRequired) {
+                                    " • needs network"
+                                } else {
+                                    " • on-device"
+                                },
+                            selected = settings.ttsVoiceName == voice.name
+                        ) {
+                            onSettingsChange(settings.copy(ttsVoiceName = voice.name))
+                            previewTtsVoice(voice.name)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showTtsVoices = false }) { Text("Done") } }
+        )
+    }
+
+    // Plan #93: chat text size.
+    if (showChatFont) {
+        AlertDialog(
+            onDismissRequest = { showChatFont = false },
+            title = { Text("Chat text size") },
+            text = {
+                Column {
+                    PersonaOption(
+                        name = "Small",
+                        desc = "Compact message text.",
+                        selected = settings.chatFontSize == "S"
+                    ) { onSettingsChange(settings.copy(chatFontSize = "S")) }
+                    PersonaOption(
+                        name = "Medium",
+                        desc = "The default size.",
+                        selected = settings.chatFontSize == "M"
+                    ) { onSettingsChange(settings.copy(chatFontSize = "M")) }
+                    PersonaOption(
+                        name = "Large",
+                        desc = "Bigger, easier to read at a glance.",
+                        selected = settings.chatFontSize == "L"
+                    ) { onSettingsChange(settings.copy(chatFontSize = "L")) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showChatFont = false }) { Text("Done") } }
+        )
+    }
+
+    // Plan #101: backup & restore.
+    if (showBackup) {
+        AlertDialog(
+            onDismissRequest = { showBackup = false },
+            title = { Text("Backup & Restore") },
+            text = {
+                Column(modifier = Modifier.imePadding()) {
+                    Text(
+                        text = "One JSON file with every setting, all " +
+                            "memories, and your provider setups. API keys " +
+                            "are never included — they stay encrypted on " +
+                            "this phone.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedButton(
+                        onClick = { exportBackup() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Export full backup") }
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text(
+                        text = "Restore from a backup: paste the file's " +
+                            "contents below. Memories are added (duplicates " +
+                            "skipped); provider setups are never overwritten.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = restoreJsonText,
+                        onValueChange = { restoreJsonText = it },
+                        label = { Text("Backup JSON") },
+                        modifier = Modifier.fillMaxWidth(),
+                        maxLines = 8
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { importBackup() },
+                    enabled = restoreJsonText.isNotBlank()
+                ) { Text("Restore") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showBackup = false }) { Text("Close") }
+            }
+        )
+    }
+
+    // Plan #79: transparency view.
+    if (showKnows) {
+        AlertDialog(
+            onDismissRequest = { showKnows = false },
+            title = { Text("What Jarvis knows") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .height(460.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = knowsText.ifBlank { "Assembling…" },
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = { showKnows = false }) { Text("Done") } }
         )
     }
 

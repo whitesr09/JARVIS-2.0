@@ -55,7 +55,7 @@ object JarvisMotion {
 @Composable
 fun rememberReducedMotion(): Boolean {
     val context = LocalContext.current
-    return remember(context) {
+    val systemReduced = remember(context) {
         val scale = runCatching {
             Settings.Global.getFloat(
                 context.contentResolver,
@@ -65,6 +65,9 @@ fun rememberReducedMotion(): Boolean {
         }.getOrDefault(1f)
         scale == 0f
     }
+    // v1.8.0: the user's own reduce-motion setting (mirrored into
+    // [MotionSettings] by JarvisApp) also counts as reduced motion.
+    return systemReduced || MotionSettings.reduceMotion
 }
 
 /**

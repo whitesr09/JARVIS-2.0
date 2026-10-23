@@ -1,5 +1,10 @@
 package com.nshd.jarvis2.ui
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.location.LocationManager
+import android.provider.CalendarContract
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -25,18 +30,21 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
-import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Event
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.MonetizationOn
 import androidx.compose.material.icons.filled.PersonalVideo
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,14 +55,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.JarvisSettings
+import com.nshd.jarvis2.brain.PersonaPrompts
 import com.nshd.jarvis2.voice.VoiceSessionManager
 import com.nshd.jarvis2.voice.VoiceStatus
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
 
 @Composable
 fun HomeScreen(
@@ -162,8 +182,21 @@ fun HomeScreen(
                 },
                 amplitude = voiceAmplitude,
                 liveAudio = voiceState.status != VoiceStatus.IDLE,
-                theme = settings.theme,
-                customHex = settings.customBgHex,
+                // #91: orb colour follows persona — Girlfriend Mode gets
+                // a warm pink CUSTOM palette (JarvisOrb derives its orb
+                // palette from theme + customHex); any other persona
+                // keeps the user's own theme / custom hex untouched.
+                // Home orb only — no other screen's orb changes.
+                theme = if (settings.persona == PersonaPrompts.PERSONA_GIRLFRIEND) {
+                    AppTheme.CUSTOM
+                } else {
+                    settings.theme
+                },
+                customHex = if (settings.persona == PersonaPrompts.PERSONA_GIRLFRIEND) {
+                    "#FF7BAC"
+                } else {
+                    settings.customBgHex
+                },
                 modifier = Modifier
                     .align(Alignment.Center)
                     .size(orbSize)
@@ -188,6 +221,10 @@ fun HomeScreen(
         Spacer(modifier = Modifier.height(JarvisDimens.space2xl))
 
         WeatherCard()
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
+
+        // #90: next calendar event + live gold price, display-only.
+        HomeInfoRow()
         Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
 
         Row(
@@ -322,9 +359,177 @@ private fun StatusPill(
     }
 }
 
-/** Reference weather data (Page 1) — live weather arrives in a later level. */
+// ── #89/#90 Home live data (cache, HTTP, location, calendar) ─────────
+
+private const val HOME_CACHE_PREFS = "home_cache"
+private const val STALE_MS = 2L * 60L * 60L * 1000L
+private const val KOCHI_LAT = 10.0159
+private const val KOCHI_LON = 76.3419
+private const val GRAM_PER_TROY_OUNCE = 31.1035
+
+private val homeHttpClient: OkHttpClient by lazy {
+    OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .build()
+}
+
+/** Blocking GET (call on Dispatchers.IO); null on any failure. */
+private fun httpGetText(url: String): String? = runCatching {
+    val request = Request.Builder()
+        .url(url)
+        .header("User-Agent", "Jarvis/1.8")
+        .build()
+    homeHttpClient.newCall(request).execute().use { response ->
+        if (response.isSuccessful) response.body?.string() else null
+    }
+}.getOrNull()
+
+private data class WeatherData(
+    val temp: Double,
+    val label: String,
+    val emoji: String,
+    val min: Double,
+    val max: Double,
+    val city: String,
+    val fetchedAt: Long
+)
+
+private fun weatherCodeToLabel(code: Int): Pair<String, String> = when (code) {
+    0 -> "Clear sky" to "☀️"
+    1 -> "Mainly clear" to "🌤️"
+    2 -> "Partly cloudy" to "⛅"
+    3 -> "Overcast" to "☁️"
+    45, 48 -> "Foggy" to "🌫️"
+    51, 53, 55 -> "Drizzle" to "🌦️"
+    56, 57 -> "Freezing drizzle" to "🌧️"
+    61, 63, 65 -> "Rain" to "🌧️"
+    66, 67 -> "Freezing rain" to "🌧️"
+    71, 73, 75, 77 -> "Snow" to "❄️"
+    80, 81, 82 -> "Rain showers" to "🌦️"
+    85, 86 -> "Snow showers" to "❄️"
+    95 -> "Thunderstorm" to "⛈️"
+    96, 99 -> "Thunderstorm with hail" to "⛈️"
+    else -> "Weather" to "🌡️"
+}
+
+private fun hasPermission(context: Context, permission: String): Boolean =
+    ContextCompat.checkSelfPermission(context, permission) ==
+        PackageManager.PERMISSION_GRANTED
+
+/** (lat, lon, city label): last-known location when permitted, else Kochi. */
+private fun resolveHomeLocation(context: Context): Triple<Double, Double, String> {
+    val granted = hasPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) ||
+        hasPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
+    if (granted) {
+        try {
+            val lm = context.getSystemService(Context.LOCATION_SERVICE)
+                as? LocationManager
+            val location = lm?.let { manager ->
+                listOf(
+                    LocationManager.NETWORK_PROVIDER,
+                    LocationManager.GPS_PROVIDER,
+                    LocationManager.PASSIVE_PROVIDER
+                ).firstNotNullOfOrNull { provider ->
+                    runCatching { manager.getLastKnownLocation(provider) }.getOrNull()
+                }
+            }
+            if (location != null) {
+                return Triple(location.latitude, location.longitude, "Current location")
+            }
+        } catch (e: SecurityException) {
+            // Fall through to the Kochi default below.
+        }
+    }
+    return Triple(KOCHI_LAT, KOCHI_LON, "Kochi")
+}
+
+private fun readWeatherCache(context: Context): WeatherData? {
+    val prefs = context.getSharedPreferences(HOME_CACHE_PREFS, Context.MODE_PRIVATE)
+    val fetchedAt = prefs.getLong("weather_fetchedAt", 0L)
+    if (fetchedAt == 0L || !prefs.contains("weather_temp")) return null
+    return WeatherData(
+        temp = prefs.getFloat("weather_temp", 0f).toDouble(),
+        label = prefs.getString("weather_label", "Weather") ?: "Weather",
+        emoji = prefs.getString("weather_emoji", "🌡️") ?: "🌡️",
+        min = prefs.getFloat("weather_min", 0f).toDouble(),
+        max = prefs.getFloat("weather_max", 0f).toDouble(),
+        city = prefs.getString("weather_city", "Kochi") ?: "Kochi",
+        fetchedAt = fetchedAt
+    )
+}
+
+private fun writeWeatherCache(context: Context, data: WeatherData) {
+    context.getSharedPreferences(HOME_CACHE_PREFS, Context.MODE_PRIVATE)
+        .edit()
+        .putFloat("weather_temp", data.temp.toFloat())
+        .putString("weather_label", data.label)
+        .putString("weather_emoji", data.emoji)
+        .putFloat("weather_min", data.min.toFloat())
+        .putFloat("weather_max", data.max.toFloat())
+        .putString("weather_city", data.city)
+        .putLong("weather_fetchedAt", data.fetchedAt)
+        .apply()
+}
+
+/** Blocking live-weather fetch (call on Dispatchers.IO); null on failure. */
+private fun fetchWeather(context: Context): WeatherData? = runCatching {
+    val (lat, lon, city) = resolveHomeLocation(context)
+    val url = "https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon" +
+        "&current=temperature_2m,weather_code" +
+        "&daily=temperature_2m_max,temperature_2m_min&timezone=auto"
+    val body = httpGetText(url) ?: return null
+    val json = JSONObject(body)
+    val current = json.getJSONObject("current")
+    val temp = current.getDouble("temperature_2m")
+    val code = current.optInt("weather_code", -1)
+    val (label, emoji) = weatherCodeToLabel(code)
+    val daily = json.optJSONObject("daily")
+    val max = daily?.optJSONArray("temperature_2m_max")
+        ?.optDouble(0, temp) ?: temp
+    val min = daily?.optJSONArray("temperature_2m_min")
+        ?.optDouble(0, temp) ?: temp
+    WeatherData(
+        temp = temp,
+        label = label,
+        emoji = emoji,
+        min = min,
+        max = max,
+        city = city,
+        fetchedAt = System.currentTimeMillis()
+    )
+}.getOrNull()
+
+/**
+ * #89 — live weather card (Open-Meteo, no API key). Shows the last
+ * successful result from the "home_cache" prefs instantly, refreshes
+ * in the background, and falls back to that cache (with an "offline"
+ * hint once it is stale > 2h) when the fetch fails. Never blank:
+ * with no cache and no network it shows a plain unavailable line.
+ */
 @Composable
 private fun WeatherCard() {
+    val context = LocalContext.current
+    var weather by remember { mutableStateOf(readWeatherCache(context)) }
+    var loading by remember { mutableStateOf(weather == null) }
+    var fetchFailed by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        val fresh = withContext(Dispatchers.IO) { fetchWeather(context) }
+        if (fresh != null) {
+            weather = fresh
+            fetchFailed = false
+            withContext(Dispatchers.IO) { writeWeatherCache(context, fresh) }
+        } else {
+            fetchFailed = true
+        }
+        loading = false
+    }
+
+    val data = weather
+    val stale = data != null &&
+        (System.currentTimeMillis() - data.fetchedAt) > STALE_MS
+    val offlineSuffix = if (fetchFailed && stale) " • offline" else ""
     Surface(
         shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surface,
@@ -340,14 +545,18 @@ private fun WeatherCard() {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "26°",
+                text = if (data != null) "${data.temp.toInt()}°" else "--°",
                 style = MaterialTheme.typography.displaySmall,
                 fontWeight = FontWeight.Bold
             )
             Spacer(modifier = Modifier.width(JarvisDimens.spaceLg))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Overcast",
+                    text = when {
+                        data != null -> data.label
+                        loading -> "Loading weather…"
+                        else -> "Weather unavailable"
+                    },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -359,25 +568,247 @@ private fun WeatherCard() {
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        text = "Kizhuparamba • feels like 31°",
+                        text = data?.city ?: "Kochi",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Text(
-                    text = "H 30°  L 25° • Humidity 95%",
+                    text = when {
+                        data != null ->
+                            "H ${data.max.toInt()}°  L ${data.min.toInt()}°" +
+                                offlineSuffix
+                        fetchFailed -> "Offline — will retry next visit"
+                        else -> "Fetching live weather…"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Icon(
-                imageVector = Icons.Filled.Cloud,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.secondary,
-                modifier = Modifier.size(34.dp)
+            if (loading && data == null) {
+                CircularProgressIndicator(modifier = Modifier.size(28.dp))
+            } else {
+                Text(text = data?.emoji ?: "🌡️", fontSize = 34.sp)
+            }
+        }
+    }
+}
+
+// ── #90: calendar + gold small cards ─────────────────────────────────
+
+private sealed interface NextEventResult {
+    data object NoPermission : NextEventResult
+    data object None : NextEventResult
+    data class Found(val title: String, val beginMs: Long) : NextEventResult
+}
+
+/** Blocking calendar query (call on Dispatchers.IO); never throws. */
+private fun queryNextEvent(context: Context): NextEventResult {
+    if (!hasPermission(context, Manifest.permission.READ_CALENDAR)) {
+        return NextEventResult.NoPermission
+    }
+    return try {
+        val now = System.currentTimeMillis()
+        val uri = CalendarContract.Instances.CONTENT_URI.buildUpon()
+            .appendPath(now.toString())
+            .appendPath((now + 7L * 24L * 60L * 60L * 1000L).toString())
+            .build()
+        context.contentResolver.query(
+            uri,
+            arrayOf(CalendarContract.Instances.TITLE, CalendarContract.Instances.BEGIN),
+            null,
+            null,
+            "${CalendarContract.Instances.BEGIN} ASC"
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val title = cursor.getString(0)?.takeIf { it.isNotBlank() }
+                    ?: "Untitled event"
+                NextEventResult.Found(title, cursor.getLong(1))
+            } else {
+                NextEventResult.None
+            }
+        } ?: NextEventResult.None
+    } catch (e: SecurityException) {
+        NextEventResult.NoPermission
+    } catch (e: Exception) {
+        NextEventResult.None
+    }
+}
+
+/** "Today 5:00 PM" / "Tomorrow …" / "Mon 27 Oct 5:00 PM". */
+private fun formatEventWhen(beginMs: Long): String {
+    val time = SimpleDateFormat("h:mm a", Locale.US).format(Date(beginMs))
+    val eventDay = Calendar.getInstance().apply { timeInMillis = beginMs }
+    val today = Calendar.getInstance()
+    val tomorrow = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, 1) }
+    fun sameDay(a: Calendar, b: Calendar): Boolean =
+        a.get(Calendar.YEAR) == b.get(Calendar.YEAR) &&
+            a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)
+    return when {
+        sameDay(eventDay, today) -> "Today $time"
+        sameDay(eventDay, tomorrow) -> "Tomorrow $time"
+        else -> SimpleDateFormat("EEE d MMM", Locale.US).format(Date(beginMs)) +
+            " $time"
+    }
+}
+
+/** Blocking gold fetch (call on Dispatchers.IO): INR, else USD × FX. */
+private fun fetchGoldPerGram(): Double? {
+    runCatching {
+        val body = httpGetText("https://data-asg.goldprice.org/dbXRates/INR")
+        val perOz = body?.let {
+            JSONObject(it).getJSONArray("items").getJSONObject(0)
+                .getDouble("xauPrice")
+        }
+        if (perOz != null && perOz > 0) return perOz / GRAM_PER_TROY_OUNCE
+    }
+    return runCatching {
+        val usdBody = httpGetText("https://data-asg.goldprice.org/dbXRates/USD")
+            ?: return null
+        val usdPerOz = JSONObject(usdBody).getJSONArray("items")
+            .getJSONObject(0).getDouble("xauPrice")
+        val fxBody = httpGetText("https://open.er-api.com/v6/latest/USD")
+            ?: return null
+        val inrRate = JSONObject(fxBody).getJSONObject("rates").getDouble("INR")
+        if (usdPerOz > 0 && inrRate > 0) {
+            usdPerOz * inrRate / GRAM_PER_TROY_OUNCE
+        } else {
+            null
+        }
+    }.getOrNull()
+}
+
+@Composable
+private fun HomeInfoRow() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(JarvisDimens.spaceMd)
+    ) {
+        CalendarCard(modifier = Modifier.weight(1f))
+        GoldCard(modifier = Modifier.weight(1f))
+    }
+}
+
+/** Shared shell for the two #90 small cards (display-only, no tap). */
+@Composable
+private fun SmallInfoCard(
+    icon: ImageVector,
+    title: String,
+    line1: String,
+    line2: String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        modifier = modifier
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = line1,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = line2,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
+}
+
+@Composable
+private fun CalendarCard(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    var result by remember { mutableStateOf<NextEventResult?>(null) }
+    LaunchedEffect(Unit) {
+        result = withContext(Dispatchers.IO) { queryNextEvent(context) }
+    }
+    val (line1, line2) = when (val r = result) {
+        null -> "Checking…" to ""
+        NextEventResult.NoPermission ->
+            "Calendar — grant access in Permissions" to ""
+        NextEventResult.None -> "Nothing coming up" to "Next 7 days are clear"
+        is NextEventResult.Found ->
+            "${formatEventWhen(r.beginMs)} · ${r.title}" to "Next event"
+    }
+    SmallInfoCard(
+        icon = Icons.Filled.Event,
+        title = "Calendar",
+        line1 = line1,
+        line2 = line2,
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun GoldCard(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    var perGram by remember {
+        mutableStateOf<Double?>(
+            context.getSharedPreferences(HOME_CACHE_PREFS, Context.MODE_PRIVATE)
+                .let { prefs ->
+                    if (prefs.contains("gold_perGram")) {
+                        prefs.getFloat("gold_perGram", 0f).toDouble()
+                            .takeIf { it > 0 }
+                    } else {
+                        null
+                    }
+                }
+        )
+    }
+    var fetchFailed by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val fresh = withContext(Dispatchers.IO) { fetchGoldPerGram() }
+        if (fresh != null) {
+            perGram = fresh
+            fetchFailed = false
+            withContext(Dispatchers.IO) {
+                context.getSharedPreferences(HOME_CACHE_PREFS, Context.MODE_PRIVATE)
+                    .edit()
+                    .putFloat("gold_perGram", fresh.toFloat())
+                    .putLong("gold_fetchedAt", System.currentTimeMillis())
+                    .apply()
+            }
+        } else {
+            fetchFailed = true
+        }
+    }
+    val price = perGram
+    val (line1, line2) = when {
+        price != null -> {
+            val formatted = String.format(Locale.US, "%,.0f", price)
+            "Gold ₹$formatted/g" to if (fetchFailed) "Last saved price" else "Live • per gram"
+        }
+        fetchFailed -> "Gold" to "Gold — unavailable offline"
+        else -> "Gold" to "Fetching price…"
+    }
+    SmallInfoCard(
+        icon = Icons.Filled.MonetizationOn,
+        title = "Gold price",
+        line1 = line1,
+        line2 = line2,
+        modifier = modifier
+    )
 }
 
 @Composable

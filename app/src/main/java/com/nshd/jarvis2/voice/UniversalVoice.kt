@@ -49,7 +49,22 @@ class UniversalVoice(
      * override is gone — the sliders fully control pitch now.)
      */
     private val ttsRate: () -> Float = { DEFAULT_TTS_RATE },
-    private val ttsPitch: () -> Float = { DEFAULT_TTS_PITCH }
+    private val ttsPitch: () -> Float = { DEFAULT_TTS_PITCH },
+    /**
+     * v1.8 (#7): the user's explicit device-TTS voice choice
+     * (JarvisSettings.ttsVoiceName; "" = auto). Read like the tuning
+     * providers so [selectBestVoice] prefers the voice with exactly
+     * this name when the engine offers it.
+     */
+    private val ttsVoiceName: () -> String = { "" },
+    /**
+     * v1.8 (#4): barge-in sensitivity provider ("LOW"/"NORMAL"/"HIGH")
+     * and the manager's veto for listens that must never barge in
+     * (the session's own spoken-gate yes/no listens — a gate reply
+     * arriving as a partial must not kill the speech it answers).
+     */
+    private val bargeInSensitivity: () -> String = { "NORMAL" },
+    private val bargeInAllowed: () -> Boolean = { true }
 ) {
     interface Listener {
         /** Partial transcription while the user is still speaking. */
@@ -171,7 +186,10 @@ class UniversalVoice(
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
             override fun onPartialResults(partialResults: Bundle?) {
-                firstResult(partialResults)?.let { listener.onPartialResult(it) }
+                firstResult(partialResults)?.let { partial ->
+                    maybeBargeIn(partial)
+                    listener.onPartialResult(partial)
+                }
             }
             override fun onEvent(eventType: Int, params: Bundle?) {}
             override fun onResults(results: Bundle?) {
@@ -279,6 +297,33 @@ class UniversalVoice(
             runCatching { rec.cancel() }
             runCatching { rec.destroy() }
         }
+    }
+
+    /**
+     * v1.8 (#4): Universal barge-in. While TTS is speaking (or has
+     * utterances queued), a recognizer partial means the user started
+     * talking over Jarvis — stop the speech; the recognizer keeps
+     * running and its final result becomes the next command through
+     * the normal dispatch. Sensitivity: NORMAL/HIGH act on any
+     * non-blank partial; LOW demands a longer/louder cue, approximated
+     * by a minimum partial length (a one-word blip or room noise
+     * rarely grows a 4+ char partial). Never fires when nothing is
+     * queued, and never on the listens the manager vetoes via
+     * [bargeInAllowed] (the session's own gate/wake listens).
+     */
+    private fun maybeBargeIn(partial: String) {
+        if (destroyed) return
+        if (pendingUtterances.get() <= 0) return
+        if (!runCatching { bargeInAllowed() }.getOrDefault(true)) return
+        val sensitivity = runCatching { bargeInSensitivity() }
+            .getOrDefault("NORMAL").trim().uppercase()
+        val minChars = if (sensitivity == "LOW") 4 else 1
+        if (partial.trim().length < minChars) return
+        AppLog.i(
+            "TTS",
+            "barge-in: user speech over TTS (sensitivity=$sensitivity) — stopping speech"
+        )
+        stopSpeaking()
     }
 
     private fun firstResult(bundle: Bundle?): String? =
@@ -414,6 +459,21 @@ class UniversalVoice(
     private fun selectBestVoice(engine: TextToSpeech): Voice? {
         val all = runCatching { engine.voices }.getOrNull().orEmpty()
         if (all.isEmpty()) return null
+        // v1.8 (#7): an explicit user choice (Settings voice picker)
+        // beats every heuristic — an exact name match wins outright,
+        // whatever its locale/quality. Blank or not-offered falls
+        // through to the auto-pick below, unchanged.
+        val wanted = runCatching { ttsVoiceName() }.getOrDefault("").trim()
+        if (wanted.isNotEmpty()) {
+            val chosen = all.firstOrNull { voice ->
+                runCatching { voice.name }.getOrNull() == wanted
+            }
+            if (chosen != null) {
+                AppLog.i("TTS", "voice selected: user choice '$wanted'")
+                return chosen
+            }
+            AppLog.w("TTS", "chosen voice '$wanted' not offered by this engine — auto-picking")
+        }
         val sameLanguage = all.filter { voice ->
             runCatching { voice.locale?.language }.getOrNull() == locale.language
         }
@@ -469,10 +529,68 @@ class UniversalVoice(
         // F5.1: nothing queued or speaking → this is the first
         // utterance of a reply: pick up any slider changes first.
         if (pendingUtterances.get() == 0) applyTtsTuning(engine)
-        val id = "universal-${utteranceSeq.incrementAndGet()}"
-        pendingUtterances.incrementAndGet()
-        val result = engine.speak(text, TextToSpeech.QUEUE_ADD, null, id)
-        if (result == TextToSpeech.ERROR) utteranceFinished()
+        // v1.8 (#8): a single "sentence" from the manager can still
+        // be arbitrarily long (a whole non-streamed reply remainder,
+        // a list, a code block read aloud…). Some engines silently
+        // truncate very long utterances, so split into ≤~350-char
+        // chunks at sentence/clause boundaries and queue them IN
+        // ORDER — every chunk is spoken, nothing is dropped.
+        val chunks = splitForTts(text)
+        for (chunk in chunks) {
+            val id = "universal-${utteranceSeq.incrementAndGet()}"
+            pendingUtterances.incrementAndGet()
+            val result = engine.speak(chunk, TextToSpeech.QUEUE_ADD, null, id)
+            if (result == TextToSpeech.ERROR) utteranceFinished()
+        }
+    }
+
+    /**
+     * v1.8 (#8): split [text] into chunks of at most
+     * [MAX_TTS_CHUNK_CHARS] characters, preferring cuts at sentence
+     * ends (. ! ? …), then clause boundaries (, ; : —), then word
+     * boundaries; a single over-long word is hard-cut as a last
+     * resort. Concatenating the chunks reproduces [text] (modulo the
+     * trimmed boundary whitespace) — no content is ever dropped.
+     */
+    private fun splitForTts(text: String): List<String> {
+        if (text.length <= MAX_TTS_CHUNK_CHARS) return listOf(text)
+        val chunks = mutableListOf<String>()
+        var rest = text.trim()
+        while (rest.length > MAX_TTS_CHUNK_CHARS) {
+            val window = rest.substring(0, MAX_TTS_CHUNK_CHARS)
+            var cut = -1
+            // Sentence end inside the window (keep the punctuation).
+            for (i in window.indices) {
+                val c = window[i]
+                if ((c == '.' || c == '!' || c == '?' || c == '…') &&
+                    (i + 1 >= window.length || window[i + 1] == ' ' || window[i + 1] == '\n')
+                ) {
+                    cut = i + 1
+                }
+            }
+            // Clause boundary.
+            if (cut < 0) {
+                for (i in window.indices) {
+                    val c = window[i]
+                    if ((c == ',' || c == ';' || c == ':' || c == '—') &&
+                        (i + 1 >= window.length || window[i + 1] == ' ')
+                    ) {
+                        cut = i + 1
+                    }
+                }
+            }
+            // Word boundary.
+            if (cut < 0) {
+                val space = window.lastIndexOf(' ')
+                if (space > 40) cut = space
+            }
+            if (cut < 0) cut = MAX_TTS_CHUNK_CHARS
+            val chunk = rest.substring(0, cut).trim()
+            if (chunk.isNotBlank()) chunks += chunk
+            rest = rest.substring(cut).trim()
+        }
+        if (rest.isNotBlank()) chunks += rest
+        return chunks.ifEmpty { listOf(text) }
     }
 
     /** Barge-in: stop speaking now and report the queue as drained. */
@@ -508,6 +626,9 @@ class UniversalVoice(
 
         /** F5.1 default TTS pitch — noticeably girlier than neutral 1.0×. */
         const val DEFAULT_TTS_PITCH = 1.22f
+
+        /** v1.8 (#8): max characters per queued TTS utterance. */
+        const val MAX_TTS_CHUNK_CHARS = 350
 
         /**
          * App language name → BCP-47 tag for speech recognition. India

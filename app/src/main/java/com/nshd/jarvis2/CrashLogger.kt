@@ -38,6 +38,15 @@ object CrashLogger {
 
     private const val PREFS_NAME = "jarvis_diagnostics"
     private const val KEY_CRASH_PENDING = "crash_pending"
+    // Plan #102 (safe mode): consecutive crashes within BOOT_WINDOW_MS of
+    // a boot; at SAFE_MODE_THRESHOLD the next boot starts in safe mode.
+    private const val KEY_BOOT_STARTED_AT = "boot_started_at"
+    private const val KEY_BOOT_CRASH_STREAK = "boot_crash_streak"
+    private const val KEY_SAFE_MODE = "safe_mode"
+    private const val BOOT_WINDOW_MS = 20_000L
+    private const val SAFE_MODE_THRESHOLD = 3
+    // Plan #98: last visible screen ("TAB:SUB") for crash relaunch restore.
+    private const val KEY_LAST_SCREEN = "last_screen"
     private const val CRASH_FILE_NAME = "last_crash.txt"
     private const val LOG_FILE_NAME = "session_log.txt"
     private const val MAX_LOG_LINES = 200
@@ -106,11 +115,74 @@ object CrashLogger {
             )
         }
         // commit(), not apply(): the process is dying right now.
-        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_CRASH_PENDING, true)
-            .commit()
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val edit = prefs.edit().putBoolean(KEY_CRASH_PENDING, true)
+        // Plan #102: a crash inside the boot window counts toward the
+        // safe-mode streak; three in a row arm safe mode for next boot.
+        val bootAt = prefs.getLong(KEY_BOOT_STARTED_AT, 0L)
+        if (bootAt > 0L && System.currentTimeMillis() - bootAt < BOOT_WINDOW_MS) {
+            val streak = prefs.getInt(KEY_BOOT_CRASH_STREAK, 0) + 1
+            edit.putInt(KEY_BOOT_CRASH_STREAK, streak)
+            if (streak >= SAFE_MODE_THRESHOLD) {
+                edit.putBoolean(KEY_SAFE_MODE, true)
+            }
+        }
+        edit.commit()
     }
+
+    // ── Safe mode + boot streak (Plan #102) ────────────────────────────
+
+    /** MainActivity calls this first thing in onCreate. */
+    fun markBootStart(context: Context) {
+        runCatching {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putLong(KEY_BOOT_STARTED_AT, System.currentTimeMillis())
+                .apply()
+        }
+    }
+
+    /** The app survived the boot window: reset the crash streak. */
+    fun markBootSettled(context: Context) {
+        runCatching {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putInt(KEY_BOOT_CRASH_STREAK, 0)
+                .apply()
+        }
+    }
+
+    fun isSafeMode(context: Context): Boolean = runCatching {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SAFE_MODE, false)
+    }.getOrDefault(false)
+
+    /** Leaving safe mode also clears the streak that armed it. */
+    fun setSafeMode(context: Context, enabled: Boolean) {
+        runCatching {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_SAFE_MODE, enabled)
+                .putInt(KEY_BOOT_CRASH_STREAK, 0)
+                .apply()
+        }
+    }
+
+    // ── Last-screen restore (Plan #98) ─────────────────────────────────
+
+    fun saveLastScreen(context: Context, screen: String) {
+        runCatching {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_LAST_SCREEN, screen)
+                .apply()
+        }
+    }
+
+    fun lastScreen(context: Context): String? = runCatching {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_LAST_SCREEN, null)
+    }.getOrNull()
 
     private fun appVersion(ctx: Context): String = runCatching {
         val info = ctx.packageManager.getPackageInfo(ctx.packageName, 0)

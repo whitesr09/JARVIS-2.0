@@ -19,7 +19,30 @@ import kotlinx.coroutines.flow.asStateFlow
  * Plain singleton object — no nested classes needed, so the L3 rule
  * (no `inner` / nested `companion` inside objects) is trivially met.
  */
+/** Plan #61: thrown at step boundaries when the user pressed Stop. The
+ * pipeline treats this as a clean cancellation — never a failure, never
+ * retried, and (like every stop) no action is replayed after it. */
+class TaskStoppedException : Exception("Task stopped by user")
+
 object TaskState {
+
+    // ── Plan #61: true task cancellation ────────────────────────────
+    // A stop flag the pipeline, the agent loop and the deep intents
+    // check BETWEEN steps (abort() only cancels the coroutine, which a
+    // blocking accessibility call never notices). Set by the panel's
+    // Cancel button and the chat stop button; cleared on begin().
+    @Volatile
+    private var stopFlag: Boolean = false
+
+    fun requestStop() {
+        stopFlag = true
+    }
+
+    fun isStopRequested(): Boolean = stopFlag
+
+    fun throwIfStopRequested() {
+        if (stopFlag) throw TaskStoppedException()
+    }
 
     private val _active = MutableStateFlow(false)
     val active: StateFlow<Boolean> = _active.asStateFlow()
@@ -57,6 +80,7 @@ object TaskState {
         private set
 
     fun begin(goal: String, job: Job, maxSteps: Int = 0) {
+        stopFlag = false
         this.job = job
         this.maxSteps = maxSteps
         this.stepsDone = 0

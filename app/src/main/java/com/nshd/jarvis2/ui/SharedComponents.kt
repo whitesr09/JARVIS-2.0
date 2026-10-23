@@ -9,12 +9,14 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -26,8 +28,46 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+
+/**
+ * #96 — friendly empty state: a large centred emoji, a one-line title
+ * and an optional action button. One treatment for "nothing here yet"
+ * across screens (Memory, Logs, …) so empty never looks broken.
+ * Renders the button only when BOTH [actionLabel] and [onAction] are
+ * supplied.
+ */
+@Composable
+fun FriendlyEmptyState(
+    emoji: String,
+    title: String,
+    actionLabel: String?,
+    onAction: (() -> Unit)?,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(JarvisDimens.space3xl),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(text = emoji, fontSize = 48.sp)
+        Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center
+        )
+        if (actionLabel != null && onAction != null) {
+            Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
+            Button(onClick = onAction) { Text(actionLabel) }
+        }
+    }
+}
 
 /** Tone language for [JarvisPill] — one status vocabulary app-wide. */
 enum class PillTone { SUCCESS, WARNING, ERROR, PRIMARY, NEUTRAL }

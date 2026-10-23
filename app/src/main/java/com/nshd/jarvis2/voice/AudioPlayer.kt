@@ -35,6 +35,18 @@ class AudioPlayer(
     @Volatile
     var muted: Boolean = false
 
+    /**
+     * v1.8 (#3): true while the writer thread is actively outputting
+     * model audio (a chunk was dequeued and the queue has not since
+     * run dry). The session manager reads this so the orb is driven
+     * by the OUTPUT level while the player is playing, and by the
+     * microphone otherwise — the mic hears the loudspeaker + room and
+     * made the orb dance to echo during speech.
+     */
+    @Volatile
+    var outputActive: Boolean = false
+        private set
+
     fun start() {
         if (running) return
         val minBuffer = AudioTrack.getMinBufferSize(
@@ -88,14 +100,33 @@ class AudioPlayer(
 
     private fun writeLoop(audioTrack: AudioTrack) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        // v1.8 (#3): per-chunk RMS is SMOOTHED (fast attack, slower
+        // release) so the orb tracks the speech envelope instead of
+        // jittering on every 20–100 ms chunk boundary.
+        var smoothedAmp = 0f
         while (running) {
             val chunk = try {
                 queue.poll(100, TimeUnit.MILLISECONDS)
             } catch (e: InterruptedException) {
                 break
-            } ?: continue
+            }
+            if (chunk == null) {
+                // Queue ran dry — playback is no longer active, so
+                // the mic owns the orb again (the manager checks
+                // outputActive before applying mic amplitude).
+                outputActive = false
+                smoothedAmp = 0f
+                continue
+            }
             if (muted) continue
-            onAmplitude(AudioCapture.rmsOf(chunk, chunk.size))
+            outputActive = true
+            val rms = AudioCapture.rmsOf(chunk, chunk.size)
+            smoothedAmp = if (rms >= smoothedAmp) {
+                smoothedAmp * 0.35f + rms * 0.65f
+            } else {
+                smoothedAmp * 0.72f + rms * 0.28f
+            }
+            onAmplitude(smoothedAmp)
             var offset = 0
             while (offset < chunk.size && running) {
                 val written = try {
@@ -121,6 +152,7 @@ class AudioPlayer(
 
     /** Barge-in: stop current speech immediately (queue + hardware buffer). */
     fun flush() {
+        outputActive = false
         queue.clear()
         val audioTrack = track ?: return
         try {
@@ -133,6 +165,7 @@ class AudioPlayer(
 
     fun stop() {
         running = false
+        outputActive = false
         queue.clear()
         writer?.let {
             it.interrupt()

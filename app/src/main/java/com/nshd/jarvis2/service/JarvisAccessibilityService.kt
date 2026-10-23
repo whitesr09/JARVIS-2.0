@@ -8,7 +8,9 @@ import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.hands.ScreenReader
+import com.nshd.jarvis2.hands.TaskState
 import com.nshd.jarvis2.hands.UiElement
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.ByteArrayOutputStream
@@ -32,8 +34,75 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        event?.packageName?.toString()?.takeIf { it.isNotBlank() }?.let {
-            lastPackageName = it
+        val pkg = event?.packageName?.toString()?.takeIf { it.isNotBlank() }
+        if (pkg != null) lastPackageName = pkg
+        // #34: system-dialog awareness — report only, never auto-tap.
+        try {
+            handlePossibleSystemDialog(event, pkg)
+        } catch (e: Exception) {
+            // Dialog detection must never crash the service.
+        }
+    }
+
+    /**
+     * #34: detect dialogs from system packages on window-state-changed
+     * (or dialog-class) events, extract their visible text, log it and
+     * — only while a task is active — surface it on the Task HUD.
+     * REPORT ONLY: this code performs no clicks, no actions and no
+     * grants in system dialogs, ever.
+     */
+    private fun handlePossibleSystemDialog(event: AccessibilityEvent?, pkg: String?) {
+        if (event == null || pkg == null) return
+        if (pkg !in SYSTEM_DIALOG_PACKAGES) return
+        val className = event.className?.toString().orEmpty()
+        val isWindowState = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        val isDialogClass = className.contains("Dialog", ignoreCase = true) ||
+            className.contains("Alert", ignoreCase = true) ||
+            className.contains("permission", ignoreCase = true)
+        if (!isWindowState && !isDialogClass) return
+        val texts = mutableListOf<String>()
+        event.text?.forEach { part ->
+            part?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { texts += it }
+        }
+        event.contentDescription?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() }?.let { texts += it }
+        collectNodeText(event.source, texts, depth = 0)
+        rootInActiveWindow
+            ?.takeIf { it.packageName?.toString() == pkg }
+            ?.let { collectNodeText(it, texts, depth = 0) }
+        // Also scan service windows belonging to the system package.
+        try {
+            windows.firstOrNull { window ->
+                window.root?.packageName?.toString() == pkg &&
+                    (window.type == AccessibilityWindowInfo.TYPE_SYSTEM ||
+                        window.type == AccessibilityWindowInfo.TYPE_APPLICATION)
+            }?.root?.let { collectNodeText(it, texts, depth = 0) }
+        } catch (e: Exception) {
+            // Window scan is best-effort only.
+        }
+        val dialogText = texts.distinct().joinToString(" ").trim().take(300)
+        if (dialogText.isBlank()) return
+        if (dialogText == lastSystemDialog) return // de-dupe repeat events
+        lastSystemDialog = dialogText
+        AppLog.i("Hands", "System dialog: ${dialogText.take(200)}")
+        if (TaskState.active.value) {
+            TaskState.step("⚠️ Android is asking: ${dialogText.take(120)}")
+        }
+    }
+
+    /** Bounded recursive text/desc collection for dialog detection. */
+    private fun collectNodeText(
+        node: AccessibilityNodeInfo?,
+        out: MutableList<String>,
+        depth: Int
+    ) {
+        if (node == null || depth > 6 || out.size >= 40) return
+        node.text?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { out += it }
+        node.contentDescription?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() }?.let { out += it }
+        for (i in 0 until node.childCount) {
+            collectNodeText(node.getChild(i), out, depth + 1)
+            if (out.size >= 40) return
         }
     }
 
@@ -164,6 +233,20 @@ class JarvisAccessibilityService : AccessibilityService() {
         @Volatile
         var lastPackageName: String? = null
             internal set
+
+        /** #34: text of the most recent system dialog seen (report-only). */
+        @Volatile
+        var lastSystemDialog: String? = null
+
+        /** #34: packages whose dialogs are system dialogs. */
+        private val SYSTEM_DIALOG_PACKAGES = setOf(
+            "com.android.systemui",
+            "android",
+            "com.android.permissioncontroller",
+            "com.google.android.permissioncontroller",
+            "com.android.packageinstaller",
+            "com.google.android.packageinstaller"
+        )
 
         fun isEnabled(): Boolean = instance != null
     }

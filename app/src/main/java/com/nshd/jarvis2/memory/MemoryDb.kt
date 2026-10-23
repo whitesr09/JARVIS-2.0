@@ -170,6 +170,11 @@ class MemoryDb(context: Context) :
         return result.asReversed()
     }
 
+    /** #66: delete one stored message by id (edit-and-resend truncation). */
+    fun deleteMessage(id: Long) {
+        writableDatabase.delete("chat_messages", "id = ?", arrayOf(id.toString()))
+    }
+
     fun clearChat() {
         writableDatabase.delete("chat_messages", null, null)
     }

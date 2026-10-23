@@ -5,8 +5,16 @@ import android.accessibilityservice.GestureDescription
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
+import android.util.Base64
+import java.io.File
+import java.io.FileOutputStream
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import com.nshd.jarvis2.brain.tools.ConfirmGate
@@ -186,8 +194,11 @@ object HandsActions {
         if (text.isBlank()) return@serialized ActionResult(false, "Text to type is blank.")
         val root = service.activeRoot()
             ?: return@serialized ActionResult(false, "No active window is available.")
-        val target = resolveEditableTarget(root)
+        val resolvedTarget = resolveEditableTarget(root)
             ?: return@serialized ActionResult(false, "No editable text field was found on this screen.")
+        // #35: scroll an IME-covered field into view first, then use
+        // the re-fetched target (insert-at-selection below is unchanged).
+        val target = ensureEditableVisible(service, resolvedTarget)
         val existing = target.text
         val replace = target.isSearchField || existing.isBlank()
         val insertAt = when {
@@ -393,11 +404,13 @@ object HandsActions {
         if (code.isBlank()) return@serializedLong ActionResult(false, "The code to insert is blank.")
         val root = service.activeRoot()
             ?: return@serializedLong ActionResult(false, "No active window is available.")
-        val target = resolveEditableTarget(root)
+        val resolvedTarget = resolveEditableTarget(root)
             ?: return@serializedLong ActionResult(
                 false,
                 "No editable text field was found on this screen — tap into the editing area first."
             )
+        // #35: same keyboard-cover fix on the code-insert path.
+        val target = ensureEditableVisible(service, resolvedTarget)
         val existing = target.text
         val selStart = target.selectionStart
         val selEnd = target.selectionEnd
@@ -645,6 +658,7 @@ object HandsActions {
         com.nshd.jarvis2.core.AppLog.d(
             "Hands", "tap at $xPercent%, $yPercent% (ok=$dispatched)"
         )
+        if (!dispatched) saveTapFailureScreenshot(service, x, y) // #40
         ActionResult(dispatched, if (dispatched) "Tapped at $xPercent%, $yPercent%." else "Tap was not dispatched.")
     }
 
@@ -858,6 +872,21 @@ object HandsActions {
         "Accessibility is not enabled. Enable Jarvis Digital Hands in Permissions → Accessibility Service first."
     )
 
+    /**
+     * #37 retry-with-variation + #40 tap-failure screenshot.
+     *
+     * Guard invariant: the SensitiveTapGuard was already consulted by
+     * the caller (clickElement / clickText) BEFORE this method runs,
+     * for this exact element. Every strategy below is part of that one
+     * guard-cleared tap — a retry never re-decides or bypasses the
+     * guard, and no new target is ever introduced by a retry.
+     *
+     * Order: (primary) clickable-ancestor ACTION_CLICK, then node
+     * centre; (retry 1) clickable parent centre; (retry 2) a point at
+     * 25% from the node's left edge, centre-height. A vanished node
+     * skips straight to the coordinate strategies from the snapshot
+     * bounds. The winning strategy is logged.
+     */
     private suspend fun clickResolved(
         service: JarvisAccessibilityService,
         element: UiElement,
@@ -866,33 +895,188 @@ object HandsActions {
         val root = service.activeRoot()
             ?: return ActionResult(false, "No active window is available for the click.")
         val node = resolveNode(root, element)
-            ?: return ActionResult(false, "The target $targetDescription could not be re-found on the current screen.")
-
-        var candidate: AccessibilityNodeInfo? = node
-        var steps = 0
-        while (candidate != null && steps <= 8) {
-            if (candidate.isClickable && candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                com.nshd.jarvis2.core.AppLog.d(
-                    "Hands", "click ${targetDescription.take(60)}"
-                )
-                return ActionResult(true, "Clicked $targetDescription.")
-            }
-            candidate = candidate.parent
-            steps++
-        }
-
         val centerX = element.bounds.exactCenterX()
         val centerY = element.bounds.exactCenterY()
-        val tapped = dispatchSwipe(service, centerX, centerY, centerX, centerY, durationMs = 60)
-        com.nshd.jarvis2.core.AppLog.d(
-            "Hands",
-            "tap ${targetDescription.take(60)} (coordinate fallback, ok=$tapped)"
+        var lastX = centerX
+        var lastY = centerY
+
+        if (node != null) {
+            var candidate: AccessibilityNodeInfo? = node
+            var steps = 0
+            while (candidate != null && steps <= 8) {
+                if (candidate.isClickable && candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    com.nshd.jarvis2.core.AppLog.i(
+                        "Hands", "click strategy=a11y-click succeeded for ${targetDescription.take(60)}"
+                    )
+                    return ActionResult(true, "Clicked $targetDescription.")
+                }
+                candidate = candidate.parent
+                steps++
+            }
+        } else {
+            com.nshd.jarvis2.core.AppLog.w(
+                "Hands", "click target vanished, using snapshot bounds for ${targetDescription.take(60)}"
+            )
+        }
+
+        // Primary coordinate tap: centre of the node bounds.
+        if (dispatchSwipe(service, centerX, centerY, centerX, centerY, durationMs = 60)) {
+            com.nshd.jarvis2.core.AppLog.i(
+                "Hands", "click strategy=centre succeeded for ${targetDescription.take(60)}"
+            )
+            return ActionResult(true, "Clicked $targetDescription with a coordinate tap fallback.")
+        }
+
+        // Retry 1: centre of the node's clickable parent.
+        val parent = node?.parent
+        if (parent != null) {
+            val parentBounds = Rect().also { parent.getBoundsInScreen(it) }
+            if (parentBounds.width() > 0 && parentBounds.height() > 0) {
+                val parentX = parentBounds.exactCenterX()
+                val parentY = parentBounds.exactCenterY()
+                lastX = parentX
+                lastY = parentY
+                if (dispatchSwipe(service, parentX, parentY, parentX, parentY, durationMs = 60)) {
+                    com.nshd.jarvis2.core.AppLog.i(
+                        "Hands", "click strategy=parent-centre succeeded for ${targetDescription.take(60)}"
+                    )
+                    return ActionResult(true, "Clicked $targetDescription with a coordinate tap fallback.")
+                }
+            }
+        }
+
+        // Retry 2: 25% from the node's left edge, centre-height.
+        val edgeX = element.bounds.left + element.bounds.width() * 0.25f
+        val edgeY = centerY
+        lastX = edgeX
+        lastY = edgeY
+        if (dispatchSwipe(service, edgeX, edgeY, edgeX, edgeY, durationMs = 60)) {
+            com.nshd.jarvis2.core.AppLog.i(
+                "Hands", "click strategy=edge-25 succeeded for ${targetDescription.take(60)}"
+            )
+            return ActionResult(true, "Clicked $targetDescription with a coordinate tap fallback.")
+        }
+
+        // #40: all strategies exhausted — annotated failure screenshot.
+        saveTapFailureScreenshot(service, lastX, lastY)
+        return ActionResult(false, "Could not click $targetDescription.")
+    }
+
+    /**
+     * #40: annotated tap-failure screenshot. The capture itself is
+     * fetched first (suspend, failure -> log + skip); the decode /
+     * draw / save work is wrapped in runCatching so a screenshot
+     * failure can never mask the original tap failure. The capture is
+     * a JPEG scaled to width <= 720, so the tap point is scaled from
+     * display pixels into bitmap pixels before drawing.
+     */
+    private suspend fun saveTapFailureScreenshot(
+        service: JarvisAccessibilityService,
+        tapX: Float,
+        tapY: Float
+    ) {
+        val encoded = try {
+            service.captureScreenshotBase64()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            com.nshd.jarvis2.core.AppLog.w("Hands", "Tap failed — screenshot capture failed: ${e.message}")
+            null
+        }
+        if (encoded == null) {
+            com.nshd.jarvis2.core.AppLog.i("Hands", "Tap failed — screenshot unavailable, skipping annotated screenshot")
+            return
+        }
+        runCatching {
+            val bytes = Base64.decode(encoded, Base64.DEFAULT)
+            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                ?: error("screenshot decode returned null")
+            val bitmap = decoded.copy(Bitmap.Config.ARGB_8888, true) ?: decoded
+            try {
+                val metrics = service.resources.displayMetrics
+                val scaleX = if (metrics.widthPixels > 0) bitmap.width.toFloat() / metrics.widthPixels else 1f
+                val scaleY = if (metrics.heightPixels > 0) bitmap.height.toFloat() / metrics.heightPixels else 1f
+                val cx = tapX * scaleX
+                val cy = tapY * scaleY
+                val canvas = Canvas(bitmap)
+                val ring = Paint().apply {
+                    color = Color.RED
+                    style = Paint.Style.STROKE
+                    strokeWidth = 6f
+                    isAntiAlias = true
+                }
+                canvas.drawCircle(cx, cy, 42f, ring)
+                val dot = Paint().apply {
+                    color = Color.RED
+                    style = Paint.Style.FILL
+                    isAntiAlias = true
+                }
+                canvas.drawCircle(cx, cy, 7f, dot)
+                val dir = File(service.filesDir, "tapshots").apply { mkdirs() }
+                val file = File(dir, "tapfail_${System.currentTimeMillis()}.png")
+                FileOutputStream(file).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                }
+                // Prune to the last 10 failure shots.
+                dir.listFiles()
+                    ?.filter { it.isFile && it.name.startsWith("tapfail_") }
+                    ?.sortedByDescending { it.lastModified() }
+                    ?.drop(10)
+                    ?.forEach { stale -> runCatching { stale.delete() } }
+                com.nshd.jarvis2.core.AppLog.i(
+                    "Hands", "Tap failed — annotated screenshot saved: ${file.absolutePath}"
+                )
+            } finally {
+                bitmap.recycle()
+                if (decoded !== bitmap) decoded.recycle()
+            }
+        }.onFailure { e ->
+            com.nshd.jarvis2.core.AppLog.w("Hands", "Tap failed — annotated screenshot failed: ${e.message}")
+        }
+    }
+
+    /**
+     * #35 keyboard-cover fix: when the editable target lies in the
+     * bottom ~35% of the screen it is likely covered by the IME.
+     * Try, in order: the node's own ACTION_SCROLL_FORWARD, a
+     * scrollable ancestor's ACTION_SCROLL_FORWARD, then a small
+     * swipe-up. Afterwards the target is re-fetched so callers set
+     * text on the fresh node (selection / bounds may have moved).
+     * When the field is not in the bottom zone (or nothing scrolls)
+     * the original target is returned untouched.
+     */
+    private suspend fun ensureEditableVisible(
+        service: JarvisAccessibilityService,
+        target: EditableTarget
+    ): EditableTarget {
+        val metrics = service.resources.displayMetrics
+        val screenHeight = metrics.heightPixels
+        if (screenHeight <= 0) return target
+        val bounds = target.descriptor.bounds
+        val bottomZoneTop = (screenHeight * 0.65f).toInt()
+        if (bounds.centerY() < bottomZoneTop && bounds.top < bottomZoneTop) return target
+        com.nshd.jarvis2.core.AppLog.i(
+            "Hands", "editable field in bottom zone (IME cover risk) — scrolling into view"
         )
-        return ActionResult(
-            tapped,
-            if (tapped) "Clicked $targetDescription with a coordinate tap fallback."
-            else "Could not click $targetDescription."
-        )
+        var scrolled = target.node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+        if (!scrolled) {
+            var ancestor = target.node.parent
+            var steps = 0
+            while (ancestor != null && steps <= 8 && !scrolled) {
+                if (ancestor.isScrollable) {
+                    scrolled = ancestor.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                }
+                ancestor = ancestor.parent
+                steps++
+            }
+        }
+        if (!scrolled) {
+            val width = metrics.widthPixels.toFloat()
+            val height = metrics.heightPixels.toFloat()
+            scrolled = dispatchSwipe(service, width * 0.5f, height * 0.75f, width * 0.5f, height * 0.55f, durationMs = 300)
+        }
+        if (scrolled) delay(150)
+        return freshTarget(service, target.descriptor) ?: target
     }
 
     private fun resolveNode(root: AccessibilityNodeInfo, element: UiElement): AccessibilityNodeInfo? {

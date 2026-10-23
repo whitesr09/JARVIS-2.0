@@ -1,10 +1,16 @@
 package com.nshd.jarvis2.voice
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.os.Build
 import android.os.Looper
 import android.os.SystemClock
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyManager
+import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.CrashLogger
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.AgentPipeline
@@ -290,6 +296,38 @@ object VoiceSessionManager {
     @Volatile
     private var ttsSpeaking = false
 
+    /**
+     * v1.8 (#8): "Stop reading" was tapped for the CURRENT turn —
+     * speech is halted and any sentences the pipeline still streams
+     * for this turn are swallowed instead of spoken. Cleared when a
+     * new turn is dispatched.
+     */
+    @Volatile
+    private var readingSuppressed = false
+
+    // ── v1.8 (#11) phone-call auto-pause / resume ────────────────────
+    // While a session is active, a call-state watch (registered only
+    // when READ_PHONE_STATE is already granted — never requested)
+    // pauses the session when a call rings/connects and resumes the
+    // same engine when the call ends.
+
+    /** Session is currently paused for a phone call. */
+    @Volatile
+    private var callPaused = false
+
+    /** A resume is owed when the call returns to IDLE. */
+    @Volatile
+    private var callResumePending = false
+
+    /** Engine that was running when the call interrupted. */
+    @Volatile
+    private var callPausedMode: VoiceMode = VoiceMode.NONE
+
+    /** TelephonyCallback (API 31+) or PhoneStateListener, held as Any. */
+    private var callWatch: Any? = null
+
+    private var callWatchManager: TelephonyManager? = null
+
     // ── F7 GateHost (c): spoken ConfirmGate confirmations ────────────
     // While a gate raised by THIS session's own voice turn is pending,
     // the recognizer listens for a yes/no reply instead of a command.
@@ -385,6 +423,10 @@ object VoiceSessionManager {
         pipelineRunning = false
         pipelineDone = true
         ttsSpeaking = false
+        readingSuppressed = false
+        callPaused = false
+        callResumePending = false
+        callPausedMode = VoiceMode.NONE
         _captions.value = emptyList()
         CrashLogger.stage(TAG, "session start (engine setting=${settings.voiceEngine})")
         AppLog.i(
@@ -393,6 +435,9 @@ object VoiceSessionManager {
                 "language=${settings.language}"
         )
         startGateWatcherIfNeeded()
+        // v1.8 (#11): watch for phone calls so the session can pause
+        // for the call and resume after it (no-op without permission).
+        registerCallWatch()
         // F4.1 mic arbitration handshake: the wake-word service must
         // have FULLY released the microphone (Vosk SpeechService stop
         // is asynchronous) before any engine touches it — two live mic
@@ -568,8 +613,177 @@ object VoiceSessionManager {
         }
     }
 
+    /**
+     * v1.8 (#8): "Stop reading" (Voice screen chip, shown while
+     * SPEAKING). Halts the current spoken reply WITHOUT ending the
+     * session: Universal TTS stops and the rest of this turn's
+     * streamed sentences are suppressed; on the Live path the queued
+     * model audio is flushed. Listening resumes through the normal
+     * drain path.
+     */
+    fun stopReading() {
+        if (!active) return
+        AppLog.i("Voice", "stop reading requested (mode=${_uiState.value.mode})")
+        readingSuppressed = true
+        pulseJob?.cancel()
+        when (_uiState.value.mode) {
+            VoiceMode.UNIVERSAL -> universal?.stopSpeaking()
+            VoiceMode.LIVE -> {
+                player?.flush()
+                if (_uiState.value.status == VoiceStatus.SPEAKING) {
+                    setStatus(VoiceStatus.LISTENING)
+                }
+                _amplitude.value = 0f
+            }
+            VoiceMode.NONE -> Unit
+        }
+    }
+
+    // ── v1.8 (#11) phone-call auto-pause / resume ────────────────────
+
+    /**
+     * Register the call-state watch for this session. Everything is
+     * best-effort: READ_PHONE_STATE is checked (never requested) and
+     * the whole registration is runCatching-wrapped — on devices or
+     * versions where the permission is absent the feature silently
+     * does not exist. API 31+ uses TelephonyCallback on the main
+     * executor; older versions use the legacy PhoneStateListener.
+     */
+    private fun registerCallWatch() {
+        unregisterCallWatch()
+        val ctx = appContext ?: return
+        runCatching {
+            if (ContextCompat.checkSelfPermission(
+                    ctx, Manifest.permission.READ_PHONE_STATE
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                AppLog.d(
+                    "Voice",
+                    "call auto-resume unavailable — READ_PHONE_STATE not granted (skipping)"
+                )
+                return
+            }
+            val tm = ctx.getSystemService(Context.TELEPHONY_SERVICE)
+                as? TelephonyManager ?: return
+            callWatchManager = tm
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val callback = object :
+                    TelephonyManager.TelephonyCallback(),
+                    TelephonyManager.TelephonyCallback.CallStateListener {
+                    override fun onCallStateChanged(state: Int) {
+                        handleCallStateChange(state)
+                    }
+                }
+                tm.registerTelephonyCallback(
+                    ContextCompat.getMainExecutor(ctx), callback
+                )
+                callWatch = callback
+            } else {
+                @Suppress("DEPRECATION")
+                val listener = object : PhoneStateListener() {
+                    @Deprecated("Deprecated in Java")
+                    override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                        handleCallStateChange(state)
+                    }
+                }
+                @Suppress("DEPRECATION")
+                tm.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
+                callWatch = listener
+            }
+            AppLog.i("Voice", "call auto-resume watch registered")
+        }.onFailure { AppLog.w("Voice", "call watch registration failed: ${it.message}") }
+    }
+
+    /** Unregister the call watch and clear any pending resume. Idempotent. */
+    private fun unregisterCallWatch() {
+        val watch = callWatch
+        callWatch = null
+        val tm = callWatchManager
+        callWatchManager = null
+        callPaused = false
+        callResumePending = false
+        callPausedMode = VoiceMode.NONE
+        if (watch == null || tm == null) return
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                watch is TelephonyManager.TelephonyCallback
+            ) {
+                tm.unregisterTelephonyCallback(watch)
+            } else if (watch is PhoneStateListener) {
+                @Suppress("DEPRECATION")
+                tm.listen(watch, PhoneStateListener.LISTEN_NONE)
+            }
+        }
+    }
+
+    /**
+     * Call-state transitions (always on the main thread/executor).
+     * RINGING/OFFHOOK during an active session pauses it — Live is
+     * torn down (its in-memory resumption handle survives for the
+     * reconnect), Universal just stops listening/speaking. IDLE with
+     * a pending resume restarts the SAME engine and says so in a
+     * SYSTEM caption.
+     */
+    private fun handleCallStateChange(state: Int) {
+        if (!active) return
+        when (state) {
+            TelephonyManager.CALL_STATE_RINGING,
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                if (callPaused) return
+                callPaused = true
+                callResumePending = true
+                callPausedMode = _uiState.value.mode
+                AppLog.i(
+                    "Voice",
+                    "phone call active (state=$state) — pausing session (mode=$callPausedMode)"
+                )
+                pulseJob?.cancel()
+                _amplitude.value = 0f
+                when (callPausedMode) {
+                    VoiceMode.LIVE -> teardownLive()
+                    VoiceMode.UNIVERSAL -> {
+                        universal?.stopListening()
+                        voskCommands?.stopListening()
+                        universal?.stopSpeaking()
+                    }
+                    VoiceMode.NONE -> Unit
+                }
+                setStatus(VoiceStatus.IDLE)
+                _uiState.value = _uiState.value.copy(
+                    sttHint = "Paused for your call — I'll pick up where we left off."
+                )
+            }
+            TelephonyManager.CALL_STATE_IDLE -> {
+                if (!callResumePending) return
+                callResumePending = false
+                callPaused = false
+                val mode = callPausedMode
+                callPausedMode = VoiceMode.NONE
+                AppLog.i("Voice", "call ended — resuming session (mode=$mode)")
+                _uiState.value = _uiState.value.copy(sttHint = null)
+                when (mode) {
+                    VoiceMode.LIVE -> startLive(liveSessionHandle)
+                    VoiceMode.UNIVERSAL -> {
+                        setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
+                        maybeResumeUniversalListening()
+                    }
+                    VoiceMode.NONE -> return
+                }
+                addCaption(
+                    VoiceCaption(
+                        fromUser = false,
+                        text = "Resumed after your call.",
+                        kind = CaptionKind.SYSTEM
+                    )
+                )
+            }
+        }
+    }
+
     private fun stopInternal(resetUi: Boolean) {
         active = false
+        // v1.8 (#11): the call watch lives only while a session does.
+        unregisterCallWatch()
         // F6: a stopped session closes any open Live task window so
         // the HUD doesn't keep a phantom RUNNING item.
         closeLiveTaskWindow()
@@ -613,6 +827,7 @@ object VoiceSessionManager {
 
     private fun fail(message: String) {
         CrashLogger.stage(TAG, "fail: $message")
+        unregisterCallWatch()
         pulseJob?.cancel()
         teardownLive()
         stopVoskFallback()
@@ -713,6 +928,9 @@ object VoiceSessionManager {
                 } else {
                     LIVE_SETUP_TIMEOUT_MS
                 },
+                // v1.8 (#4): the user's barge-in sensitivity drives
+                // the server VAD's start-of-speech sensitivity.
+                bargeInSensitivity = s.bargeInSensitivity,
                 listener = LiveListener()
             )
             client = liveClient
@@ -1019,7 +1237,13 @@ object VoiceSessionManager {
                     if (!_uiState.value.micMuted) client?.sendAudioChunk(chunk)
                 },
                 onAmplitude = { amp ->
-                    if (!_uiState.value.micMuted) _amplitude.value = amp
+                    // v1.8 (#3): while the player is actively
+                    // outputting model audio, the OUTPUT level (via
+                    // AudioPlayer.onAmplitude) owns the orb — the mic
+                    // hears the loudspeaker and would swamp it.
+                    if (!_uiState.value.micMuted && player?.outputActive != true) {
+                        _amplitude.value = amp
+                    }
                 },
                 onError = { message -> if (active) fail(message) }
             )
@@ -1301,7 +1525,15 @@ object VoiceSessionManager {
             ttsPitch = {
                 ctx.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
                     .getFloat(KEY_TTS_PITCH, UniversalVoice.DEFAULT_TTS_PITCH)
-            }
+            },
+            // v1.8 (#7): the user's explicit device-TTS voice choice
+            // ("" = auto) — selectBestVoice prefers an exact name match.
+            ttsVoiceName = { settings?.ttsVoiceName ?: "" },
+            // v1.8 (#4): Universal barge-in sensitivity + the gate
+            // veto (a spoken-gate listen must never barge in — its
+            // partial IS the confirmation reply, not an interruption).
+            bargeInSensitivity = { settings?.bargeInSensitivity ?: "NORMAL" },
+            bargeInAllowed = { !gateArmed }
         )
         universal = uv
         if (!uv.isRecognitionAvailable()) {
@@ -1346,6 +1578,8 @@ object VoiceSessionManager {
 
     /** Listen on whichever recognizer currently owns the cycle. */
     private fun startCurrentListening() {
+        // v1.8 (#11): never open the mic while a call has the session paused.
+        if (callPaused) return
         if (offlineSttActive) {
             voskCommands?.startListening()
         } else {
@@ -1396,7 +1630,8 @@ object VoiceSessionManager {
                 override fun onError(message: String) {
                     AppLog.w("STT", "vosk command recognizer error: $message")
                     stopVoskFallback()
-                    if (active && _uiState.value.mode == VoiceMode.UNIVERSAL &&
+                    if (active && !callPaused &&
+                        _uiState.value.mode == VoiceMode.UNIVERSAL &&
                         !_uiState.value.micMuted
                     ) {
                         universal?.startListening()
@@ -1556,6 +1791,8 @@ object VoiceSessionManager {
     /** A final STT result that passed every intercept — run the turn. */
     private fun dispatchUniversalFinal(text: String) {
         guardUsedThisTurn = false
+        // v1.8 (#8): a new turn lifts any previous "Stop reading".
+        readingSuppressed = false
         CrashLogger.stage(TAG, "universal: final result received")
         AppLog.d("STT", "final result (${text.length} chars): ${text.take(80)}")
         _uiState.value = _uiState.value.copy(sttHint = null)
@@ -1746,7 +1983,8 @@ object VoiceSessionManager {
             // confirmation reply is allowed even mid-pipeline-turn.
             scope.launch {
                 delay(150)
-                if (active && _uiState.value.mode == VoiceMode.UNIVERSAL &&
+                if (active && !callPaused &&
+                    _uiState.value.mode == VoiceMode.UNIVERSAL &&
                     !_uiState.value.micMuted && !mediaListenBlocked &&
                     !offlineSttActive &&
                     (!pipelineRunning || gateArmed)
@@ -1921,6 +2159,9 @@ object VoiceSessionManager {
 
     private fun speakUniversalSentence(sentence: String) {
         if (!active) return
+        // v1.8 (#8): "Stop reading" swallows the rest of this turn's
+        // sentences — the reply still lands in captions/history.
+        if (readingSuppressed) return
         if (!ttsSpeaking) {
             ttsSpeaking = true
             // F5: speaking buries any stale recognizer hint.
@@ -1939,6 +2180,8 @@ object VoiceSessionManager {
      */
     private fun maybeResumeUniversalListening() {
         if (!active) return
+        // v1.8 (#11): a phone call owns the mic — resume waits for IDLE.
+        if (callPaused) return
         if (_uiState.value.mode != VoiceMode.UNIVERSAL) return
         // F3: media is playing — never auto-restart the recognizer;
         // only a mic tap (setMicMuted) or a new wake clears the block.

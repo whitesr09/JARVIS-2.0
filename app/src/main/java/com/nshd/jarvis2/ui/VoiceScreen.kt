@@ -356,6 +356,23 @@ private fun VoiceSessionBody(
         Spacer(modifier = Modifier.height(10.dp))
     }
 
+    // ── v1.8 (#8): "Stop reading" — visible only while a reply is
+    // being spoken; stops the speech, keeps the session alive. ───────
+    if (uiState.status == VoiceStatus.SPEAKING) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            androidx.compose.material3.FilterChip(
+                selected = false,
+                onClick = { manager.stopReading() },
+                label = { Text("Stop reading") },
+                shape = RoundedCornerShape(50)
+            )
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+    }
+
     // ── Controls / error actions ───────────────────────────────────────
     if (uiState.status == VoiceStatus.ERROR) {
         // Friendly headline first; the raw provider string lives behind

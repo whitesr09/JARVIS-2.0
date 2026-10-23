@@ -21,6 +21,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -40,6 +41,7 @@ import com.nshd.jarvis2.hands.TaskState
 import com.nshd.jarvis2.ui.AppTheme
 import com.nshd.jarvis2.ui.AvatarCatalog
 import com.nshd.jarvis2.ui.HudPalette
+import com.nshd.jarvis2.ui.MotionSettings
 import com.nshd.jarvis2.ui.ThemePalette
 import com.nshd.jarvis2.voice.VoiceSessionManager
 import com.nshd.jarvis2.voice.VoiceStatus
@@ -105,6 +107,41 @@ class FloatingOverlayService : Service() {
     private var panelAutoShown = false
     private var panelCollapseRunnable: Runnable? = null
 
+    // ── v1.8.0 panel additions (#53–#60) ─────────────────────────────
+    // #53 mini pill (collapsed-while-running compact panel variant).
+    private var miniPill: LinearLayout? = null
+    private var miniPillBackground: GradientDrawable? = null
+    private var miniPillSpinner: ProgressBar? = null
+    private var miniPillText: TextView? = null
+    private var miniPillPercent: TextView? = null
+    /** True while the user collapsed the panel mid-task → pill shows. */
+    private var panelMiniMode = false
+    // #56 mood glyph in the panel header.
+    private var panelMoodView: TextView? = null
+    // #55 waveform strip in the panel header area.
+    private var waveformView: WaveformView? = null
+    private var waveformTicker: Runnable? = null
+    // #54 Recent (history) section.
+    private var historySection: LinearLayout? = null
+    private var historyHeaderView: TextView? = null
+    private var historyRowViews: List<LinearLayout> = emptyList()
+    private var historyGlyphViews: List<TextView> = emptyList()
+    private var historyTitleViews: List<TextView> = emptyList()
+    private var historyResultViews: List<TextView> = emptyList()
+    // #60 quick actions row.
+    private var panelActionsRow: LinearLayout? = null
+    private var panelStopBtn: TextView? = null
+    private var panelPauseBtn: TextView? = null
+    private var panelStopBackground: GradientDrawable? = null
+    private var panelPauseBackground: GradientDrawable? = null
+    // #58 haptic bookkeeping (last plan DONE count seen per task id).
+    private var lastHapticItemId: Long = -1L
+    private var lastHapticDoneCount: Int = 0
+    private var panelHapticsEnabled: Boolean = true
+    // #57 per-foreground-app position memory.
+    private var lastForegroundPkg: String? = null
+    private var foregroundPoll: Runnable? = null
+
     // ── F7 GateHost overlay card (rendered INSIDE the panel window) ────
     private var gateSection: LinearLayout? = null
     private var gateSectionBackground: GradientDrawable? = null
@@ -112,6 +149,7 @@ class FloatingOverlayService : Service() {
     private var gateBodyView: TextView? = null
     private var gateTimerBar: ProgressBar? = null
     private var gatePrimaryBtn: TextView? = null
+    private var gateCancelBtn: TextView? = null
     private var gatePrimaryBackground: GradientDrawable? = null
     private var gateCancelBackground: GradientDrawable? = null
 
@@ -160,6 +198,7 @@ class FloatingOverlayService : Service() {
         com.nshd.jarvis2.core.AppLog.i("Overlay", "overlay service created")
         running = true
         palette = readPalette()
+        readPanelSettings()
         createNotificationChannel()
         createWatchdogChannel()
         startForegroundCompat(buildNotificationText())
@@ -168,6 +207,7 @@ class FloatingOverlayService : Service() {
         AppForeground.addListener(foregroundListener)
         observeState()
         startAccessibilityWatchdog()
+        startForegroundPoll()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -177,6 +217,8 @@ class FloatingOverlayService : Service() {
         // when the theme changes, so the HUD follows without a restart
         // of the whole service (D3 theme-blind HUD fix).
         applyPalette(readPalette())
+        // #58/#24 settings (panel_haptics / reduce_motion) re-read too.
+        readPanelSettings()
         return START_STICKY
     }
 
@@ -188,6 +230,9 @@ class FloatingOverlayService : Service() {
         AppForeground.removeListener(foregroundListener)
         watchdogRunnable?.let { mainHandler.removeCallbacks(it) }
         watchdogRunnable = null
+        foregroundPoll?.let { mainHandler.removeCallbacks(it) }
+        foregroundPoll = null
+        stopWaveformTicker()
         scope.cancel()
         stopPulse()
         pendingSingleTap?.let { mainHandler.removeCallbacks(it) }
@@ -220,11 +265,15 @@ class FloatingOverlayService : Service() {
         val hud = buildHud(::dp)
         hud.visibility = View.GONE
 
+        val pill = buildMiniPill(::dp)
+        pill.visibility = View.GONE
+
         val root = FrameLayout(this).apply {
             // Fully transparent root — nothing paints behind the avatar.
             setBackgroundColor(0x00000000)
             addView(bubble)
             addView(hud)
+            addView(pill)
         }
 
         val lp = WindowManager.LayoutParams(
@@ -249,6 +298,71 @@ class FloatingOverlayService : Service() {
             // Overlay permission revoked between check and add.
             stopSelf()
         }
+    }
+
+    /**
+     * v1.8.0 (#53): the mini pill — the panel's compact variant in the
+     * SAME window. While a task is RUNNING and the user has collapsed
+     * the panel, the pill shows spinner + current step (truncated) +
+     * plan percent; tapping it expands the full panel again.
+     */
+    private fun buildMiniPill(dp: (Int) -> Int): LinearLayout {
+        val pillBg = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(18).toFloat()
+            setColor(palette.background)
+            setStroke(dp(1), palette.border)
+        }
+        miniPillBackground = pillBg
+        val spinner = ProgressBar(this, null, android.R.attr.progressBarStyleSmall).apply {
+            isIndeterminate = true
+            indeterminateTintList = ColorStateList.valueOf(palette.accent)
+            layoutParams = LinearLayout.LayoutParams(dp(16), dp(16))
+        }
+        val stepText = TextView(this).apply {
+            textSize = 12f
+            setTextColor(palette.textPrimary)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            ).apply { leftMargin = dp(8) }
+        }
+        val percent = TextView(this).apply {
+            textSize = 12f
+            setTextColor(palette.accent)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { leftMargin = dp(8) }
+        }
+        val pill = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = pillBg
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            layoutParams = FrameLayout.LayoutParams(
+                (resources.displayMetrics.widthPixels * 0.62f).toInt(),
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(62) }
+            addView(spinner)
+            addView(stepText)
+            addView(percent)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                // Tap → expand back to the full panel.
+                panelMiniMode = false
+                showPanel(auto = false)
+                updateMiniPill()
+            }
+        }
+        miniPill = pill
+        miniPillSpinner = spinner
+        miniPillText = stepText
+        miniPillPercent = percent
+        return pill
     }
 
     /**
@@ -288,6 +402,17 @@ class FloatingOverlayService : Service() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         }
+        // #56: mood glyph next to the title (follows plan/task state).
+        val mood = TextView(this).apply {
+            text = "🤖"
+            textSize = 14f
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { rightMargin = dp(6) }
+        }
+        panelMoodView = mood
+        headerRow.addView(mood)
         val header = TextView(this).apply {
             text = "JARVIS"
             textSize = 13f
@@ -309,6 +434,17 @@ class FloatingOverlayService : Service() {
         panelHeaderRow = headerRow
         panelGripView = grip
         hudHeaderView = header
+
+        // #55: waveform strip under the header — visible only while a
+        // voice session is LISTENING (fed from VSM.amplitude, see
+        // updateWaveform / the 80 ms ticker).
+        val wave = WaveformView(this, palette.accent)
+        wave.visibility = View.GONE
+        wave.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(18)
+        ).apply { topMargin = dp(4) }
+        panel.addView(wave)
+        waveformView = wave
 
         // ── Goal title (current task, ≤2 lines, semibold) ─────────────
         val goal = TextView(this).apply {
@@ -471,6 +607,12 @@ class FloatingOverlayService : Service() {
         hudStatusView = status
         panelQueueNoteView = queueNote
 
+        // ── v1.8.0 (#60): quick actions (Stop / Pause-Resume) ────────
+        panel.addView(buildActionsRow(dp))
+
+        // ── v1.8.0 (#54): Recent — last finished tasks ───────────────
+        panel.addView(buildHistorySection(dp))
+
         // ── GateHost card (Part A2b): inside the panel window ─────────
         panel.addView(buildGateSection(dp))
 
@@ -484,7 +626,7 @@ class FloatingOverlayService : Service() {
         val openApp = TextView(this).apply {
             text = "Open Jarvis app"
             textSize = 12f
-            setTextColor(0xFFFFFFFF.toInt())
+            setTextColor(onAccentColor(palette.accent))
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
             background = openBg
@@ -501,6 +643,171 @@ class FloatingOverlayService : Service() {
         hudOpenAppView = openApp
         refreshHud()
         return panel
+    }
+
+    /**
+     * v1.8.0 (#60): the expanded panel's quick-actions row, visible
+     * while a task runs. Stop = cooperative stop flag + abort (the
+     * pipeline notices [TaskState.requestStop] between steps; abort
+     * cancels its coroutine and aborts the queue). Pause/Resume
+     * toggles [TaskQueue.paused], which holds QUEUED items from being
+     * promoted; the button only shows when queued items exist.
+     */
+    private fun buildActionsRow(dp: (Int) -> Int): LinearLayout {
+        val stopBg = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(9).toFloat()
+            setColor(GLYPH_FAILED)
+        }
+        panelStopBackground = stopBg
+        val pauseBg = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(9).toFloat()
+            setColor(palette.progressTrack)
+            setStroke(dp(1), palette.border)
+        }
+        panelPauseBackground = pauseBg
+        val stop = TextView(this).apply {
+            text = "Stop"
+            textSize = 12f
+            setTextColor(0xFFFFFFFF.toInt())
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            background = stopBg
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            )
+            setOnClickListener {
+                com.nshd.jarvis2.core.AppLog.i("Hands", "panel Stop pressed")
+                TaskState.requestStop()
+                TaskState.abort()
+                refreshHud()
+            }
+        }
+        val pause = TextView(this).apply {
+            text = "Pause"
+            textSize = 12f
+            setTextColor(palette.textPrimary)
+            gravity = Gravity.CENTER
+            background = pauseBg
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            ).apply { leftMargin = dp(8) }
+            setOnClickListener {
+                if (TaskQueue.paused) TaskQueue.resumeQueue() else TaskQueue.pauseQueue()
+                refreshHud()
+            }
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+            addView(stop)
+            addView(pause)
+        }
+        panelActionsRow = row
+        panelStopBtn = stop
+        panelPauseBtn = pause
+        return row
+    }
+
+    /**
+     * v1.8.0 (#54): the "Recent" section — up to 5 rows from
+     * [TaskQueue.history], each title + result line (always visible
+     * as the subtitle) with a ✓/✕ outcome glyph. Tapping a row logs
+     * the open (no log viewer is built) and expands its result text
+     * inline from 1 to 3 lines.
+     */
+    private fun buildHistorySection(dp: (Int) -> Int): LinearLayout {
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(9) }
+        }
+        val header = TextView(this).apply {
+            text = "Recent"
+            textSize = 11f
+            setTextColor(palette.textSecondary)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            letterSpacing = 0.1f
+        }
+        section.addView(header)
+        historyHeaderView = header
+        val rows = mutableListOf<LinearLayout>()
+        val glyphs = mutableListOf<TextView>()
+        val titles = mutableListOf<TextView>()
+        val results = mutableListOf<TextView>()
+        repeat(HISTORY_ROWS) { index ->
+            val glyph = TextView(this).apply {
+                textSize = 12f
+                gravity = Gravity.CENTER
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                layoutParams = LinearLayout.LayoutParams(dp(20), dp(20))
+            }
+            val title = TextView(this).apply {
+                textSize = 12f
+                setTextColor(palette.textPrimary)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }
+            val result = TextView(this).apply {
+                textSize = 11f
+                setTextColor(palette.textSecondary)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }
+            val column = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+                ).apply { leftMargin = dp(4) }
+                addView(title)
+                addView(result)
+            }
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                isClickable = true
+                isFocusable = true
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(4) }
+                addView(glyph)
+                addView(column)
+                setOnClickListener {
+                    val item = TaskQueue.history.value.getOrNull(index) ?: return@setOnClickListener
+                    com.nshd.jarvis2.core.AppLog.i(
+                        "Hands", "Panel history opened: ${item.title}"
+                    )
+                    // Inline expand of the result text (1 → 3 lines).
+                    result.maxLines = if (result.maxLines == 1) 3 else 1
+                }
+            }
+            rows += row
+            glyphs += glyph
+            titles += title
+            results += result
+            section.addView(row)
+        }
+        historyRowViews = rows
+        historyGlyphViews = glyphs
+        historyTitleViews = titles
+        historyResultViews = results
+        historySection = section
+        return section
     }
 
     /**
@@ -587,7 +894,7 @@ class FloatingOverlayService : Service() {
         val primary = TextView(this).apply {
             text = "Allow"
             textSize = 13f
-            setTextColor(0xFFFFFFFF.toInt())
+            setTextColor(onAccentColor(palette.accent))
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
             background = primaryBg
@@ -623,6 +930,7 @@ class FloatingOverlayService : Service() {
         buttons.addView(cancel)
         section.addView(buttons)
         gatePrimaryBtn = primary
+        gateCancelBtn = cancel
         gateSection = section
         return section
     }
@@ -641,6 +949,7 @@ class FloatingOverlayService : Service() {
 
     private fun removeOverlay() {
         stopGateTicker()
+        stopWaveformTicker()
         cancelPanelCollapse()
         gatePendingId = -1L
         val view = rootView ?: return
@@ -669,8 +978,28 @@ class FloatingOverlayService : Service() {
         gateBodyView = null
         gateTimerBar = null
         gatePrimaryBtn = null
+        gateCancelBtn = null
         gatePrimaryBackground = null
         gateCancelBackground = null
+        miniPill = null
+        miniPillBackground = null
+        miniPillSpinner = null
+        miniPillText = null
+        miniPillPercent = null
+        panelMiniMode = false
+        panelMoodView = null
+        waveformView = null
+        historySection = null
+        historyHeaderView = null
+        historyRowViews = emptyList()
+        historyGlyphViews = emptyList()
+        historyTitleViews = emptyList()
+        historyResultViews = emptyList()
+        panelActionsRow = null
+        panelStopBtn = null
+        panelPauseBtn = null
+        panelStopBackground = null
+        panelPauseBackground = null
     }
 
     // ── State observation ──────────────────────────────────────────────
@@ -701,7 +1030,15 @@ class FloatingOverlayService : Service() {
             }
         }
         scope.launch {
-            VoiceSessionManager.uiState.collect { updatePulse() }
+            VoiceSessionManager.uiState.collect {
+                updatePulse()
+                // #55: waveform strip follows the voice session state.
+                updateWaveform()
+            }
+        }
+        // #54: history changes re-render the panel's Recent section.
+        scope.launch {
+            TaskQueue.history.collect { refreshHud() }
         }
         // F7: the panel footer shows "Task i of n" for compound queues.
         scope.launch {
@@ -806,6 +1143,9 @@ class FloatingOverlayService : Service() {
     private fun showPanel(auto: Boolean) {
         val hud = hudPanel ?: return
         cancelPanelCollapse()
+        // Expanding always leaves mini-mode (#53).
+        panelMiniMode = false
+        miniPill?.visibility = View.GONE
         if (auto) panelAutoShown = true
         if (hud.visibility != View.VISIBLE) {
             hud.visibility = View.VISIBLE
@@ -820,6 +1160,195 @@ class FloatingOverlayService : Service() {
         cancelPanelCollapse()
         panelAutoShown = false
         hudPanel?.visibility = View.GONE
+        // #53: collapsing WHILE a task runs → mini pill takes over;
+        // with nothing running the panel simply disappears.
+        val taskRunning = TaskQueue.runningItem() != null || TaskState.active.value
+        panelMiniMode = taskRunning
+        updateMiniPill()
+    }
+
+    /**
+     * #53: pill visibility + content. Shown only in mini-mode with a
+     * task running and the full panel hidden: spinner (always
+     * indeterminate while running) + current step text + plan %.
+     */
+    private fun updateMiniPill() {
+        val pill = miniPill ?: return
+        val running = TaskQueue.runningItem()
+        val show = panelMiniMode &&
+            hudPanel?.visibility != View.VISIBLE &&
+            (running != null || TaskState.active.value)
+        if (!show) {
+            pill.visibility = View.GONE
+            return
+        }
+        pill.visibility = View.VISIBLE
+        val stepText = when {
+            running == null -> TaskState.goal.value.ifBlank { "Working…" }
+            running.plan.isNotEmpty() ->
+                running.plan.firstOrNull { it.state == PlanStepState.RUNNING }?.label
+                    ?: running.step.ifBlank { running.title }
+            running.step.isNotBlank() -> running.step
+            else -> running.title
+        }
+        miniPillText?.text = stepText
+        miniPillPercent?.text = when {
+            running != null && running.plan.isNotEmpty() ->
+                "${TaskQueue.planPercent(running)}%"
+            TaskState.progress.value >= 0f ->
+                "${(TaskState.progress.value * 100).toInt()}%"
+            else -> ""
+        }
+    }
+
+    // ── #55 waveform strip ─────────────────────────────────────────────
+
+    /** Show/hide the strip + start/stop its 80 ms sampler. */
+    private fun updateWaveform() {
+        val status = VoiceSessionManager.uiState.value.status
+        val listening = status == VoiceStatus.LISTENING ||
+            status == VoiceStatus.UNIVERSAL_ACTIVE
+        waveformView?.visibility = if (listening) View.VISIBLE else View.GONE
+        if (listening) startWaveformTicker() else stopWaveformTicker()
+    }
+
+    private fun startWaveformTicker() {
+        if (waveformTicker != null) return
+        val ticker = object : Runnable {
+            override fun run() {
+                waveformView?.push(VoiceSessionManager.amplitude.value)
+                mainHandler.postDelayed(this, WAVEFORM_TICK_MS)
+            }
+        }
+        waveformTicker = ticker
+        mainHandler.post(ticker)
+    }
+
+    private fun stopWaveformTicker() {
+        waveformTicker?.let { mainHandler.removeCallbacks(it) }
+        waveformTicker = null
+    }
+
+    // ── #56 mood glyph ─────────────────────────────────────────────────
+
+    /** Mood from task state: running 🛠️, done 😊, failed 😵, else the avatar's emoji. */
+    private fun moodGlyph(
+        running: com.nshd.jarvis2.brain.TaskItem?,
+        display: com.nshd.jarvis2.brain.TaskItem?
+    ): String = when {
+        running != null -> "🛠️"
+        display?.status == TaskStatus.DONE -> "😊"
+        display?.status == TaskStatus.FAILED -> "😵"
+        else -> avatarEmoji()
+    }
+
+    /** AvatarCatalog carries no emoji per avatar — map its ids, default 🤖. */
+    private fun avatarEmoji(): String {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return when (prefs.getString(KEY_AVATAR_ID, AvatarCatalog.DEFAULT_ID)) {
+            "alien" -> "👽"
+            "cat" -> "🐱"
+            "ghost" -> "👻"
+            "cloud" -> "☁️"
+            "flower" -> "🌸"
+            "drop" -> "💧"
+            "hexagon" -> "⬡"
+            "pebble" -> "🪨"
+            "blob" -> "🫠"
+            "circle" -> "🔵"
+            else -> "🤖" // droid, mech, unknown
+        }
+    }
+
+    // ── #58 plan-step haptic ───────────────────────────────────────────
+
+    /**
+     * One subtle tick when the displayed task's plan DONE-count
+     * increments. The first sighting of a task only sets the baseline
+     * (no tick for steps completed before the panel saw the task).
+     */
+    private fun maybePlanHaptic(item: com.nshd.jarvis2.brain.TaskItem?) {
+        if (item == null || item.plan.isEmpty()) return
+        val done = TaskQueue.planDoneCount(item)
+        if (item.id != lastHapticItemId) {
+            lastHapticItemId = item.id
+            lastHapticDoneCount = done
+            return
+        }
+        if (done > lastHapticDoneCount) {
+            lastHapticDoneCount = done
+            if (panelHapticsEnabled) {
+                hudPanel?.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            }
+        } else if (done < lastHapticDoneCount) {
+            lastHapticDoneCount = done
+        }
+    }
+
+    // ── #57 per-app panel position memory ──────────────────────────────
+
+    /** Reads panel_haptics (#58) + reduce_motion into their mirrors. */
+    private fun readPanelSettings() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        panelHapticsEnabled = prefs.getBoolean(KEY_PANEL_HAPTICS, true)
+        MotionSettings.reduceMotion = prefs.getBoolean(KEY_REDUCE_MOTION, false)
+    }
+
+    /**
+     * The accessibility service is the only foreground-package source
+     * ([JarvisAccessibilityService.lastPackageName]); poll it ~1/s
+     * and restore the saved panel position when the app changes.
+     */
+    private fun startForegroundPoll() {
+        lastForegroundPkg = JarvisAccessibilityService.lastPackageName
+        val poll = object : Runnable {
+            override fun run() {
+                pollForegroundApp()
+                mainHandler.postDelayed(this, FOREGROUND_POLL_MS)
+            }
+        }
+        foregroundPoll = poll
+        mainHandler.postDelayed(poll, FOREGROUND_POLL_MS)
+    }
+
+    private fun pollForegroundApp() {
+        val pkg = JarvisAccessibilityService.lastPackageName ?: return
+        if (pkg == lastForegroundPkg) return
+        lastForegroundPkg = pkg
+        if (pkg == packageName) return // own UI hides the overlay anyway
+        restorePanelPosition(pkg)
+    }
+
+    /** Restore pkg's saved panel Y + X edge, when one was saved. */
+    private fun restorePanelPosition(pkg: String) {
+        val lp = params ?: return
+        val root = rootView ?: return
+        val prefs = getSharedPreferences(PANEL_POS_PREFS, Context.MODE_PRIVATE)
+        if (!prefs.contains(pkg + POS_Y_SUFFIX)) return
+        val savedY = prefs.getInt(pkg + POS_Y_SUFFIX, lp.y)
+        val edgeRight = prefs.getInt(pkg + POS_EDGE_SUFFIX, 0) == 1
+        val screenWidth = resources.displayMetrics.widthPixels
+        val viewWidth = if (root.width > 0) root.width else dp(56)
+        lp.y = savedY
+        lp.x = if (edgeRight) (screenWidth - viewWidth).coerceAtLeast(0) else 0
+        try {
+            windowManager?.updateViewLayout(root, lp)
+        } catch (e: Exception) {
+            // Window detached — the next drag re-anchors anyway.
+        }
+    }
+
+    /** Save the current panel Y + X edge under the foreground package. */
+    private fun savePanelPosition(edgeRight: Boolean) {
+        val pkg = lastForegroundPkg
+            ?: JarvisAccessibilityService.lastPackageName
+            ?: return
+        if (pkg == packageName) return
+        val lp = params ?: return
+        getSharedPreferences(PANEL_POS_PREFS, Context.MODE_PRIVATE).edit()
+            .putInt(pkg + POS_Y_SUFFIX, lp.y)
+            .putInt(pkg + POS_EDGE_SUFFIX, if (edgeRight) 1 else 0)
+            .apply()
     }
 
     /** Collapse an AUTO-shown panel ~6 s after the task settles. */
@@ -1024,20 +1553,68 @@ class FloatingOverlayService : Service() {
             ""
         }
 
+        // ── v1.8.0 panel additions ─────────────────────────────────────
+        // #56: header mood glyph follows the task state.
+        panelMoodView?.text = moodGlyph(runningItem, displayItem)
+        // #58: haptic tick on plan-step completion.
+        maybePlanHaptic(displayItem)
+        // #60: quick actions while a task runs; Pause only when the
+        // queue actually has QUEUED items to hold back.
+        val hasQueued = queue.any { it.status == TaskStatus.QUEUED }
+        panelActionsRow?.visibility = if (anyRunning) View.VISIBLE else View.GONE
+        panelPauseBtn?.let { pauseBtn ->
+            pauseBtn.visibility = if (hasQueued) View.VISIBLE else View.GONE
+            pauseBtn.text = if (TaskQueue.paused) "Resume" else "Pause"
+        }
+        // #54: Recent section — expanded + idle + history non-empty.
+        renderHistory(anyRunning)
+
         // ── Auto-behaviour ─────────────────────────────────────────────
         // A running task (or a pending gate) pulls the panel up over
         // whatever app is foreground; when everything settles, an
         // auto-shown panel lingers ~6 s on its final state (Part D)
         // and collapses back to the avatar. A manually opened panel
-        // (double-tap) is never auto-collapsed.
+        // (double-tap) is never auto-collapsed. In mini-mode (#53) the
+        // user collapsed on purpose: the pill stays, the panel doesn't
+        // re-expand — except a pending gate always forces it open.
         if (anyRunning || gatePendingId != -1L) {
             cancelPanelCollapse()
-            if (hudPanel?.visibility != View.VISIBLE) showPanel(auto = true)
+            if (panelMiniMode && gatePendingId == -1L) {
+                // Stay collapsed as the pill.
+            } else if (hudPanel?.visibility != View.VISIBLE) {
+                showPanel(auto = true)
+            }
         } else {
             val anyFinished = queue.any {
                 it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED
             } || TaskState.lastOutcome.value != null
             if (anyFinished) schedulePanelCollapse()
+        }
+        // #53: mini-mode ends with the task; pill content tracks state.
+        if (!anyRunning) panelMiniMode = false
+        updateMiniPill()
+    }
+
+    /** #54: render the Recent rows from [TaskQueue.history]. */
+    private fun renderHistory(anyRunning: Boolean) {
+        val section = historySection ?: return
+        val history = TaskQueue.history.value
+        val show = !anyRunning && history.isNotEmpty()
+        section.visibility = if (show) View.VISIBLE else View.GONE
+        if (!show) return
+        historyRowViews.forEachIndexed { index, row ->
+            val item = history.getOrNull(index)
+            row.visibility = if (item == null) View.GONE else View.VISIBLE
+            if (item != null) {
+                val done = item.status == TaskStatus.DONE
+                historyGlyphViews.getOrNull(index)?.let { glyph ->
+                    glyph.text = if (done) "✓" else "✕"
+                    glyph.setTextColor(if (done) GLYPH_DONE else GLYPH_FAILED)
+                }
+                historyTitleViews.getOrNull(index)?.text = item.title
+                historyResultViews.getOrNull(index)?.text =
+                    item.resultLine.ifBlank { if (done) "Done" else "Failed" }
+            }
         }
     }
 
@@ -1254,6 +1831,8 @@ class FloatingOverlayService : Service() {
         val viewWidth = if (root.width > 0) root.width else bubbleView?.width ?: 0
         val center = lp.x + viewWidth / 2
         val targetX = if (center <= screenWidth / 2) 0 else (screenWidth - viewWidth).coerceAtLeast(0)
+        // #57: drag end — remember this position for the foreground app.
+        savePanelPosition(edgeRight = targetX > 0)
         val animator = ValueAnimator.ofInt(lp.x, targetX).apply {
             duration = 180
             interpolator = DecelerateInterpolator()
@@ -1299,6 +1878,18 @@ class FloatingOverlayService : Service() {
         return ThemePalette.hudPalette(theme, prefs.getString(KEY_CUSTOM_BG, null))
     }
 
+    /**
+     * #59: readable text colour ON an accent fill — dark ink when the
+     * accent itself is light (e.g. the DARK palette's pale lavender),
+     * white otherwise.
+     */
+    private fun onAccentColor(accent: Int): Int =
+        if (android.graphics.Color.luminance(accent) > 0.55f) {
+            0xFF1B1B1F.toInt()
+        } else {
+            0xFFFFFFFF.toInt()
+        }
+
     /** Repaints the HUD with [newPalette]; a no-op before the HUD exists. */
     private fun applyPalette(newPalette: HudPalette) {
         palette = newPalette
@@ -1340,6 +1931,32 @@ class FloatingOverlayService : Service() {
             bg.setColor(newPalette.progressTrack)
             bg.setStroke(dp(1), newPalette.border)
         }
+        // v1.8.0 additions follow the palette too (#59).
+        miniPillBackground?.let { bg ->
+            bg.setColor(newPalette.background)
+            bg.setStroke(dp(1), newPalette.border)
+        }
+        miniPillText?.setTextColor(newPalette.textPrimary)
+        miniPillPercent?.setTextColor(newPalette.accent)
+        miniPillSpinner?.indeterminateTintList =
+            ColorStateList.valueOf(newPalette.accent)
+        waveformView?.setBarColor(newPalette.accent)
+        historyHeaderView?.setTextColor(newPalette.textSecondary)
+        historyTitleViews.forEach { it.setTextColor(newPalette.textPrimary) }
+        historyResultViews.forEach { it.setTextColor(newPalette.textSecondary) }
+        panelPauseBackground?.let { bg ->
+            bg.setColor(newPalette.progressTrack)
+            bg.setStroke(dp(1), newPalette.border)
+        }
+        panelPauseBtn?.setTextColor(newPalette.textPrimary)
+        gateCancelBtn?.setTextColor(newPalette.textPrimary)
+        // #59 light-theme readability: text ON the accent fill must
+        // contrast with the accent itself — white on the dark theme's
+        // pale-lavender accent (and on light accents generally) is
+        // unreadable, so pick dark ink whenever the accent is light.
+        val onAccent = onAccentColor(newPalette.accent)
+        hudOpenAppView?.setTextColor(onAccent)
+        gatePrimaryBtn?.setTextColor(onAccent)
         // Glyph colours that follow the palette (▶/•) re-derive on the
         // next refresh; force one now so a theme change recolours rows
         // immediately (✓/✕ keep their fixed success/failure colours).
@@ -1499,6 +2116,17 @@ class FloatingOverlayService : Service() {
         private const val KEY_CUSTOM_BG = "custom_bg"
         private const val MAX_HUD_TASKS = 6
         private const val MAX_HUD_STEPS = 3
+        /** v1.8.0 (#54): history rows rendered in the panel. */
+        private const val HISTORY_ROWS = 5
+        /** v1.8.0 (#55): waveform sampler period. */
+        private const val WAVEFORM_TICK_MS = 80L
+        /** v1.8.0 (#57): foreground-package poll period + position prefs. */
+        private const val FOREGROUND_POLL_MS = 1_000L
+        private const val PANEL_POS_PREFS = "panel_pos"
+        private const val POS_Y_SUFFIX = "_y"
+        private const val POS_EDGE_SUFFIX = "_edge"
+        private const val KEY_PANEL_HAPTICS = "panel_haptics"
+        private const val KEY_REDUCE_MOTION = "reduce_motion"
         private const val GLYPH_DONE = 0xFF43A047.toInt()
         private const val GLYPH_FAILED = 0xFFE53935.toInt()
         /** F7: how long the finished panel lingers before auto-collapse. */
@@ -1551,5 +2179,52 @@ private class GripDotsView(context: Context, dotColor: Int) : View(context) {
                 canvas.drawCircle(x, y, radius, paint)
             }
         }
+    }
+}
+
+/**
+ * v1.8.0 (#55): the panel's waveform strip — 16 vertical bars fed by a
+ * ring buffer of voice-amplitude samples (pushed ~every 80 ms by the
+ * service while a session is listening). Bar heights are centre-based
+ * so the strip reads as a symmetric mini waveform.
+ */
+private class WaveformView(context: Context, barColor: Int) : View(context) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = barColor
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val levels = FloatArray(BAR_COUNT)
+    private var head = 0
+
+    fun setBarColor(color: Int) {
+        paint.color = color
+        invalidate()
+    }
+
+    /** Append one amplitude sample (0..1), dropping the oldest. */
+    fun push(amplitude: Float) {
+        levels[head] = amplitude.coerceIn(0f, 1f)
+        head = (head + 1) % BAR_COUNT
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        if (width == 0 || height == 0) return
+        val slot = width.toFloat() / BAR_COUNT
+        paint.strokeWidth = slot * 0.45f
+        val midY = height / 2f
+        val maxHalf = height / 2f - 1f
+        for (i in 0 until BAR_COUNT) {
+            val level = levels[(head + i) % BAR_COUNT]
+            val half = maxOf(1.5f, level * maxHalf)
+            val x = slot * i + slot / 2f
+            canvas.drawLine(x, midY - half, x, midY + half, paint)
+        }
+    }
+
+    private companion object {
+        const val BAR_COUNT = 16
     }
 }

@@ -72,6 +72,13 @@ class GeminiLiveClient(
      * instead of hanging the full 12 s.
      */
     private val setupTimeoutMs: Long = SETUP_TIMEOUT_MS,
+    /**
+     * v1.8 (#4): user barge-in sensitivity ("LOW" / "NORMAL" / "HIGH"
+     * from JarvisSettings) — mapped in the setup JSON to Gemini's
+     * automaticActivityDetection startOfSpeechSensitivity. Defaulted
+     * so existing call sites keep compiling.
+     */
+    private val bargeInSensitivity: String = "NORMAL",
     private val listener: Listener
 ) {
     interface Listener {
@@ -384,6 +391,25 @@ class GeminiLiveClient(
             // Transcription configs — they power our captions.
             .put("input_audio_transcription", JSONObject())
             .put("output_audio_transcription", JSONObject())
+            // v1.8 (#4): server-side VAD sensitivity from the user's
+            // barge-in setting — LOW makes the model harder to
+            // interrupt (noisy rooms), HIGH interrupts on a whisper.
+            .put(
+                "realtime_input_config",
+                JSONObject().put(
+                    "automatic_activity_detection",
+                    JSONObject()
+                        .put("disabled", false)
+                        .put(
+                            "start_of_speech_sensitivity",
+                            when (bargeInSensitivity.trim().uppercase()) {
+                                "LOW" -> "START_SENSITIVITY_LOW"
+                                "HIGH" -> "START_SENSITIVITY_HIGH"
+                                else -> "START_SENSITIVITY_MED"
+                            }
+                        )
+                )
+            )
         if (toolDeclarations != null && toolDeclarations.length() > 0) {
             setup.put(
                 "tools",

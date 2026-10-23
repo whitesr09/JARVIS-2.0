@@ -50,7 +50,19 @@ data class JarvisSettings(
     /** Device-TTS speed for the Universal voice (F5.1 slider, 0.80–1.50×). */
     val ttsRate: Float = 1.18f,
     /** Device-TTS pitch for the Universal voice (F5.1 slider, 0.80–1.60×; >1 = girlier). */
-    val ttsPitch: Float = 1.22f
+    val ttsPitch: Float = 1.22f,
+    /** Plan #4: Live barge-in sensitivity — "LOW" / "NORMAL" / "HIGH". */
+    val bargeInSensitivity: String = "NORMAL",
+    /** Plan #7: chosen device-TTS voice name ("" = automatic best voice). */
+    val ttsVoiceName: String = "",
+    /** Plan #93: chat message font size — "S" / "M" / "L". */
+    val chatFontSize: String = "M",
+    /** Plan #94: reduce-motion — calms orb + panel animations. */
+    val reduceMotion: Boolean = false,
+    /** Plan #58: haptic tick in the floating panel when a plan step completes. */
+    val panelHaptics: Boolean = true,
+    /** Plan #105: highest versionCode whose "What's new" card was dismissed. */
+    val lastSeenVersionCode: Int = 0
 )
 
 class MainActivity : ComponentActivity() {
@@ -59,7 +71,15 @@ class MainActivity : ComponentActivity() {
     private var settings by mutableStateOf(JarvisSettings())
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Plan #25 (cold-start audit): keep onCreate lean — no disk IO
+        // beyond prefs on the start path; the timer below logs how long
+        // first composition actually took to set up.
+        val createStartMs = System.currentTimeMillis()
         super.onCreate(savedInstanceState)
+        // Plan #102: stamp the boot BEFORE anything that could crash, so
+        // the crash handler can tell a boot-loop crash from a late one.
+        CrashLogger.markBootStart(this)
+        val safeMode = CrashLogger.isSafeMode(this)
         // F5: the full log system initialises first so every later
         // breadcrumb (including CrashLogger's, which mirror into
         // AppLog) lands in the persistent log from the very start.
@@ -81,13 +101,35 @@ class MainActivity : ComponentActivity() {
         handleNavIntent(intent)
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         settings = loadSettings()
-        // Always-on wake word was left enabled: restart the listener (the
-        // service is START_STICKY too, this also covers a fresh process).
-        if (settings.wakeAlwaysOn &&
-            VoskModelManager.status(this) == VoskModelManager.ModelStatus.READY
-        ) {
-            runCatching { WakeWordControl.start(this) }
+        // Plan #102 (safe mode): after 3 boot crashes in a row, wake word
+        // and overlay auto-starts stay OFF until the user exits safe
+        // mode from the banner JarvisApp shows.
+        // Plan #25: the Vosk model status check walks the model dir on
+        // disk — moved off the main thread so it never delays first
+        // paint; the wake restart itself hops back via the service API.
+        if (settings.wakeAlwaysOn && !safeMode) {
+            val appContext = applicationContext
+            val wakeOn = settings.wakeAlwaysOn
+            Thread {
+                if (wakeOn &&
+                    VoskModelManager.status(appContext) ==
+                    VoskModelManager.ModelStatus.READY
+                ) {
+                    runCatching { WakeWordControl.start(appContext) }
+                }
+            }.start()
         }
+        // Plan #102: surviving 20 s of runtime clears the boot-crash
+        // streak (a later crash is a normal crash, not a boot loop).
+        android.os.Handler(mainLooper).postDelayed(
+            { CrashLogger.markBootSettled(applicationContext) },
+            20_000L
+        )
+        com.nshd.jarvis2.core.AppLog.i(
+            "App",
+            "Cold start setup took ${System.currentTimeMillis() - createStartMs}ms" +
+                if (safeMode) " (SAFE MODE)" else ""
+        )
         setContent {
             JarvisApp(
                 settings = settings,
@@ -175,7 +217,13 @@ class MainActivity : ComponentActivity() {
             biometricsSampleCount = prefs.getInt(KEY_BIO_COUNT, 0),
             biometricsEnrolledDate = prefs.getString(KEY_BIO_DATE, "") ?: "",
             ttsRate = prefs.getFloat(KEY_TTS_RATE, 1.18f),
-            ttsPitch = prefs.getFloat(KEY_TTS_PITCH, 1.22f)
+            ttsPitch = prefs.getFloat(KEY_TTS_PITCH, 1.22f),
+            bargeInSensitivity = prefs.getString(KEY_BARGE_IN, "NORMAL") ?: "NORMAL",
+            ttsVoiceName = prefs.getString(KEY_TTS_VOICE, "") ?: "",
+            chatFontSize = prefs.getString(KEY_CHAT_FONT, "M") ?: "M",
+            reduceMotion = prefs.getBoolean(KEY_REDUCE_MOTION, false),
+            panelHaptics = prefs.getBoolean(KEY_PANEL_HAPTICS, true),
+            lastSeenVersionCode = prefs.getInt(KEY_LAST_SEEN_VC, 0)
         )
     }
 
@@ -199,6 +247,12 @@ class MainActivity : ComponentActivity() {
             .putString(KEY_BIO_DATE, s.biometricsEnrolledDate)
             .putFloat(KEY_TTS_RATE, s.ttsRate)
             .putFloat(KEY_TTS_PITCH, s.ttsPitch)
+            .putString(KEY_BARGE_IN, s.bargeInSensitivity)
+            .putString(KEY_TTS_VOICE, s.ttsVoiceName)
+            .putString(KEY_CHAT_FONT, s.chatFontSize)
+            .putBoolean(KEY_REDUCE_MOTION, s.reduceMotion)
+            .putBoolean(KEY_PANEL_HAPTICS, s.panelHaptics)
+            .putInt(KEY_LAST_SEEN_VC, s.lastSeenVersionCode)
             .apply()
     }
 
@@ -225,5 +279,11 @@ class MainActivity : ComponentActivity() {
         private const val KEY_BIO_DATE = "biometrics_enrolled_date"
         private const val KEY_TTS_RATE = "tts_rate"
         private const val KEY_TTS_PITCH = "tts_pitch"
+        private const val KEY_BARGE_IN = "barge_in_sensitivity"
+        private const val KEY_TTS_VOICE = "tts_voice_name"
+        private const val KEY_CHAT_FONT = "chat_font_size"
+        private const val KEY_REDUCE_MOTION = "reduce_motion"
+        private const val KEY_PANEL_HAPTICS = "panel_haptics"
+        private const val KEY_LAST_SEEN_VC = "last_seen_version_code"
     }
 }

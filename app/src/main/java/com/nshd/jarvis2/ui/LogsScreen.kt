@@ -335,18 +335,33 @@ fun LogsScreen(onBack: () -> Unit) {
 
         // ── Entries (newest at the bottom, pinned live) ────────────────
         if (filtered.isEmpty()) {
+            // #96: shared friendly empty state; with filters active the
+            // action clears them, otherwise there is nothing to do yet.
+            val filtersActive = levelFilter != LogLevelFilter.ALL ||
+                tagFilter != "All" || query.isNotBlank()
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "No log entries match — logs appear as the app runs " +
-                        "(voice sessions, API calls, tools, errors).",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(24.dp)
+                FriendlyEmptyState(
+                    emoji = "📋",
+                    title = if (filtersActive) {
+                        "No log entries match"
+                    } else {
+                        "No log entries yet"
+                    },
+                    actionLabel = if (filtersActive) "Clear filters" else null,
+                    onAction = if (filtersActive) {
+                        {
+                            levelFilter = LogLevelFilter.ALL
+                            tagFilter = "All"
+                            query = ""
+                        }
+                    } else {
+                        null
+                    }
                 )
             }
         } else {

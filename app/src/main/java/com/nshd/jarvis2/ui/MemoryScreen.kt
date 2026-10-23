@@ -200,46 +200,14 @@ fun MemoryScreen(onBack: () -> Unit) {
             Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
 
             if (facts.isEmpty()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(JarvisDimens.space3xl),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        modifier = Modifier.size(64.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Filled.Memory,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(30.dp)
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
-                    Text(
-                        text = "No memories yet",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(modifier = Modifier.height(JarvisDimens.spaceSm))
-                    Text(
-                        text = "Teach Jarvis something — say \"remember …\" in Chat, " +
-                            "or add a fact yourself. Facts are stored only on this device.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(JarvisDimens.spaceLg))
-                    Button(onClick = { editing = null; showEditor = true }) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        Spacer(modifier = Modifier.width(JarvisDimens.spaceSm))
-                        Text("Add a memory")
-                    }
-                }
+                // #96: shared friendly empty state; the action reuses
+                // this screen's existing add-fact editor entry point.
+                FriendlyEmptyState(
+                    emoji = "🧠",
+                    title = "No memories yet",
+                    actionLabel = "Add a memory",
+                    onAction = { editing = null; showEditor = true }
+                )
             }
 
             LazyColumn(

@@ -43,6 +43,7 @@ class DeepIntents(context: Context) {
             return ActionResult(false, "WhatsApp could not be opened for this chat.")
         }
         AppLog.i("Send", "stage: chat opened for $digits (deep link, text prefilled)")
+        TaskState.throwIfStopRequested() // #61: after open-app
         // F7 plan: the deep link opens the chat AND types the text
         // atomically, so plan steps 1–2 complete here; step 3
         // ("Confirm & send") stays RUNNING through the tap + verify.
@@ -56,6 +57,7 @@ class DeepIntents(context: Context) {
             )
 
         HandsActions.waitForSettle(2_500)
+        TaskState.throwIfStopRequested() // #61: after settle, before reading the field
         val reader = service.screenReader()
         var snapshot = reader.snapshot()
         val entry = snapshot.firstOrNull { it.editable }
@@ -93,6 +95,7 @@ class DeepIntents(context: Context) {
             )
         }
 
+        TaskState.throwIfStopRequested() // #61: before final tap
         val click = HandsActions.clickElement(send.index)
         if (!click.success) {
             AppLog.w("Send", "stage FAILED: send tap failed — ${click.message}")
@@ -110,6 +113,7 @@ class DeepIntents(context: Context) {
         var bubbleFound = false
         val deadline = System.currentTimeMillis() + 2_000
         while (System.currentTimeMillis() < deadline && !(entryCleared && bubbleFound)) {
+            TaskState.throwIfStopRequested() // #61: verify loop
             delay(200)
             snapshot = reader.snapshot()
             val currentEntry = snapshot.firstOrNull { it.editable }
@@ -169,6 +173,7 @@ class DeepIntents(context: Context) {
         // F7 plan phases: 1 Open YouTube → 2 Search → 3 Play first video.
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(1)
         if (!launch(intent)) return ActionResult(false, "YouTube could not be opened.")
+        TaskState.throwIfStopRequested() // #61: after open-app
 
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(true, "Opened YouTube search results for \"$cleanQuery\". Enable Accessibility to auto-play the first result.")
@@ -187,8 +192,16 @@ class DeepIntents(context: Context) {
         var lastSnapshotSize = 0
         var attempt = 0
         while (attempt < YOUTUBE_SNAPSHOT_ATTEMPTS && pick == null) {
+            TaskState.throwIfStopRequested() // #61: snapshot loop
             if (attempt == 0) {
-                HandsActions.waitForSettle(YOUTUBE_FIRST_SETTLE_MS)
+                // #23 warm start: skip the full settle when YouTube is
+                // already foreground and a previous play succeeded.
+                if (isWarm(YOUTUBE_PACKAGE) && reader.currentPackage() == YOUTUBE_PACKAGE) {
+                    AppLog.i("Hands", "warm start $YOUTUBE_PACKAGE")
+                    HandsActions.waitForSettle(WARM_SETTLE_MS)
+                } else {
+                    HandsActions.waitForSettle(YOUTUBE_FIRST_SETTLE_MS)
+                }
             } else {
                 // F6: signature-settle wait (early exit) instead of
                 // the old blind 850 ms sleep between snapshots.
@@ -233,6 +246,7 @@ class DeepIntents(context: Context) {
         }
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Playing…")
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
+        TaskState.throwIfStopRequested() // #61: before final tap
         val click = HandsActions.clickElement(chosen.element.index)
         if (!click.success) {
             return ActionResult(
@@ -240,6 +254,7 @@ class DeepIntents(context: Context) {
                 "YouTube results opened, but the first result could not be tapped: ${click.message}"
             )
         }
+        markWarm(YOUTUBE_PACKAGE) // #23: this play succeeded once
         return ActionResult(
             true,
             when {
@@ -276,6 +291,7 @@ class DeepIntents(context: Context) {
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(1)
         val opened = openApp("Spotify")
         if (!opened.success) return opened
+        TaskState.throwIfStopRequested() // #61: after open-app
 
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
@@ -287,7 +303,14 @@ class DeepIntents(context: Context) {
         val screenHeight = metrics.heightPixels
         val screenWidth = metrics.widthPixels
 
-        HandsActions.waitForPackage(SPOTIFY_PACKAGE, APP_WINDOW_WAIT_MS)
+        // #23 warm start: Spotify already foreground + previously
+        // played -> use the short settle instead of the full wait.
+        if (isWarm(SPOTIFY_PACKAGE) && reader.currentPackage() == SPOTIFY_PACKAGE) {
+            AppLog.i("Hands", "warm start $SPOTIFY_PACKAGE")
+            HandsActions.waitForPackage(SPOTIFY_PACKAGE, WARM_SETTLE_MS)
+        } else {
+            HandsActions.waitForPackage(SPOTIFY_PACKAGE, APP_WINDOW_WAIT_MS)
+        }
 
         // 1) Search tab (bottom nav) — poll until it shows up.
         // F8 (#36): the positional primary stays; the Spotify
@@ -308,6 +331,7 @@ class DeepIntents(context: Context) {
         if (!tabClick.success) {
             return ActionResult(false, "Spotify opened, but the Search tab could not be tapped: ${tabClick.message}")
         }
+        TaskState.throwIfStopRequested() // #61: after search-tab tap
 
         // 2) Search input: tap the search bar if the field isn't
         // already focused/editable, then type the query (SET_TEXT —
@@ -345,6 +369,7 @@ class DeepIntents(context: Context) {
         if (!typed.success) {
             return ActionResult(false, "Spotify search opened, but the query could not be typed: ${typed.message}")
         }
+        TaskState.throwIfStopRequested() // #61: after search-field set
 
         // 3) First song row — poll results until a pick exists.
         var pick: SpotifyPick? = null
@@ -366,6 +391,7 @@ class DeepIntents(context: Context) {
         }
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Playing…")
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
+        TaskState.throwIfStopRequested() // #61: before final tap
         val rowClick = HandsActions.clickElement(chosen.element.index)
         if (!rowClick.success) {
             return ActionResult(
@@ -377,7 +403,9 @@ class DeepIntents(context: Context) {
         // 4) Verify playback: a Pause affordance means audio is
         // playing. If a track/album page opened instead of playing,
         // tap its Play button and verify again.
+        TaskState.throwIfStopRequested() // #61: before playback verify
         if (awaitPauseAffordance(PAUSE_VERIFY_MS)) {
+            markWarm(SPOTIFY_PACKAGE) // #23
             return ActionResult(true, "Playing '${chosen.title}' on Spotify.")
         }
         val pageSnapshot = reader.snapshot()
@@ -391,11 +419,14 @@ class DeepIntents(context: Context) {
             pageSnapshot, Playbooks.SPOTIFY_PACKAGE, Playbooks.ROLE_PLAY_BUTTON
         )?.takeIf { it.clickable }
         if (playButton != null) {
+            TaskState.throwIfStopRequested() // #61: before Play-button tap
             HandsActions.clickElement(playButton.index)
             if (awaitPauseAffordance(PAUSE_VERIFY_MS)) {
+                markWarm(SPOTIFY_PACKAGE) // #23
                 return ActionResult(true, "Playing '${chosen.title}' on Spotify.")
             }
         }
+        markWarm(SPOTIFY_PACKAGE) // #23: row tap succeeded (playback unconfirmed)
         return ActionResult(
             true,
             "Started '${chosen.title}' on Spotify (the player state " +
@@ -682,7 +713,7 @@ class DeepIntents(context: Context) {
         val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val activities = try {
             appContext.packageManager.queryIntentActivities(launcherIntent, 0)
-        } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
             emptyList()
         }
         val wantedTokens = tokenize(name)
@@ -782,7 +813,7 @@ class DeepIntents(context: Context) {
         return try {
             audio.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
             ActionResult(true, "Media volume set to $safePercent%.")
-        } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
             ActionResult(false, "Volume could not be changed: ${e.message ?: "system denied it"}")
         }
     }
@@ -808,7 +839,7 @@ class DeepIntents(context: Context) {
             ?: return ActionResult(false, "No camera is available for the torch.")
             cameraManager.setTorchMode(backCameraId, on)
             ActionResult(true, "Torch turned ${if (on) "on" else "off"}.")
-        } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
             ActionResult(false, "Torch could not be changed: ${e.message ?: "camera busy or denied"}")
         }
     }
@@ -836,7 +867,7 @@ class DeepIntents(context: Context) {
             val value = (255 * safePercent / 100.0).toInt().coerceIn(0, 255)
             Settings.System.putInt(resolver, Settings.System.SCREEN_BRIGHTNESS, value)
             ActionResult(true, "Brightness set to $safePercent%.")
-        } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
             ActionResult(false, "Brightness could not be changed: ${e.message ?: "system denied it"}")
         }
     }
@@ -873,7 +904,7 @@ class DeepIntents(context: Context) {
             audio.dispatchMediaKeyEvent(up)
             AppLog.i("Hands", "media key dispatched: $action")
             ActionResult(true, "Media ${action.replace('_', ' ')} sent.")
-        } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
             ActionResult(false, "Media key could not be sent: ${e.message ?: "system denied it"}")
         }
     }
@@ -943,7 +974,7 @@ class DeepIntents(context: Context) {
                 true,
                 if (on) "Silent mode on." else "Silent mode off — ringer back to normal."
             )
-        } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
             ActionResult(false, "Silent mode could not be changed: ${e.message ?: "system denied it"}")
         }
     }
@@ -956,7 +987,7 @@ class DeepIntents(context: Context) {
             128
         )
         (value * 100 / 255).coerceIn(0, 100)
-    } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
         0
     }
 
@@ -970,20 +1001,20 @@ class DeepIntents(context: Context) {
     private fun launch(intent: Intent): Boolean = try {
         appContext.startActivity(intent)
         true
-    } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
         false
     }
 
     private fun canResolve(intent: Intent): Boolean = try {
         appContext.packageManager.resolveActivity(intent, 0) != null
-    } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
         false
     }
 
     private fun isPackageInstalled(packageName: String): Boolean = try {
         appContext.packageManager.getPackageInfo(packageName, 0)
         true
-    } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
         false
     }
 
@@ -992,6 +1023,20 @@ class DeepIntents(context: Context) {
         .trim()
 
     companion object {
+        // #23 warm start: session-scoped (process-lifetime, in-memory,
+        // object-level) set of media packages that already played once.
+        private val warmPackages: MutableSet<String> =
+            java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+        private fun isWarm(packageName: String): Boolean = warmPackages.contains(packageName)
+
+        private fun markWarm(packageName: String) {
+            warmPackages.add(packageName)
+        }
+
+        private const val WARM_SETTLE_MS = 150L
+        private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
+
         /** F5.1: video duration badge pattern, e.g. "3:45" / "12:07". */
         private val DURATION_REGEX = Regex("""\d+:\d{2}""")
 

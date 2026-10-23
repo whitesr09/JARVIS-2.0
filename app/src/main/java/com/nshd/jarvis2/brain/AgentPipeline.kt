@@ -7,8 +7,10 @@ import android.os.BatteryManager
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.core.AppLog
+import com.nshd.jarvis2.hands.ContactsResolver
 import com.nshd.jarvis2.hands.DeepIntents
 import com.nshd.jarvis2.hands.TaskState
+import com.nshd.jarvis2.hands.TaskStoppedException
 import com.nshd.jarvis2.memory.MemoryCategories
 import com.nshd.jarvis2.memory.MemoryDb
 import kotlinx.coroutines.CancellationException
@@ -112,6 +114,14 @@ object AgentPipeline {
             TaskQueue.abortAll()
             TaskState.finish(false, "Aborted")
             throw e
+        } catch (e: TaskStoppedException) {
+            // #61: a user stop is a CLEAN cancellation — caught BEFORE
+            // the generic handler so it can never be treated as a
+            // failure, retried, or failed over to another provider,
+            // and no action is ever replayed after it.
+            TaskQueue.finishRunning(false)
+            TaskState.finish(false, "Stopped")
+            "Stopped."
         } catch (e: Exception) {
             TaskQueue.finishRunning(false)
             TaskState.finish(false, e.message ?: "Failed")
@@ -156,6 +166,8 @@ object AgentPipeline {
             onEvent(event)
         }
         TaskState.begin(goal = clean.take(60), job = job, maxSteps = 10)
+        // #61: honour a stop that raced in before this turn's work.
+        TaskState.throwIfStopRequested()
 
         // ── Local memory commands (no model or API key required) ───────
         extractRemember(clean)?.let { fact ->
@@ -179,6 +191,42 @@ object AgentPipeline {
                 }
             }
         }
+
+        // ── #75: "forget X" — delete matching Memory Core facts ─────
+        // Runs for chat AND voice (both funnel through handleUserText);
+        // the returned text is the reply either way. Never deletes on
+        // an empty target, and a <3-char target is too broad to be safe.
+        extractForgetTarget(clean)?.let { target ->
+            if (target.length < 3) {
+                return@withContext "That's too vague to forget safely — " +
+                    "tell me exactly what to forget."
+            }
+            val matches = memoryDb.allFacts(null, null).filter { fact ->
+                fact.text.contains(target, ignoreCase = true) ||
+                    fact.category.equals(target, ignoreCase = true)
+            }
+            if (matches.isEmpty()) {
+                return@withContext "I couldn't find anything in memory " +
+                    "matching \"$target\" — nothing forgotten."
+            }
+            matches.forEach { memoryDb.deleteFact(it.id) }
+            AppLog.i("Agent", "route=forget removed=${matches.size}")
+            return@withContext "Forgot: " +
+                matches.joinToString("; ") { it.text }
+        }
+
+        // ── #52: contact-correction learning ─────────────────────────
+        // "not Amal, Aimal" / "I said Aimal not Amal" → save the alias
+        // in ContactsResolver's own format (Contacts fact "wrong = right")
+        // so future calls/messages resolve the corrected name.
+        extractContactCorrection(clean)?.let { (wrong, right) ->
+            saveContactAlias(memoryDb, wrong, right)
+            AppLog.i("Agent", "route=contact-correction '$wrong' -> '$right'")
+            return@withContext "Got it — $wrong means $right. Saved."
+        }
+
+        // #61: a stop pressed during the local routes above wins here.
+        TaskState.throwIfStopRequested()
 
         // ── Deterministic quick commands (work with no API key) ────────
         // F7 ORDER GUARANTEE: the quick router runs FIRST in dispatch
@@ -258,6 +306,8 @@ object AgentPipeline {
         ledger: ExecutionLedger,
         onEvent: (ToolEvent) -> Unit
     ): String {
+        // #61: never START a quick tool after a stop was requested.
+        TaskState.throwIfStopRequested()
         // F8 (#15): direct-reply commands (battery / time / date) are
         // answered locally — no tool, no model, instant.
         quick.directReply?.let { reply ->
@@ -284,6 +334,8 @@ object AgentPipeline {
             quick.args,
             includeScreenSummary = false
         )
+        // #61: check immediately AFTER the tool execution too.
+        TaskState.throwIfStopRequested()
         onEvent(
             ToolEvent(
                 kind = if (result.success) ToolEventKind.SUCCESS else ToolEventKind.FAILURE,
@@ -387,7 +439,16 @@ object AgentPipeline {
                 TaskQueue.setPlanStep(item.id, 1, PlanStepState.RUNNING)
             }
         }
-        return FailoverRouter(
+        // #61: stop check at the agent-loop boundary — before the loop
+        // starts, and again right after it returns (i.e. after its last
+        // tool execution), so a stop pressed mid-loop wins over the
+        // loop's reply. The loop itself lives in FailoverRouter (out of
+        // this change's file scope), so the flag is honoured here; the
+        // TaskStoppedException is caught in handleUserText BEFORE the
+        // generic handler — never a failure, never provider failover,
+        // never an action replay.
+        TaskState.throwIfStopRequested()
+        val loopResult = FailoverRouter(
             configsInOrder = providerStore.orderedConfigs(),
             toolExecutor = executor,
             store = providerStore,
@@ -401,6 +462,8 @@ object AgentPipeline {
             onEvent = onEvent,
             onAssistantDelta = onAssistantDelta
         )
+        TaskState.throwIfStopRequested()
+        return loopResult
     }
 
     // ── Multitask queue (F3) ───────────────────────────────────────────
@@ -428,6 +491,8 @@ object AgentPipeline {
         var failed = 0
         val lines = mutableListOf<String>()
         for ((index, item) in items.withIndex()) {
+            // #61: stop check at the top of every queue iteration.
+            TaskState.throwIfStopRequested()
             // Cancellation (abort) propagates to handleUserText, which
             // aborts the queue — queued items never start.
             currentCoroutineContext().ensureActive()
@@ -452,6 +517,10 @@ object AgentPipeline {
                         codeMode, onEvent, onAssistantDelta, ledger
                     )
                 }
+            } catch (e: TaskStoppedException) {
+                // #61: a stop is not a sub-task failure — propagate so
+                // handleUserText finishes the whole turn as "Stopped."
+                throw e
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -464,6 +533,8 @@ object AgentPipeline {
                 )
                 "Failed: " + com.nshd.jarvis2.ui.FriendlyErrors.shortReason(e.message)
             }
+            // #61: stop check right after this sub-task's execution.
+            TaskState.throwIfStopRequested()
             val ok = !isFailureResult(result)
             AppLog.d(
                 "Agent",
@@ -669,6 +740,8 @@ object AgentPipeline {
                     )
                     TaskQueue.setStepForRunning("Inserting the code into QuickEdit…")
                     TaskQueue.advancePlanForRunning(2)
+                    // #61: never insert after a stop was requested.
+                    TaskState.throwIfStopRequested()
                     onEvent(ToolEvent(ToolEventKind.STARTED, "insert_code"))
                     val result = ToolExecutor(
                         context, memoryDb, ExecutionLedger()
@@ -771,6 +844,128 @@ object AgentPipeline {
             pattern.matchEntire(text.trim())?.let { return it.groupValues[1].trim() }
         }
         return null
+    }
+
+    // ── #75: "forget X" parsing ──────────────────────────────────────
+
+    private fun extractForgetTarget(text: String): String? {
+        val normalized = normalizeCommandText(text)
+        val patterns = listOf(
+            Regex("(?i)^forget about\\s+(.+)$"),
+            Regex("(?i)^forget\\s+(.+)$"),
+            Regex("(?i)^remove\\s+(.+?)\\s+from memory$"),
+            Regex("(?i)^delete\\s+(.+?)\\s+from memory$"),
+            Regex("(?i)^delete memory[:\\s]+(.+)$"),
+            Regex("(?i)^remove memory[:\\s]+(.+)$")
+        )
+        for (pattern in patterns) {
+            pattern.matchEntire(normalized)?.let { match ->
+                val target = match.groupValues[1].trim()
+                    .trim('.', '!', '?')
+                    .removeSuffix(" from memory")
+                    .trim()
+                if (target.isNotBlank()) return target
+            }
+        }
+        return null
+    }
+
+    // ── #52: contact-correction parsing ──────────────────────────────
+
+    /** Imperative openers that make a "X, not Y" phrase a command, not a name correction. */
+    private val CORRECTION_COMMAND_STARTS = setOf(
+        "play", "open", "send", "turn", "set", "watch",
+        "search", "find", "remind", "message", "text"
+    )
+
+    /**
+     * Detect a contact-name correction, returning (wrong, right).
+     * Both sides must be 1–3 plain words; article-led sides ("the
+     * title track") and command-led right sides ("play raabta") are
+     * rejected so media/quick phrases are never hijacked as aliases.
+     */
+    private fun extractContactCorrection(text: String): Pair<String, String>? {
+        val normalized = normalizeCommandText(text)
+
+        fun valid(wrongRaw: String, rightRaw: String, guardCommand: Boolean): Pair<String, String>? {
+            val wrong = wrongRaw.trim().trim(',', '—', '–', '-').trim()
+            val right = rightRaw.trim().trim(',', '—', '–', '-').trim()
+            if (wrong.isBlank() || right.isBlank()) return null
+            if (wrong.equals(right, ignoreCase = true)) return null
+            val wrongWords = wrong.split(Regex("\\s+"))
+            val rightWords = right.split(Regex("\\s+"))
+            if (wrongWords.size !in 1..3 || rightWords.size !in 1..3) return null
+            if (!wrong.all { it.isLetter() || it == ' ' || it == '\'' } ||
+                !right.all { it.isLetter() || it == ' ' || it == '\'' }
+            ) return null
+            val wrongLower = wrong.lowercase()
+            val rightLower = right.lowercase()
+            if (wrongLower.startsWith("the ") || wrongLower.startsWith("a ") ||
+                wrongLower.startsWith("an ") || rightLower.startsWith("the ") ||
+                rightLower.startsWith("a ") || rightLower.startsWith("an ")
+            ) return null
+            if (guardCommand &&
+                rightWords.first().lowercase() in CORRECTION_COMMAND_STARTS
+            ) return null
+            return wrong to right
+        }
+
+        Regex("(?i)^i said\\s+(.+?)\\s+not\\s+(.+)$")
+            .matchEntire(normalized)?.let { match ->
+                return valid(
+                    wrongRaw = match.groupValues[2],
+                    rightRaw = match.groupValues[1],
+                    guardCommand = false
+                )
+            }
+        Regex("(?i)^(?:call|message|text|whatsapp)\\s+(?:him|her|them)\\s+(.+?)\\s+not\\s+(.+)$")
+            .matchEntire(normalized)?.let { match ->
+                return valid(
+                    wrongRaw = match.groupValues[2],
+                    rightRaw = match.groupValues[1],
+                    guardCommand = false
+                )
+            }
+        Regex("(?i)^not\\s+(.+?)\\s*(?:,|—|–|-)\\s*(.+)$")
+            .matchEntire(normalized)?.let { match ->
+                return valid(
+                    wrongRaw = match.groupValues[1],
+                    rightRaw = match.groupValues[2],
+                    guardCommand = true
+                )
+            }
+        Regex("(?i)^(.+?)\\s*,\\s*not\\s+(.+)$")
+            .matchEntire(normalized)?.let { match ->
+                return valid(
+                    wrongRaw = match.groupValues[2],
+                    rightRaw = match.groupValues[1],
+                    guardCommand = true
+                )
+            }
+        return null
+    }
+
+    /**
+     * Save a learned alias in ContactsResolver's EXISTING format — a
+     * Contacts-category fact whose text is "alias = real name"
+     * (see ContactsResolver.loadAliasHints). A stale alias for the
+     * same wrong name is replaced, never duplicated.
+     */
+    private fun saveContactAlias(memoryDb: MemoryDb, wrong: String, right: String) {
+        val wrongKey = ContactsResolver.normalizeName(wrong)
+        try {
+            memoryDb.allFacts(null, MemoryCategories.CONTACTS).forEach { fact ->
+                val split = fact.text.indexOf('=')
+                if (split > 0 &&
+                    ContactsResolver.normalizeName(fact.text.substring(0, split)) == wrongKey
+                ) {
+                    memoryDb.deleteFact(fact.id)
+                }
+            }
+        } catch (e: Exception) {
+            // Replacing a stale alias is best-effort; the save still runs.
+        }
+        memoryDb.addFact(MemoryCategories.CONTACTS, "$wrong = $right")
     }
 
     private fun inferCategory(fact: String): String {

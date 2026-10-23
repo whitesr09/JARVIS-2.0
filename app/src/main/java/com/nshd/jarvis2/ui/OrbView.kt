@@ -1,5 +1,8 @@
 package com.nshd.jarvis2.ui
 
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -17,11 +20,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.nshd.jarvis2.voice.VoiceStatus
+import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
@@ -125,10 +130,26 @@ fun JarvisOrb(
     val scene = remember { OrbScene() }
     val anim = remember { OrbAnimState() }
 
+    // v1.8.0 (#83): battery level, polled from the sticky
+    // ACTION_BATTERY_CHANGED intent every 30 s. At <= 20% the orb
+    // caps its quality scale at 0.35 and slows rotation (see
+    // [OrbAnimState.effectiveQuality] / advance) — rendering only.
+    val appContext = LocalContext.current.applicationContext
+    var batteryPct by remember { mutableStateOf(100) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            batteryPct = readBatteryPercent(appContext)
+            delay(30_000L)
+        }
+    }
+
     // Latest caller inputs, snapshotted for the frame loop without
     // restarting it on every recomposition.
     SideEffect {
         anim.setInputs(state, amplitude, bass, high, liveAudio)
+        // #24/#83 caps, applied on top of the adaptive quality scale.
+        anim.inputReduceMotion = reducedMotion
+        anim.inputBatteryLow = batteryPct <= 20
     }
 
     // Pause the frame loop while the host is not RESUMED.
@@ -191,6 +212,17 @@ fun JarvisOrb(
             )
         }
     }
+}
+
+/** v1.8.0 (#83): current battery percent (0–100) from the sticky intent; 100 when unknown. */
+private fun readBatteryPercent(context: android.content.Context): Int {
+    val intent = runCatching {
+        context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+    }.getOrNull() ?: return 100
+    val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+    val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+    if (level < 0 || scale <= 0) return 100
+    return (level * 100 / scale).coerceIn(0, 100)
 }
 
 // ── State rows (HTML STATES) ─────────────────────────────────────────
@@ -486,6 +518,64 @@ private class OrbAnimState {
     var inputHigh: Float = 0f
     var inputLive: Boolean = false
 
+    // ── v1.8.0 (#24) adaptive quality + (#83) battery profile ──────
+    // qualityScale steps 1.0 → 0.6 → 0.35 based on measured frame
+    // times; the arrays stay allocated at full size and the draw loop
+    // simply stops early (first N particles / orbiters).
+    var qualityScale: Float = 1f
+        private set
+    private var frameWindowCount = 0
+    private var frameWindowMs = 0f
+    private var lowFrameStreak = 0
+
+    /** #24: the user's reduce-motion setting caps quality at 0.6. */
+    @Volatile
+    var inputReduceMotion: Boolean = false
+
+    /** #83: battery <= 20% caps quality at 0.35 and slows rotation. */
+    @Volatile
+    var inputBatteryLow: Boolean = false
+
+    /** The scale actually drawn with: adaptive value under all caps. */
+    fun effectiveQuality(): Float {
+        var q = qualityScale
+        if (inputReduceMotion) q = minOf(q, 0.6f)
+        if (inputBatteryLow) q = minOf(q, 0.35f)
+        return q
+    }
+
+    /** #24: feed one frame's dt; step quality down/up on sustained load/ease. */
+    private fun trackFrameQuality(dt: Float) {
+        frameWindowCount++
+        frameWindowMs += dt * 1000f
+        if (frameWindowCount < 30) return
+        val avgMs = frameWindowMs / frameWindowCount
+        frameWindowCount = 0
+        frameWindowMs = 0f
+        when {
+            avgMs > 26f -> {
+                qualityScale = when {
+                    qualityScale > 0.6f -> 0.6f
+                    qualityScale > 0.35f -> 0.35f
+                    else -> qualityScale
+                }
+                lowFrameStreak = 0
+            }
+            avgMs < 13f -> {
+                lowFrameStreak += 30
+                if (lowFrameStreak >= 240) {
+                    qualityScale = when {
+                        qualityScale < 0.6f -> 0.6f
+                        qualityScale < 1f -> 1f
+                        else -> qualityScale
+                    }
+                    lowFrameStreak = 0
+                }
+            }
+            else -> lowFrameStreak = 0
+        }
+    }
+
     // Dynamic state.
     val cur = FloatArray(8)
     val target = FloatArray(8)
@@ -531,6 +621,11 @@ private class OrbAnimState {
 
     /** HTML updateOrb + readAudio + updateParticles angle advance. */
     fun advance(dt: Float, scene: OrbScene) {
+        // #24: quality adapts to the REAL frame cost, dt included.
+        trackFrameQuality(dt)
+        // #83: on a low battery only the ROTATION clock slows (×0.6);
+        // state lerp / audio smoothing keep real time.
+        val rotDt = if (inputBatteryLow) dt * 0.6f else dt
         targetParams(inputState, target)
         val k = 1f - exp(-dt * 3.5f)
         for (i in 0 until 8) {
@@ -560,15 +655,15 @@ private class OrbAnimState {
         val tintTarget = if (inputState == OrbState.ERROR) ERR_MIX else 0f
         tintMix += (tintTarget - tintMix) * k
 
-        angleY += dt * 0.18f * (0.5f + cur[P_SPEED])
-        ring1Angle += dt * (0.12f + cur[P_RING] * 0.6f)
-        ring2Angle -= dt * (0.08f + cur[P_RING] * 0.35f)
+        angleY += rotDt * 0.18f * (0.5f + cur[P_SPEED])
+        ring1Angle += rotDt * (0.12f + cur[P_RING] * 0.6f)
+        ring2Angle -= rotDt * (0.08f + cur[P_RING] * 0.35f)
 
         // Orbit angles (HTML updateParticles boost).
         val boost = 0.6f + cur[P_SPEED] * 0.8f +
             (if (inputState == OrbState.THINKING) 1.2f else 0f)
         for (i in 0 until ORBIT_COUNT) {
-            scene.oAngle[i] += scene.oSpeed[i] * dt * boost
+            scene.oAngle[i] += scene.oSpeed[i] * rotDt * boost
         }
     }
 
@@ -805,8 +900,12 @@ private fun DrawScope.drawOrbFrame(
     )
 
     // ── Sphere particles.
+    // #24: adaptive quality draws only the first N particles (arrays
+    // stay full-size; the tail is simply not drawn this frame).
+    val particleLimit = (PARTICLE_COUNT * anim.effectiveQuality())
+        .toInt().coerceIn(1, PARTICLE_COUNT)
     val sizeAmp = 1f + ampEff * 0.5f
-    for (i in 0 until PARTICLE_COUNT) {
+    for (i in 0 until particleLimit) {
         val dx0 = scene.dirX[i]
         val dy0 = scene.dirY[i]
         val dz0 = scene.dirZ[i]
@@ -872,7 +971,10 @@ private fun DrawScope.drawOrbFrame(
     // screenshots). The orbit is scaled to 0.8× and every particle is
     // radially clamped inside the canvas as a hard guarantee.
     val thinking = state == OrbState.THINKING
-    for (j in 0 until ORBIT_COUNT) {
+    // #24: orbit particles scale down with the same quality factor.
+    val orbitLimit = (ORBIT_COUNT * anim.effectiveQuality())
+        .toInt().coerceIn(1, ORBIT_COUNT)
+    for (j in 0 until orbitLimit) {
         val a = scene.oAngle[j]
         val fs = scene.oFreq[j]
         val ph = scene.oPhase[j]

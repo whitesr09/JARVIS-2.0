@@ -6,6 +6,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.atomic.AtomicLong
 
+/** v1.8.0 (#54): the panel history keeps at most this many finished tasks. */
+private const val HISTORY_MAX = 5
+
 /** Lifecycle of one queued sub-task (F3 multitask queue). */
 enum class TaskStatus { QUEUED, RUNNING, DONE, FAILED, SKIPPED }
 
@@ -64,6 +67,44 @@ object TaskQueue {
     /** Index into [tasks] of the RUNNING item, or -1 when none runs. */
     private val _currentIndex = MutableStateFlow(-1)
     val currentIndex: StateFlow<Int> = _currentIndex.asStateFlow()
+
+    /**
+     * v1.8.0 (#54): the last [HISTORY_MAX] finished tasks (DONE/FAILED),
+     * newest first. [tasks] itself is pruned/replaced whenever a new
+     * batch begins, so the panel's "Recent" section reads this bounded
+     * list instead. Appended ONLY in the finish paths ([update] on a
+     * terminal transition, and [abortAll] for the aborted RUNNING item).
+     */
+    private val _history = MutableStateFlow<List<TaskItem>>(emptyList())
+    val history: StateFlow<List<TaskItem>> = _history.asStateFlow()
+
+    /**
+     * v1.8.0 (#60): queue pause flag. While set, [markRunning] refuses
+     * to promote a QUEUED item to RUNNING (the already-RUNNING item is
+     * unaffected). The panel's Pause/Resume button toggles this.
+     */
+    @Volatile
+    var paused: Boolean = false
+        private set
+
+    /** v1.8.0 (#60): hold the queue — QUEUED items stop being promoted. */
+    fun pauseQueue() {
+        paused = true
+        AppLog.i("Queue", "queue PAUSED (queued items will not be promoted)")
+    }
+
+    /** v1.8.0 (#60): release the queue — promotion resumes. */
+    fun resumeQueue() {
+        paused = false
+        AppLog.i("Queue", "queue RESUMED")
+    }
+
+    /** Prepend a finished item to the bounded history (callers hold the lock). */
+    private fun prependHistory(item: TaskItem) {
+        if (item.status != TaskStatus.DONE && item.status != TaskStatus.FAILED) return
+        _history.value = (listOf(item) + _history.value.filter { it.id != item.id })
+            .take(HISTORY_MAX)
+    }
 
     private val nextId = AtomicLong(1)
 
@@ -303,13 +344,26 @@ object TaskQueue {
 
     @Synchronized
     fun markRunning(id: Long) {
+        // v1.8.0 (#60): promotion choke point — while paused, a QUEUED
+        // item is NOT promoted to RUNNING. (The pipeline's own loop is
+        // outside this file; the flag is the minimal correct hook.)
+        val item = _tasks.value.firstOrNull { it.id == id }
+        if (paused && item?.status == TaskStatus.QUEUED) {
+            AppLog.d("Queue", "task #$id promotion held — queue paused")
+            return
+        }
         AppLog.d("Queue", "task #$id running")
         update(id, TaskStatus.RUNNING)
     }
 
     @Synchronized
     fun markRunning(index: Int) {
-        _tasks.value.getOrNull(index)?.let { update(it.id, TaskStatus.RUNNING) }
+        val item = _tasks.value.getOrNull(index) ?: return
+        if (paused && item.status == TaskStatus.QUEUED) {
+            AppLog.d("Queue", "task #${item.id} promotion held — queue paused")
+            return
+        }
+        update(item.id, TaskStatus.RUNNING)
     }
 
     @Synchronized
@@ -349,6 +403,8 @@ object TaskQueue {
     @Synchronized
     fun abortAll() {
         val now = System.currentTimeMillis()
+        val abortedRunning = _tasks.value.firstOrNull { it.status == TaskStatus.RUNNING }
+            ?.copy(status = TaskStatus.FAILED, endedAt = now)
         _tasks.value = _tasks.value.map { item ->
             when (item.status) {
                 TaskStatus.RUNNING -> item.copy(status = TaskStatus.FAILED, endedAt = now)
@@ -357,6 +413,8 @@ object TaskQueue {
             }
         }
         _currentIndex.value = -1
+        // #54: the aborted RUNNING task counts as finished (FAILED).
+        abortedRunning?.let { prependHistory(it) }
     }
 
     private fun update(id: Long, status: TaskStatus) {
@@ -383,6 +441,10 @@ object TaskQueue {
         }
         if (indexOfItem < 0) return
         _tasks.value = updated
+        // #54: terminal transitions land in the bounded history.
+        if (status == TaskStatus.DONE || status == TaskStatus.FAILED) {
+            updated.getOrNull(indexOfItem)?.let { prependHistory(it) }
+        }
         _currentIndex.value = when (status) {
             TaskStatus.RUNNING -> indexOfItem
             else -> if (_currentIndex.value == indexOfItem) {
@@ -394,4 +456,5 @@ object TaskQueue {
             }
         }
     }
+
 }

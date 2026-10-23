@@ -20,12 +20,22 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.nshd.jarvis2.core.UpdateChecker
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun UpdatesScreen() {
@@ -43,6 +53,86 @@ fun UpdatesScreen() {
             fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.height(16.dp))
+
+        // Plan #104: live update check against GitHub Actions builds.
+        val updateContext = LocalContext.current
+        val updateScope = rememberCoroutineScope()
+        val updateAvailable by UpdateChecker.updateAvailable.collectAsState()
+        val updateStatus by UpdateChecker.statusLine.collectAsState()
+        LaunchedEffect(Unit) {
+            withContext(Dispatchers.IO) { UpdateChecker.check(updateContext) }
+        }
+        InfoCard(
+            title = if (updateAvailable) {
+                "⬆️ A newer build is available"
+            } else {
+                "Update check"
+            },
+            body = updateStatus
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = {
+                updateScope.launch {
+                    runCatching {
+                        updateContext.startActivity(
+                            android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse(UpdateChecker.ACTIONS_URL)
+                            )
+                        )
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Open GitHub Actions — download the latest APK")
+        }
+        Spacer(modifier = Modifier.height(16.dp))
+
+        InfoCard(
+            title = "v1.8.0 — Panel, Orb & Feel: live panel, smarter orb, living Home",
+            body = "The floating panel grew up: while a task runs collapsed " +
+                "it shrinks to a slim pill (spinner, current step, % done) " +
+                "instead of vanishing; expanded it shows the last 5 tasks " +
+                "with their results, a live waveform while you talk to it, " +
+                "an avatar face that works, celebrates and gets dizzy with " +
+                "the plan, a haptic tick as each step lands, and quick " +
+                "actions — Stop (now a REAL stop: the pipeline, the agent " +
+                "loop and the deep intents all check a stop flag between " +
+                "steps) and Pause/Resume for queued tasks. The panel also " +
+                "remembers where you left it per app, follows every theme " +
+                "including your custom colour, and stays readable on " +
+                "light themes. The orb now pulses to Jarvis's own voice " +
+                "on Live (not just your mic), tunes its particle quality " +
+                "to your GPU and battery automatically, and takes a warm " +
+                "accent in Girlfriend Mode. Home is alive: real weather " +
+                "for your area, your next calendar event, and today's " +
+                "gold price. Voice gets barge-in sensitivity (Low / " +
+                "Normal / High), a device-voice picker with preview, " +
+                "uncut long-reply reading with a Stop chip, and sessions " +
+                "that resume themselves after a phone call. Chat gets " +
+                "long-press actions (copy, speak, save to memory, " +
+                "share), edit & resend, regenerate, full-history search, " +
+                "a stop-generation button with a live tok/s readout, and " +
+                "dictation right in the composer. Say \"forget …\" and " +
+                "Jarvis removes matching memories and tells you exactly " +
+                "what it dropped; correct a contact (\"not Mom, Amma\") " +
+                "and the alias is learned. Hands got tougher: taps retry " +
+                "centre → parent → edge, the keyboard no longer covers " +
+                "the field being typed into, failed taps save an " +
+                "annotated screenshot to the logs, system dialogs are " +
+                "reported (never auto-approved), and Spotify/YouTube " +
+                "stay warm after first use. Under the hood: a permission " +
+                "health dashboard with brand-correct keep-alive links " +
+                "for iQOO/Vivo, Samsung and Xiaomi, full backup & " +
+                "restore (settings + memories + provider setups — keys " +
+                "stay encrypted on-device), crash auto-recovery back to " +
+                "your last screen, safe mode after repeated startup " +
+                "crashes, a GitHub update checker with a badge on this " +
+                "tab, and a one-time \"What's new\" card after updating."
+        )
+        Spacer(modifier = Modifier.height(12.dp))
 
         InfoCard(
             title = "v1.7.0 — Fast & Solid: Live fallback, offline voice, 50+ instant commands",
