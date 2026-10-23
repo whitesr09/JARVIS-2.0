@@ -5,6 +5,8 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -476,9 +478,7 @@ private fun VoiceSessionBody(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .androidx.compose.foundation.verticalScroll(
-                            androidx.compose.foundation.rememberScrollState()
-                        )
+                        .verticalScroll(rememberScrollState())
                 ) {
                     if (diagnosis == null) {
                         Text("No Live failure has been recorded in this app run.")

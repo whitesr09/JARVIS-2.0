@@ -579,7 +579,7 @@ object HandsActions {
         // animation start.
         delay(250)
         val changed = reader.signature() != before
-        ActionResult(
+        return ActionResult(
             changed,
             if (changed) "Scrolled ${direction.lowercase()} and the screen changed."
             else "Scroll gesture completed, but the screen did not change (possibly the end of the content)."
