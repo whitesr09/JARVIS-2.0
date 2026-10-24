@@ -29,7 +29,11 @@ class DeepIntents(context: Context) {
 
     // ── WhatsApp ───────────────────────────────────────────────────────
 
-    suspend fun whatsappMessage(phone: String, text: String): ActionResult {
+    suspend fun whatsappMessage(
+        phone: String,
+        text: String,
+        askBeforeSend: (suspend () -> Boolean)? = null
+    ): ActionResult {
         val digits = ContactsResolver.normalizePhone(phone)
         if (digits.length < 10) return ActionResult(false, "The WhatsApp number looks incomplete.")
         val url = "https://api.whatsapp.com/send?phone=$digits&text=${Uri.encode(text)}"
@@ -72,6 +76,13 @@ class DeepIntents(context: Context) {
             "Send",
             "stage: typed — message field holds ${entry?.text?.length ?: 0} chars"
         )
+
+        // v2.0.2 JIT ask: composer filled + verified, send NOT yet
+        // tapped. A decline/timeout leaves the typed text in place.
+        if (askBeforeSend != null && !askBeforeSend()) {
+            AppLog.i("Send", "stage: send ask declined/timeout — composer left untouched")
+            return ActionResult(false, "Not sent.")
+        }
 
         // F8 (#36): the send control comes from the WhatsApp
         // playbook now — its primary descriptors ARE the inline
@@ -993,8 +1004,14 @@ class DeepIntents(context: Context) {
 
     // ── v1.9.0: messaging & platform powers ──────────────────────────
     //
-    // Every SEND below is called only AFTER ToolExecutor's ConfirmGate
-    // approved recipient + full text (the standing rule), and each one
+    // v2.0.2 JUST-IN-TIME send ask: every SEND below takes an
+    // optional [askBeforeSend] hook, called AFTER the chat/composer
+    // is open and the text is filled + verified, and BEFORE the send
+    // tap. ToolExecutor passes a SendAsk.ask(recipient, full text)
+    // lambda; a NO/timeout returns "Not sent." with the composer left
+    // untouched. The standing rule is unchanged — recipient + full
+    // text are confirmed before any send — only the TIMING moved
+    // (from tool-call start to just before sending). Each send still
     // grants the one-shot SendPermit for its app package before the
     // send tap, exactly like whatsapp_message (F7).
 
@@ -1003,7 +1020,10 @@ class DeepIntents(context: Context) {
      * with [phone] (jid-preselected share intent), then press the
      * share screen's Send button and verify the chat opened.
      */
-    suspend fun whatsappShareLatestPhoto(phone: String): ActionResult {
+    suspend fun whatsappShareLatestPhoto(
+        phone: String,
+        askBeforeSend: (suspend () -> Boolean)? = null
+    ): ActionResult {
         val digits = ContactsResolver.normalizePhone(phone)
         if (digits.length < 10) {
             return ActionResult(false, "The WhatsApp number looks incomplete.")
@@ -1055,6 +1075,11 @@ class DeepIntents(context: Context) {
                 "WhatsApp opened with the photo attached — tap Send to send it " +
                     "(the Send button was not found automatically)."
             )
+        // v2.0.2 JIT ask: photo attached + Send button found, send
+        // NOT yet tapped. A decline leaves the share screen untouched.
+        if (askBeforeSend != null && !askBeforeSend()) {
+            return ActionResult(false, "Not sent.")
+        }
         val click = HandsActions.clickElement(send.index)
         if (!click.success) {
             return ActionResult(
@@ -1111,13 +1136,15 @@ class DeepIntents(context: Context) {
 
     /**
      * Type [message] into the chat currently open in [packageName]
-     * and press its Send button (playbook first). The caller already
-     * gated the send; the SendPermit for the package is granted by
-     * ToolExecutor before this runs.
+     * and press its Send button (playbook first). v2.0.2: the
+     * just-in-time send ask runs AFTER typing and BEFORE the tap
+     * ([askBeforeSend]); the SendPermit for the package is granted by
+     * the ask lambda (or ToolExecutor) once the ask is approved.
      */
     suspend fun typeAndSendInOpenChat(
         packageName: String,
-        message: String
+        message: String,
+        askBeforeSend: (suspend () -> Boolean)? = null
     ): ActionResult {
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
@@ -1141,6 +1168,11 @@ class DeepIntents(context: Context) {
         }
         TaskState.throwIfStopRequested()
         HandsActions.waitForSettle(600)
+        // v2.0.2 JIT ask: text typed, send NOT yet tapped. A decline
+        // leaves the typed text in the open chat, untouched.
+        if (askBeforeSend != null && !askBeforeSend()) {
+            return ActionResult(false, "Not sent.")
+        }
         snapshot = reader.snapshot()
         val send = Playbooks.find(snapshot, packageName, Playbooks.ROLE_SEND_BUTTON)
             ?: reader.findByText("Send", snapshot)
@@ -1178,7 +1210,11 @@ class DeepIntents(context: Context) {
      * and type + send via [typeAndSendInOpenChat]. The gate +
      * SendPermit are handled by ToolExecutor, exactly like a 1:1 send.
      */
-    suspend fun whatsappGroupMessage(groupName: String, message: String): ActionResult {
+    suspend fun whatsappGroupMessage(
+        groupName: String,
+        message: String,
+        askBeforeSend: (suspend () -> Boolean)? = null
+    ): ActionResult {
         val pkg = "com.whatsapp"
         if (!isPackageInstalled(pkg)) {
             return ActionResult(false, "WhatsApp is not installed.")
@@ -1219,7 +1255,7 @@ class DeepIntents(context: Context) {
         }
         HandsActions.waitForSettle(1_200)
         TaskState.throwIfStopRequested()
-        return typeAndSendInOpenChat(pkg, message)
+        return typeAndSendInOpenChat(pkg, message, askBeforeSend)
     }
 
     /**
@@ -1228,7 +1264,11 @@ class DeepIntents(context: Context) {
      * ToolExecutor; permit granted there too). Best-effort staged
      * automation: every stage failure says exactly where it stopped.
      */
-    suspend fun instagramDm(contactQuery: String, message: String): ActionResult {
+    suspend fun instagramDm(
+        contactQuery: String,
+        message: String,
+        askBeforeSend: (suspend () -> Boolean)? = null
+    ): ActionResult {
         val pkg = Playbooks.INSTAGRAM_PACKAGE
         if (!isPackageInstalled(pkg)) {
             return ActionResult(false, "Instagram is not installed.")
@@ -1269,11 +1309,15 @@ class DeepIntents(context: Context) {
         }
         HandsActions.waitForSettle(1_200)
         TaskState.throwIfStopRequested()
-        return typeAndSendInOpenChat(pkg, message)
+        return typeAndSendInOpenChat(pkg, message, askBeforeSend)
     }
 
     /** #46: Telegram message — same staged pattern as Instagram. */
-    suspend fun telegramMessage(contactQuery: String, message: String): ActionResult {
+    suspend fun telegramMessage(
+        contactQuery: String,
+        message: String,
+        askBeforeSend: (suspend () -> Boolean)? = null
+    ): ActionResult {
         val pkg = "org.telegram.messenger"
         if (!isPackageInstalled(pkg)) {
             return ActionResult(false, "Telegram is not installed.")
@@ -1309,7 +1353,7 @@ class DeepIntents(context: Context) {
         }
         HandsActions.waitForSettle(1_200)
         TaskState.throwIfStopRequested()
-        return typeAndSendInOpenChat(pkg, message)
+        return typeAndSendInOpenChat(pkg, message, askBeforeSend)
     }
 
     /**
@@ -1318,7 +1362,11 @@ class DeepIntents(context: Context) {
      * owns the composer). If the tap can't be completed, the composer
      * stays open with everything filled in — stated honestly.
      */
-    suspend fun smsSend(phone: String, message: String): ActionResult {
+    suspend fun smsSend(
+        phone: String,
+        message: String,
+        askBeforeSend: (suspend () -> Boolean)? = null
+    ): ActionResult {
         val digits = ContactsResolver.normalizePhone(phone)
         if (digits.length < 7) {
             return ActionResult(false, "The phone number looks incomplete.")
@@ -1336,6 +1384,11 @@ class DeepIntents(context: Context) {
                 true,
                 "The SMS composer is open with the message ready — tap Send there."
             )
+        // v2.0.2 JIT ask: composer filled, Send NOT yet tapped. A
+        // decline leaves the composer open with the text untouched.
+        if (askBeforeSend != null && !askBeforeSend()) {
+            return ActionResult(false, "Not sent.")
+        }
         val pkg = service.screenReader().currentPackage()
         if (pkg != null) HandsActions.grantSendPermit(pkg)
         val tapped = HandsActions.clickText("Send")
@@ -1355,7 +1408,12 @@ class DeepIntents(context: Context) {
      * the Send tap with a permit for Gmail. Falls back to "compose is
      * open" honesty like the SMS path.
      */
-    suspend fun gmailSend(to: String, subject: String, body: String): ActionResult {
+    suspend fun gmailSend(
+        to: String,
+        subject: String,
+        body: String,
+        askBeforeSend: (suspend () -> Boolean)? = null
+    ): ActionResult {
         val pkg = Playbooks.GMAIL_PACKAGE
         if (!isPackageInstalled(pkg)) {
             return ActionResult(false, "Gmail is not installed.")
@@ -1372,6 +1430,11 @@ class DeepIntents(context: Context) {
         }
         HandsActions.waitForPackage(pkg, 3_000)
         HandsActions.waitForSettle(1_500)
+        // v2.0.2 JIT ask: compose filled, Send NOT yet tapped. A
+        // decline leaves the compose screen open with text untouched.
+        if (askBeforeSend != null && !askBeforeSend()) {
+            return ActionResult(false, "Not sent.")
+        }
         HandsActions.grantSendPermit(pkg)
         val tapped = HandsActions.clickText("Send")
         return if (tapped.success) {

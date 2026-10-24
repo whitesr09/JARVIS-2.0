@@ -9,62 +9,30 @@ import android.speech.RecognitionListener
 import com.nshd.jarvis2.CrashLogger
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
-import android.speech.tts.Voice
 import com.nshd.jarvis2.core.AppLog
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * UNIVERSAL voice engine (F2): microphone → text → the user's chat
- * model (via AgentPipeline) → spoken reply. It works with ANY provider
- * and ANY chat model — no native-audio model required.
+ * model (via AgentPipeline) → TEXT reply (v2.0.2: spoken replies were
+ * removed — the reply is surfaced as a caption / chat message only).
+ * It works with ANY provider and ANY chat model — no native-audio
+ * model required.
  *
  * This class owns only the device mechanics:
  *  - SpeechRecognizer passes with partial results (the manager renders
  *    them as a live-typing user caption) in the app's STT locale.
- *  - Sentence-queued TextToSpeech: the manager feeds completed
- *    sentences while the reply is still streaming, so the first audio
- *    starts at the first sentence boundary. [Listener.onTtsQueueDrained]
- *    fires (on the main thread) when everything queued has been spoken.
  *
- * F4.1 threading rule: SpeechRecognizer and TextToSpeech are
- * main-thread-only APIs, and this class now confines them ITSELF —
- * every recognizer create/start/stop/destroy and every TTS
- * create/speak/stop/shutdown is funnelled through [runOnMain], so
+ * F4.1 threading rule: SpeechRecognizer is a main-thread-only API,
+ * and this class confines it ITSELF — every recognizer
+ * create/start/stop/destroy is funnelled through [runOnMain], so
  * callers may invoke any method from any thread (the Live-failure →
- * Universal switch arrives on an OkHttp WebSocket thread). TTS
- * listener callbacks are re-posted to Main as well.
+ * Universal switch arrives on an OkHttp WebSocket thread).
  */
 class UniversalVoice(
     context: Context,
     private val languageName: String,
     private val listener: Listener,
-    /**
-     * F5.1: live TTS tuning providers (Settings → Voice sliders).
-     * Read at TTS init AND re-read before the first utterance of
-     * every reply, so speed/pitch changes apply to the next reply
-     * without restarting the session. (The F5 persona-based pitch
-     * override is gone — the sliders fully control pitch now.)
-     */
-    private val ttsRate: () -> Float = { DEFAULT_TTS_RATE },
-    private val ttsPitch: () -> Float = { DEFAULT_TTS_PITCH },
-    /**
-     * v1.8 (#7): the user's explicit device-TTS voice choice
-     * (JarvisSettings.ttsVoiceName; "" = auto). Read like the tuning
-     * providers so [selectBestVoice] prefers the voice with exactly
-     * this name when the engine offers it.
-     */
-    private val ttsVoiceName: () -> String = { "" },
-    /**
-     * v1.8 (#4): barge-in sensitivity provider ("LOW"/"NORMAL"/"HIGH")
-     * and the manager's veto for listens that must never barge in
-     * (the session's own spoken-gate yes/no listens — a gate reply
-     * arriving as a partial must not kill the speech it answers).
-     */
-    private val bargeInSensitivity: () -> String = { "NORMAL" },
-    private val bargeInAllowed: () -> Boolean = { true }
 ) {
     interface Listener {
         /** Partial transcription while the user is still speaking. */
@@ -78,9 +46,6 @@ class UniversalVoice(
 
         /** The user started speaking (F5: clears stale STT hints). */
         fun onBeginningOfSpeech()
-
-        /** F5: device TTS initialised — the voice actually in use. */
-        fun onTtsVoiceSelected(voiceName: String)
 
         /** Recognizer RMS changed (dB) — for the orb. */
         fun onRms(rmsDb: Float)
@@ -100,11 +65,6 @@ class UniversalVoice(
          */
         fun onNetworkError() {}
 
-        /** Every queued utterance finished (or speaking was stopped). */
-        fun onTtsQueueDrained()
-
-        /** TTS engine missing/unusable — replies are text-only. */
-        fun onTtsUnavailable()
     }
 
     private val appContext = context.applicationContext
@@ -115,20 +75,7 @@ class UniversalVoice(
     private var recognizer: SpeechRecognizer? = null
 
     @Volatile
-    private var tts: TextToSpeech? = null
-
-    @Volatile
-    private var ttsReady = false
-
-    @Volatile
     private var destroyed = false
-
-    private val pendingUtterances = AtomicInteger(0)
-    private val utteranceSeq = AtomicInteger(0)
-
-    init {
-        ensureTts()
-    }
 
     fun isRecognitionAvailable(): Boolean =
         SpeechRecognizer.isRecognitionAvailable(appContext)
@@ -187,7 +134,6 @@ class UniversalVoice(
             override fun onEndOfSpeech() {}
             override fun onPartialResults(partialResults: Bundle?) {
                 firstResult(partialResults)?.let { partial ->
-                    maybeBargeIn(partial)
                     listener.onPartialResult(partial)
                 }
             }
@@ -299,33 +245,6 @@ class UniversalVoice(
         }
     }
 
-    /**
-     * v1.8 (#4): Universal barge-in. While TTS is speaking (or has
-     * utterances queued), a recognizer partial means the user started
-     * talking over Jarvis — stop the speech; the recognizer keeps
-     * running and its final result becomes the next command through
-     * the normal dispatch. Sensitivity: NORMAL/HIGH act on any
-     * non-blank partial; LOW demands a longer/louder cue, approximated
-     * by a minimum partial length (a one-word blip or room noise
-     * rarely grows a 4+ char partial). Never fires when nothing is
-     * queued, and never on the listens the manager vetoes via
-     * [bargeInAllowed] (the session's own gate/wake listens).
-     */
-    private fun maybeBargeIn(partial: String) {
-        if (destroyed) return
-        if (pendingUtterances.get() <= 0) return
-        if (!runCatching { bargeInAllowed() }.getOrDefault(true)) return
-        val sensitivity = runCatching { bargeInSensitivity() }
-            .getOrDefault("NORMAL").trim().uppercase()
-        val minChars = if (sensitivity == "LOW") 4 else 1
-        if (partial.trim().length < minChars) return
-        AppLog.i(
-            "TTS",
-            "barge-in: user speech over TTS (sensitivity=$sensitivity) — stopping speech"
-        )
-        stopSpeaking()
-    }
-
     private fun firstResult(bundle: Bundle?): String? =
         bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             ?.firstOrNull()
@@ -346,290 +265,13 @@ class UniversalVoice(
         else -> "Speech recognition error ($error)"
     }
 
-    // ── Text-to-speech (sentence queue) ────────────────────────────────
-
-    @Volatile
-    private var ttsEnginePackage: String = ""
-
-    private fun ensureTts() {
-        if (tts != null || destroyed) return
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            // TextToSpeech construction is main-thread-only; the
-            // engine's init callback fills `tts` in when it runs.
-            runOnMain { ensureTts() }
-            return
-        }
-        CrashLogger.stage("universal", "tts init")
-        // F5: prefer Google TTS — its voices are markedly better than
-        // most OEM defaults. Detect it via the TTS service intent,
-        // construct with that engine, and fall back to the system
-        // default engine when it isn't installed (or throws).
-        val googleInstalled = runCatching {
-            val intent = Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE)
-            appContext.packageManager.queryIntentServices(intent, 0)
-                .any { it.serviceInfo.packageName == GOOGLE_TTS_ENGINE }
-        }.getOrDefault(false)
-        val onInit = TextToSpeech.OnInitListener { status ->
-            if (destroyed) return@OnInitListener
-            if (status == TextToSpeech.SUCCESS) {
-                configureTts()
-                ttsReady = true
-            } else {
-                ttsReady = false
-                AppLog.w("TTS", "engine init failed (status=$status)")
-                mainHandler.post { if (!destroyed) listener.onTtsUnavailable() }
-            }
-        }
-        val created: TextToSpeech? = if (googleInstalled) {
-            runCatching {
-                TextToSpeech(appContext, onInit, GOOGLE_TTS_ENGINE)
-            }.getOrNull()?.also { ttsEnginePackage = GOOGLE_TTS_ENGINE }
-        } else {
-            null
-        }
-        if (created != null) {
-            tts = created
-        } else {
-            ttsEnginePackage = "default"
-            tts = TextToSpeech(appContext, onInit)
-        }
-        AppLog.i("TTS", "engine init requested: $ttsEnginePackage")
-    }
-
-    /**
-     * F5 voice selection, run once on TTS init (main thread): among the
-     * engine's voices for the session locale, prefer NETWORK voices
-     * (markedly higher quality) at the highest quality level; otherwise
-     * the best offline voice. The user's TTS speed/pitch settings
-     * (F5.1 sliders) are applied here too, and re-applied before the
-     * first utterance of every reply (see speakSentenceOnMain) so
-     * slider changes land without a session restart.
-     */
-    private fun configureTts() {
-        val engine = tts ?: return
-        runCatching { engine.setLanguage(locale) }
-        val selected = selectBestVoice(engine)
-        if (selected != null) {
-            runCatching { engine.setVoice(selected) }
-        }
-        val rate = currentTtsRate()
-        val pitch = currentTtsPitch()
-        runCatching { engine.setPitch(pitch) }
-        runCatching { engine.setSpeechRate(rate) }
-        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
-            override fun onDone(utteranceId: String?) = utteranceFinished()
-            @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) {
-                AppLog.w("TTS", "utterance error (legacy callback)")
-                utteranceFinished()
-            }
-            override fun onError(utteranceId: String?, errorCode: Int) {
-                AppLog.w("TTS", "utterance error code=$errorCode")
-                utteranceFinished()
-            }
-        })
-        val voiceName = selected?.name
-            ?: runCatching { engine.voice?.name }.getOrNull()
-            ?: runCatching { engine.defaultVoice?.name }.getOrNull()
-            ?: "unknown"
-        AppLog.i(
-            "TTS",
-            "voice selected: $voiceName (engine=$ttsEnginePackage, " +
-                "locale=$languageTag, pitch=$pitch, rate=$rate)"
-        )
-        mainHandler.post { if (!destroyed) listener.onTtsVoiceSelected(voiceName) }
-    }
-
-    /** User TTS speed (F5.1 Settings slider), coerced to a sane range. */
-    private fun currentTtsRate(): Float =
-        runCatching { ttsRate() }.getOrDefault(DEFAULT_TTS_RATE).coerceIn(0.5f, 2.0f)
-
-    /** User TTS pitch (F5.1 Settings slider), coerced to a sane range. */
-    private fun currentTtsPitch(): Float =
-        runCatching { ttsPitch() }.getOrDefault(DEFAULT_TTS_PITCH).coerceIn(0.5f, 2.0f)
-
-    /** Re-apply the live speed/pitch settings to the engine (F5.1). */
-    private fun applyTtsTuning(engine: TextToSpeech) {
-        runCatching { engine.setSpeechRate(currentTtsRate()) }
-        runCatching { engine.setPitch(currentTtsPitch()) }
-    }
-
-    /** Best voice for [locale]: exact-locale → same-language → any; network first, then quality. */
-    private fun selectBestVoice(engine: TextToSpeech): Voice? {
-        val all = runCatching { engine.voices }.getOrNull().orEmpty()
-        if (all.isEmpty()) return null
-        // v1.8 (#7): an explicit user choice (Settings voice picker)
-        // beats every heuristic — an exact name match wins outright,
-        // whatever its locale/quality. Blank or not-offered falls
-        // through to the auto-pick below, unchanged.
-        val wanted = runCatching { ttsVoiceName() }.getOrDefault("").trim()
-        if (wanted.isNotEmpty()) {
-            val chosen = all.firstOrNull { voice ->
-                runCatching { voice.name }.getOrNull() == wanted
-            }
-            if (chosen != null) {
-                AppLog.i("TTS", "voice selected: user choice '$wanted'")
-                return chosen
-            }
-            AppLog.w("TTS", "chosen voice '$wanted' not offered by this engine — auto-picking")
-        }
-        val sameLanguage = all.filter { voice ->
-            runCatching { voice.locale?.language }.getOrNull() == locale.language
-        }
-        val exact = sameLanguage.filter { voice ->
-            runCatching { voice.locale }.getOrNull() == locale
-        }
-        val pool = when {
-            exact.isNotEmpty() -> exact
-            sameLanguage.isNotEmpty() -> sameLanguage
-            else -> all.toList()
-        }
-        val network = pool.filter { voice ->
-            runCatching { voice.isNetworkConnectionRequired }.getOrDefault(false)
-        }
-        val candidates = network.ifEmpty { pool }
-        return candidates.maxByOrNull { voice ->
-            runCatching { voice.quality }.getOrDefault(0)
-        }
-    }
-
-    private fun utteranceFinished() {
-        val remaining = pendingUtterances.decrementAndGet()
-        if (remaining <= 0) {
-            pendingUtterances.set(0)
-            mainHandler.post { if (!destroyed) listener.onTtsQueueDrained() }
-        }
-    }
-
-    /**
-     * Queue one completed sentence (QUEUE_ADD) — speech starts at the
-     * first sentence boundary while the rest of the reply still streams.
-     * If TTS is unusable the sentence is skipped and the drained signal
-     * fires so the conversation loop never stalls.
-     */
-    fun speakSentence(sentence: String) {
-        runOnMain { speakSentenceOnMain(sentence) }
-    }
-
-    private fun speakSentenceOnMain(sentence: String) {
-        val text = sentence.trim()
-        if (text.isBlank() || destroyed) return
-        ensureTts()
-        val engine = tts
-        if (engine == null) {
-            mainHandler.post { if (!destroyed) listener.onTtsUnavailable() }
-            return
-        }
-        if (!ttsReady) {
-            // Still initialising: don't stall the loop on this sentence.
-            mainHandler.post { if (!destroyed) listener.onTtsQueueDrained() }
-            return
-        }
-        // F5.1: nothing queued or speaking → this is the first
-        // utterance of a reply: pick up any slider changes first.
-        if (pendingUtterances.get() == 0) applyTtsTuning(engine)
-        // v1.8 (#8): a single "sentence" from the manager can still
-        // be arbitrarily long (a whole non-streamed reply remainder,
-        // a list, a code block read aloud…). Some engines silently
-        // truncate very long utterances, so split into ≤~350-char
-        // chunks at sentence/clause boundaries and queue them IN
-        // ORDER — every chunk is spoken, nothing is dropped.
-        val chunks = splitForTts(text)
-        for (chunk in chunks) {
-            val id = "universal-${utteranceSeq.incrementAndGet()}"
-            pendingUtterances.incrementAndGet()
-            val result = engine.speak(chunk, TextToSpeech.QUEUE_ADD, null, id)
-            if (result == TextToSpeech.ERROR) utteranceFinished()
-        }
-    }
-
-    /**
-     * v1.8 (#8): split [text] into chunks of at most
-     * [MAX_TTS_CHUNK_CHARS] characters, preferring cuts at sentence
-     * ends (. ! ? …), then clause boundaries (, ; : —), then word
-     * boundaries; a single over-long word is hard-cut as a last
-     * resort. Concatenating the chunks reproduces [text] (modulo the
-     * trimmed boundary whitespace) — no content is ever dropped.
-     */
-    private fun splitForTts(text: String): List<String> {
-        if (text.length <= MAX_TTS_CHUNK_CHARS) return listOf(text)
-        val chunks = mutableListOf<String>()
-        var rest = text.trim()
-        while (rest.length > MAX_TTS_CHUNK_CHARS) {
-            val window = rest.substring(0, MAX_TTS_CHUNK_CHARS)
-            var cut = -1
-            // Sentence end inside the window (keep the punctuation).
-            for (i in window.indices) {
-                val c = window[i]
-                if ((c == '.' || c == '!' || c == '?' || c == '…') &&
-                    (i + 1 >= window.length || window[i + 1] == ' ' || window[i + 1] == '\n')
-                ) {
-                    cut = i + 1
-                }
-            }
-            // Clause boundary.
-            if (cut < 0) {
-                for (i in window.indices) {
-                    val c = window[i]
-                    if ((c == ',' || c == ';' || c == ':' || c == '—') &&
-                        (i + 1 >= window.length || window[i + 1] == ' ')
-                    ) {
-                        cut = i + 1
-                    }
-                }
-            }
-            // Word boundary.
-            if (cut < 0) {
-                val space = window.lastIndexOf(' ')
-                if (space > 40) cut = space
-            }
-            if (cut < 0) cut = MAX_TTS_CHUNK_CHARS
-            val chunk = rest.substring(0, cut).trim()
-            if (chunk.isNotBlank()) chunks += chunk
-            rest = rest.substring(cut).trim()
-        }
-        if (rest.isNotBlank()) chunks += rest
-        return chunks.ifEmpty { listOf(text) }
-    }
-
-    /** Barge-in: stop speaking now and report the queue as drained. */
-    fun stopSpeaking() {
-        runOnMain { runCatching { tts?.stop() } }
-        pendingUtterances.set(0)
-        mainHandler.post { if (!destroyed) listener.onTtsQueueDrained() }
-    }
-
     fun shutdown() {
         destroyed = true
         runOnMain { destroyRecognizerOnMain() }
-        val engine = tts
-        tts = null
-        ttsReady = false
-        pendingUtterances.set(0)
-        if (engine != null) {
-            // stop()/shutdown() are main-confined like all TTS calls;
-            // `destroyed` is already set, so the posted block still runs.
-            runOnMain {
-                runCatching { engine.stop() }
-                runCatching { engine.shutdown() }
-            }
-        }
     }
 
+
     companion object {
-        /** F5: preferred TTS engine package (best stock voices on Android). */
-        const val GOOGLE_TTS_ENGINE = "com.google.android.tts"
-
-        /** F5.1 default TTS speed — brisker than the old flat 1.0×. */
-        const val DEFAULT_TTS_RATE = 1.18f
-
-        /** F5.1 default TTS pitch — noticeably girlier than neutral 1.0×. */
-        const val DEFAULT_TTS_PITCH = 1.22f
-
-        /** v1.8 (#8): max characters per queued TTS utterance. */
-        const val MAX_TTS_CHUNK_CHARS = 350
-
         /**
          * App language name → BCP-47 tag for speech recognition. India
          * variants are the default — the user's accent and names are

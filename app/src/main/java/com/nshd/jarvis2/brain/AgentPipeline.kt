@@ -6,6 +6,8 @@ import android.content.IntentFilter
 import android.os.BatteryManager
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.tools.ConfirmGate
+import com.nshd.jarvis2.brain.tools.SendAnswer
+import com.nshd.jarvis2.brain.tools.SendAsk
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.core.BrainStore
@@ -68,6 +70,48 @@ object AgentPipeline {
         onEvent: (ToolEvent) -> Unit = {},
         onAssistantDelta: (String) -> Unit = {},
         /** Plan #71: an image attached in chat, forwarded to the model. */
+        imageBase64: String? = null
+    ): String {
+        // v2.0.2 SendAsk host (typed-chat path): if a just-in-time
+        // send ask is pending, THIS message is its answer — checked
+        // BEFORE any normal routing, and never routed as a command.
+        // NO mic auto-start on this path: the user typed the answer.
+        SendAsk.pending.value?.let { pending ->
+            return when (SendAsk.answer(text)) {
+                SendAnswer.YES -> "Confirmed — sending now."
+                SendAnswer.NO -> "Not sent."
+                SendAnswer.NON_ANSWER -> "Say yes to send, or no to cancel.\n\n" +
+                    pending.askLine
+            }
+        }
+        // v2.0.2: while this turn runs, send asks stream to the
+        // caller as plain chat/caption deltas (never spoken). The
+        // sink is cleared in the finally below, so a later turn can
+        // never deliver an ask into a stale bubble.
+        SendAsk.askSink = onAssistantDelta
+        try {
+            return handleUserTextInner(
+                context, text, settings, memoryDb, providerStore,
+                codeMode, onEvent, onAssistantDelta, imageBase64
+            )
+        } finally {
+            SendAsk.askSink = null
+        }
+    }
+
+    /**
+     * The pre-v2.0.2 handleUserText body, unchanged except that the
+     * v2.0.2 wrapper above owns the send-ask intercept + sink.
+     */
+    private suspend fun handleUserTextInner(
+        context: Context,
+        text: String,
+        settings: JarvisSettings,
+        memoryDb: MemoryDb,
+        providerStore: ProviderStore,
+        codeMode: Boolean = false,
+        onEvent: (ToolEvent) -> Unit = {},
+        onAssistantDelta: (String) -> Unit = {},
         imageBase64: String? = null
     ): String {
         suppressMacroNote = false
@@ -1714,8 +1758,9 @@ object AgentPipeline {
         }
 
         // ── WhatsApp sends (F7 expanded). Every hit still runs the
-        // whatsapp_message tool, whose own ConfirmGate confirms with
-        // recipient + full text — his standing rule is untouched.
+        // whatsapp_message tool, whose just-in-time send ask (v2.0.2)
+        // confirms recipient + full text right before sending — his
+        // standing rule is untouched, only the timing moved.
         Regex("(?i)^send\\s+(?:a\\s+)?(?:message|whatsapp\\s+message)\\s+to\\s+(.+?)\\s+(?:saying|that\\s+says)\\s+(.+)$")
             .find(text)?.let { match ->
                 AppLog.d("Send", "route hit: send-to-saying pattern")
@@ -1989,7 +2034,8 @@ object AgentPipeline {
 
         // ── v1.9.0 "More Powers" quick patterns ─────────────────────
         // Every send pattern still lands in its ToolExecutor tool,
-        // whose ConfirmGate confirms recipient + full text first.
+        // whose just-in-time send ask (v2.0.2) confirms recipient +
+        // full text right before sending.
 
         // #43: "send the latest photo to Mom" (WhatsApp).
         Regex("(?i)^send (?:the )?(?:latest|last|recent) photo to (.+)$")

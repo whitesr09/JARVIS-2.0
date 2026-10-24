@@ -5,7 +5,6 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -106,7 +105,7 @@ private data class UiMessage(
 )
 
 /** #65/#66: actions offered by a chat bubble's long-press menu. */
-private enum class BubbleAction { COPY, SPEAK, SAVE, SHARE, EDIT, REGENERATE }
+private enum class BubbleAction { COPY, SAVE, SHARE, EDIT, REGENERATE }
 
 private enum class ChatMode { JARVIS, CODE }
 
@@ -156,9 +155,6 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
 
-    // #65: lazy standalone TTS for the bubble "Speak" action.
-    var bubbleTts by remember { mutableStateOf<TextToSpeech?>(null) }
-    var pendingSpeak by remember { mutableStateOf<String?>(null) }
     // Transient hint line (save confirmations, dictation errors).
     var hint by remember { mutableStateOf<String?>(null) }
     // #66: list index of the user turn being edited (applied on send).
@@ -186,13 +182,9 @@ fun ChatScreen(
             emptyList()
         }
 
-    // #65/#72: release the standalone TTS + recognizer with the screen.
+    // #72: release the dictation recognizer with the screen.
     DisposableEffect(Unit) {
         onDispose {
-            bubbleTts?.let { tts ->
-                runCatching { tts.stop() }
-                runCatching { tts.shutdown() }
-            }
             dictRecognizer?.let { rec -> runCatching { rec.destroy() } }
         }
     }
@@ -495,27 +487,6 @@ fun ChatScreen(
         }
     }
 
-    /** #65: read a bubble aloud with a lazy standalone TTS (main thread). */
-    fun speakText(text: String) {
-        val existing = bubbleTts
-        if (existing != null) {
-            existing.stop()
-            existing.speak(text, TextToSpeech.QUEUE_FLUSH, null, "bubble-speak")
-            return
-        }
-        pendingSpeak = text
-        bubbleTts = TextToSpeech(context.applicationContext) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                pendingSpeak?.let { pending ->
-                    bubbleTts?.speak(
-                        pending, TextToSpeech.QUEUE_FLUSH, null, "bubble-speak"
-                    )
-                }
-            }
-            pendingSpeak = null
-        }
-    }
-
     /** #72: stop the inline dictation recognizer (main thread). */
     fun stopDictation() {
         dictating = false
@@ -599,7 +570,6 @@ fun ChatScreen(
                 hint = "Copied"
             }
 
-            BubbleAction.SPEAK -> speakText(msg.text)
             BubbleAction.SAVE -> {
                 scope.launch(Dispatchers.IO) {
                     db.addFact(MemoryCategories.PERSONAL, msg.text)
@@ -1263,13 +1233,6 @@ private fun MessageBubble(
                         onClick = {
                             menuOpen = false
                             onAction(BubbleAction.COPY, msg)
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Speak") },
-                        onClick = {
-                            menuOpen = false
-                            onAction(BubbleAction.SPEAK, msg)
                         }
                     )
                     DropdownMenuItem(

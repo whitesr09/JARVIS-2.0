@@ -27,6 +27,8 @@ import com.nshd.jarvis2.hands.DeepIntents
 import com.nshd.jarvis2.hands.TaskState
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.brain.tools.ToolRegistry
+import com.nshd.jarvis2.brain.tools.SendAnswer
+import com.nshd.jarvis2.brain.tools.SendAsk
 import com.nshd.jarvis2.brain.tools.ToolResult
 import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.memory.MemoryDb
@@ -81,8 +83,6 @@ data class VoiceUiState(
      * never linger under a later "speaking" state.
      */
     val sttHint: String? = null,
-    /** F5: device-TTS voice actually in use (Universal mode only). */
-    val ttsVoiceName: String = "",
     val errorMessage: String? = null
 )
 
@@ -110,8 +110,7 @@ data class LiveDiagnosis(
  *    the user never lands on a dead error screen while Universal runs.
  *  - UNIVERSAL (works with ANY provider/model): SpeechRecognizer with
  *    partial results → AgentPipeline (the Chat pipeline) with streamed
- *    deltas → sentence-buffered TTS, so the first audio starts at the
- *    first sentence boundary. Listen → think → speak → listen until
+ *    deltas → live text captions. Listen → think → read → listen until
  *    the user ends the session.
  *
  * Engine choice: JarvisSettings.voiceEngine — AUTO picks Native Live
@@ -298,8 +297,8 @@ object VoiceSessionManager {
     @Volatile
     private var mediaListenBlocked = false
 
-    // Universal-turn bookkeeping: listening resumes only when BOTH the
-    // pipeline has returned AND the TTS queue has drained.
+    // Universal-turn bookkeeping: listening resumes once the
+    // pipeline has returned (v2.0.2: text-only, no speech queue).
     @Volatile
     private var pipelineRunning = false
 
@@ -307,7 +306,6 @@ object VoiceSessionManager {
     private var pipelineDone = true
 
     @Volatile
-    private var ttsSpeaking = false
 
     /**
      * v1.8 (#8): "Stop reading" was tapped for the CURRENT turn —
@@ -350,6 +348,15 @@ object VoiceSessionManager {
     private var gateArmed = false
 
     private var gateWatcherStarted = false
+
+    // ── v2.0.2 SendAsk host: spoken just-in-time send answers ──────
+    // Mirrors the GateHost above, but for SendAsk (no card/dialog):
+    // while a send ask raised by THIS session's own voice turn is
+    // pending, the recognizer listens for a one-shot yes/no reply.
+    @Volatile
+    private var sendAskArmed = false
+
+    private var sendAskWatcherStarted = false
 
     // ── F7/I mis-script guard ─────────────────────────────────────────
     // A final STT result dominated by an Indic script while the
@@ -430,7 +437,8 @@ object VoiceSessionManager {
         when (_uiState.value.mode) {
             VoiceMode.UNIVERSAL -> {
                 if (_uiState.value.micMuted) setMicMuted(false)
-                universal?.stopSpeaking()
+                // v2.0.2: nothing is ever spoken, so there is no speech
+                // to stop — just restart listening.
                 startCurrentListening()
             }
             VoiceMode.LIVE -> setMicMuted(false)
@@ -511,7 +519,6 @@ object VoiceSessionManager {
         guardUsedThisTurn = false
         pipelineRunning = false
         pipelineDone = true
-        ttsSpeaking = false
         readingSuppressed = false
         callPaused = false
         callResumePending = false
@@ -642,8 +649,6 @@ object VoiceSessionManager {
             biometricsEnrolled = prefs.getBoolean("biometrics_enrolled", false),
             biometricsSampleCount = prefs.getInt("biometrics_sample_count", 0),
             biometricsEnrolledDate = prefs.getString("biometrics_enrolled_date", "") ?: "",
-            ttsRate = prefs.getFloat(KEY_TTS_RATE, UniversalVoice.DEFAULT_TTS_RATE),
-            ttsPitch = prefs.getFloat(KEY_TTS_PITCH, UniversalVoice.DEFAULT_TTS_PITCH),
             // v1.9.0: wake-started sessions honour the same new
             // settings as UI-started ones.
             customPersonaName = prefs.getString("custom_persona_name", "") ?: "",
@@ -708,13 +713,11 @@ object VoiceSessionManager {
         if (muted) _amplitude.value = 0f
         val uv = universal
         if (uv != null) {
-            // On the Universal path the recognizer IS the mic, and the
-            // mic button doubles as TTS barge-in: muting stops both
-            // listening and speaking.
+            // On the Universal path the recognizer IS the mic, so
+            // muting stops listening (v2.0.2: nothing is spoken).
             if (muted) {
                 uv.stopListening()
                 voskCommands?.stopListening()
-                uv.stopSpeaking()
             } else if (active) {
                 maybeResumeUniversalListening()
             }
@@ -723,11 +726,10 @@ object VoiceSessionManager {
 
     /**
      * v1.8 (#8): "Stop reading" (Voice screen chip, shown while
-     * SPEAKING). Halts the current spoken reply WITHOUT ending the
-     * session: Universal TTS stops and the rest of this turn's
-     * streamed sentences are suppressed; on the Live path the queued
-     * model audio is flushed. Listening resumes through the normal
-     * drain path.
+     * SPEAKING). v2.0.2: replies are text-only, so on Universal there
+     * is no speech to halt — the chip only suppresses the rest of
+     * this turn's text and ends the session state cleanly; on the
+     * Live path queued model audio is flushed (it is never played).
      */
     fun stopReading() {
         if (!active) return
@@ -735,7 +737,7 @@ object VoiceSessionManager {
         readingSuppressed = true
         pulseJob?.cancel()
         when (_uiState.value.mode) {
-            VoiceMode.UNIVERSAL -> universal?.stopSpeaking()
+            VoiceMode.UNIVERSAL -> Unit // v2.0.2: text-only replies — nothing spoken to stop.
             VoiceMode.LIVE -> {
                 player?.flush()
                 if (_uiState.value.status == VoiceStatus.SPEAKING) {
@@ -852,7 +854,6 @@ object VoiceSessionManager {
                     VoiceMode.UNIVERSAL -> {
                         universal?.stopListening()
                         voskCommands?.stopListening()
-                        universal?.stopSpeaking()
                     }
                     VoiceMode.NONE -> Unit
                 }
@@ -905,7 +906,6 @@ object VoiceSessionManager {
         universal = null
         universalListener = null
         pipelineRunning = false
-        ttsSpeaking = false
         userTurn.setLength(0)
         assistantTurn.setLength(0)
         userCaptionIndex = -1
@@ -1234,7 +1234,7 @@ object VoiceSessionManager {
     private fun handleLiveFailure(message: String) {
         // F4.1: this is called from GeminiLiveClient callbacks, which
         // run on OkHttp WebSocket threads. The Universal switch below
-        // constructs SpeechRecognizer / TextToSpeech — main-thread-only
+        // constructs SpeechRecognizer — main-thread-only
         // APIs whose off-main use is a prime "crashes while connecting"
         // suspect — so the whole failure path is marshalled to Main.
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -1433,7 +1433,9 @@ object VoiceSessionManager {
             if (!active) return
             synchronized(assistantTurn) { assistantTurn.append(text) }
             setTurnCaption(fromUser = false, text = assistantTurn.toString(), partial = true)
-            setStatus(VoiceStatus.SPEAKING)
+            // v2.0.2: text-only replies — the model generating text is
+            // THINKING, never SPEAKING (nothing is played aloud).
+            setStatus(VoiceStatus.THINKING)
         }
 
         override fun onAudioChunk(bytes: ByteArray) {
@@ -1442,9 +1444,12 @@ object VoiceSessionManager {
                 liveFirstFrameLogged = true
                 CrashLogger.stage(TAG, "live: first audio frame received")
             }
-            player?.enqueue(bytes)
-            if (_uiState.value.status != VoiceStatus.SPEAKING) {
-                setStatus(VoiceStatus.SPEAKING)
+            // v2.0.2: Live audio deltas are DISCARDED, never played —
+            // replies are text-only. The setup JSON modality is
+            // deliberately untouched (changing it risks another
+            // setup-rejection class like the v2.0.1 sensitivity bug).
+            if (_uiState.value.status == VoiceStatus.SPEAKING) {
+                setStatus(VoiceStatus.LISTENING)
             }
         }
 
@@ -1645,7 +1650,7 @@ object VoiceSessionManager {
     // ── UNIVERSAL path ─────────────────────────────────────────────────
 
     private fun startUniversal() {
-        // F4.1: SpeechRecognizer / TextToSpeech are main-thread-only.
+        // F4.1: SpeechRecognizer is main-thread-only.
         // However we got here (UI tap — fine; a Live failure marshalled
         // through handleLiveFailure — also fine; any future caller),
         // never construct the engine off Main.
@@ -1689,28 +1694,9 @@ object VoiceSessionManager {
                 "language memory: starting in '$universalLanguageName' (setting: Auto)"
             )
         }
-        val uv = UniversalVoice(
-            ctx, universalLanguageName, listener,
-            // F5.1: TTS tuning providers read the persisted slider
-            // values LIVE on every reply, so speed/pitch changes in
-            // Settings apply without restarting the session.
-            ttsRate = {
-                ctx.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
-                    .getFloat(KEY_TTS_RATE, UniversalVoice.DEFAULT_TTS_RATE)
-            },
-            ttsPitch = {
-                ctx.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
-                    .getFloat(KEY_TTS_PITCH, UniversalVoice.DEFAULT_TTS_PITCH)
-            },
-            // v1.8 (#7): the user's explicit device-TTS voice choice
-            // ("" = auto) — selectBestVoice prefers an exact name match.
-            ttsVoiceName = { settings?.ttsVoiceName ?: "" },
-            // v1.8 (#4): Universal barge-in sensitivity + the gate
-            // veto (a spoken-gate listen must never barge in — its
-            // partial IS the confirmation reply, not an interruption).
-            bargeInSensitivity = { settings?.bargeInSensitivity ?: "NORMAL" },
-            bargeInAllowed = { !gateArmed }
-        )
+        // v2.0.2: STT only — no TTS engine, no voice tuning, no
+        // barge-in (there is no speech to interrupt).
+        val uv = UniversalVoice(ctx, universalLanguageName, listener)
         universal = uv
         if (!uv.isRecognitionAvailable()) {
             // F5: when Native Live already failed this session, its
@@ -1869,6 +1855,7 @@ object VoiceSessionManager {
      * yes/no intercept and start listening for it.
      */
     private fun startGateWatcherIfNeeded() {
+        startSendAskWatcherIfNeeded()
         if (gateWatcherStarted) return
         gateWatcherStarted = true
         scope.launch {
@@ -1882,6 +1869,36 @@ object VoiceSessionManager {
                     AppLog.i(
                         "Gate",
                         "gate #${pending.id} pending during a voice turn — " +
+                            "listening for a spoken yes/no"
+                    )
+                    startCurrentListening()
+                }
+            }
+        }
+    }
+
+    /**
+     * v2.0.2: watch SendAsk for the lifetime of the process (started
+     * once, beside the gate watcher). A send ask that appears while
+     * THIS manager's Universal pipeline turn is running belongs to
+     * that turn: arm the spoken yes/no intercept and listen for it.
+     * The ask text itself already reached the user as a caption via
+     * the pipeline's onAssistantDelta sink — never spoken.
+     */
+    private fun startSendAskWatcherIfNeeded() {
+        if (sendAskWatcherStarted) return
+        sendAskWatcherStarted = true
+        scope.launch {
+            SendAsk.pending.collect { pending ->
+                if (pending == null) {
+                    sendAskArmed = false
+                } else if (active && _uiState.value.mode == VoiceMode.UNIVERSAL &&
+                    pipelineRunning && !_uiState.value.micMuted
+                ) {
+                    sendAskArmed = true
+                    AppLog.i(
+                        "SendAsk",
+                        "ask #${pending.id} pending during a voice turn — " +
                             "listening for a spoken yes/no"
                     )
                     startCurrentListening()
@@ -2030,11 +2047,6 @@ object VoiceSessionManager {
             }
         }
 
-        override fun onTtsVoiceSelected(voiceName: String) {
-            if (!active) return
-            _uiState.value = _uiState.value.copy(ttsVoiceName = voiceName)
-        }
-
         override fun onPartialResult(text: String) {
             if (!active) return
             if (!universalFirstPartialLogged) {
@@ -2051,6 +2063,47 @@ object VoiceSessionManager {
 
         override fun onFinalResult(text: String) {
             if (!active) return
+            // v2.0.2 SendAsk host: while a just-in-time send ask from
+            // THIS voice turn is pending, the utterance is its yes/no
+            // reply — never a new command. Same word patterns as the
+            // gate replies, plus "don't" (see SendAsk.parseAnswer).
+            val pendingAsk = SendAsk.pending.value
+            if (sendAskArmed && pendingAsk != null) {
+                when (SendAsk.answer(text)) {
+                    SendAnswer.YES -> {
+                        sendAskArmed = false
+                        AppLog.i("SendAsk", "spoken reply APPROVED ask #${pendingAsk.id}")
+                        addCaption(
+                            VoiceCaption(
+                                fromUser = false,
+                                text = "Confirmed — sending.",
+                                kind = CaptionKind.SYSTEM,
+                                partial = false
+                            )
+                        )
+                    }
+                    SendAnswer.NO -> {
+                        sendAskArmed = false
+                        AppLog.i("SendAsk", "spoken reply DENIED ask #${pendingAsk.id}")
+                        addCaption(
+                            VoiceCaption(
+                                fromUser = false,
+                                text = "Not sending.",
+                                kind = CaptionKind.SYSTEM,
+                                partial = false
+                            )
+                        )
+                    }
+                    SendAnswer.NON_ANSWER -> {
+                        AppLog.d(
+                            "SendAsk",
+                            "utterance was not a yes/no — send ask re-asks once"
+                        )
+                        startCurrentListening()
+                    }
+                }
+                return
+            }
             // F7 GateHost (c): while a gate from THIS voice turn is
             // pending, the utterance is its yes/no reply — it must
             // never be routed as a new command.
@@ -2130,9 +2183,8 @@ object VoiceSessionManager {
                 universal?.startListeningWithLanguage(altTag)
                 return
             }
-            // F7/F: dispatch is immediate — no TTS drain or handler
-            // delay sits between the final result and the pipeline
-            // (playing TTS is stopped by the normal barge-in paths).
+            // F7/F: dispatch is immediate — no handler delay sits
+            // between the final result and the pipeline.
             dispatchUniversalFinal(text)
         }
 
@@ -2184,7 +2236,7 @@ object VoiceSessionManager {
                     _uiState.value.mode == VoiceMode.UNIVERSAL &&
                     !_uiState.value.micMuted && !mediaListenBlocked &&
                     !offlineSttActive &&
-                    (!pipelineRunning || gateArmed)
+                    (!pipelineRunning || gateArmed || sendAskArmed)
                 ) {
                     setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
                     universal?.startListening()
@@ -2192,23 +2244,6 @@ object VoiceSessionManager {
             }
         }
 
-        override fun onTtsQueueDrained() {
-            if (!active) return
-            ttsSpeaking = false
-            pulseJob?.cancel()
-            _amplitude.value = 0f
-            maybeResumeUniversalListening()
-        }
-
-        override fun onTtsUnavailable() {
-            if (!active) return
-            AppLog.w("TTS", "device TTS unavailable — replies are text-only")
-            _uiState.value = _uiState.value.copy(
-                sttHint = "Text-to-speech is unavailable on this device — replies are text-only."
-            )
-            // Behave like a finished speak so the loop continues.
-            onTtsQueueDrained()
-        }
     }
 
     /** F5: pipeline failure replies — friendly-mapped before display/speech. */
@@ -2226,18 +2261,12 @@ object VoiceSessionManager {
         AppLog.d("Agent", "user turn received (${userText.length} chars)")
         pipelineRunning = true
         pipelineDone = false
-        ttsSpeaking = false
         val silent = isSilent
-        val sentenceBuffer = StringBuilder()
-        var sawDelta = false
-        // F5.1: the FIRST spoken chunk of a reply flushes at a clause
-        // boundary (see extractSentences) so speech starts sooner.
-        var firstChunkFlushed = false
         scope.launch {
             // Universal voice uses exactly the same pipeline as text
             // chat: local memory commands, deterministic quick commands
             // (which work with no API key), then the tool agent loop —
-            // now with streamed deltas for live captions + early TTS.
+            // now with streamed deltas for live captions (text-only).
             val reply = try {
                 AgentPipeline.handleUserText(
                     context = ctx,
@@ -2262,27 +2291,17 @@ object VoiceSessionManager {
                             )
                         )
                     },
+                    // v2.0.2: deltas are CAPTIONS ONLY — nothing is
+                    // spoken. A just-in-time send ask also arrives here
+                    // (via the pipeline's ask sink) as a plain caption.
                     onAssistantDelta = { delta ->
                         if (!active) return@handleUserText
-                        sawDelta = true
                         synchronized(assistantTurn) { assistantTurn.append(delta) }
                         setTurnCaption(
                             fromUser = false,
                             text = assistantTurn.toString(),
                             partial = true
                         )
-                        if (!silent) {
-                            // Deltas arrive on the streaming thread; the
-                            // buffer is only touched under its lock.
-                            val ready = synchronized(sentenceBuffer) {
-                                extractSentences(
-                                    sentenceBuffer, delta,
-                                    allowClauseCut = !firstChunkFlushed
-                                )
-                            }
-                            if (ready.isNotEmpty()) firstChunkFlushed = true
-                            ready.forEach { sentence -> speakUniversalSentence(sentence) }
-                        }
                     }
                 )
             } catch (e: Exception) {
@@ -2296,7 +2315,7 @@ object VoiceSessionManager {
             if (!active) return@launch
             val failed = isFailureReply(reply)
             // F5 error hygiene: a failed turn's raw provider text never
-            // becomes the caption, the chat history, or speech. The
+            // becomes the caption or the chat history. The
             // caption/history get the FriendlyErrors headline; the raw
             // text already lives in AppLog under the API tag.
             val displayReply = if (failed) FriendlyErrors.map(reply).headline else reply
@@ -2323,57 +2342,23 @@ object VoiceSessionManager {
                 }
                 failed -> {
                     chime?.playError()
-                    sentenceBuffer.setLength(0)
-                    // Speak ONLY the short friendly line — never the
-                    // raw failure text (F5). The drain callback (or the
-                    // !ttsSpeaking check) resumes listening.
-                    speakUniversalSentence(
-                        "Sorry, I couldn't reach the model — check the connection."
-                    )
-                    if (!ttsSpeaking) maybeResumeUniversalListening()
+                    // v2.0.2: the friendly line is text-only (caption +
+                    // history already hold it) — listening resumes at once.
+                    maybeResumeUniversalListening()
                 }
                 else -> {
-                    // Non-streamed replies (quick commands, memory
-                    // commands) never produced deltas — run the full
-                    // reply through the sentence extractor now so it is
-                    // still spoken.
-                    if (!sawDelta) {
-                        extractSentences(sentenceBuffer, reply).forEach { sentence ->
-                            speakUniversalSentence(sentence)
-                        }
-                    }
-                    // Speak whatever partial sentence is left over, then
-                    // let the TTS-drain callback resume listening. If no
-                    // sentence was ever queued, resume right away.
-                    val rest = sentenceBuffer.toString().trim()
-                    sentenceBuffer.setLength(0)
-                    if (rest.isNotBlank()) speakUniversalSentence(rest)
-                    if (!ttsSpeaking) maybeResumeUniversalListening()
+                    // v2.0.2: the reply is already in captions/history
+                    // as text — listening resumes at once.
+                    maybeResumeUniversalListening()
                 }
             }
         }
     }
 
-    private fun speakUniversalSentence(sentence: String) {
-        if (!active) return
-        // v1.8 (#8): "Stop reading" swallows the rest of this turn's
-        // sentences — the reply still lands in captions/history.
-        if (readingSuppressed) return
-        if (!ttsSpeaking) {
-            ttsSpeaking = true
-            // F5: speaking buries any stale recognizer hint.
-            _uiState.value = _uiState.value.copy(sttHint = null)
-            setStatus(VoiceStatus.SPEAKING)
-            startSpeakingPulse()
-        }
-        universal?.speakSentence(sentence)
-    }
-
     /**
-     * Listening resumes only when the pipeline has finished AND the
-     * TTS queue has drained. Called from the drain callback and from
-     * turn-end/unmute paths where nothing was (or is still) spoken;
-     * while speech is in flight the drain callback owns the resume.
+     * Listening resumes once the pipeline has finished (v2.0.2:
+     * replies are text-only, so there is no speech queue to drain).
+     * Called from turn-end/unmute paths.
      */
     private fun maybeResumeUniversalListening() {
         if (!active) return
@@ -2385,89 +2370,8 @@ object VoiceSessionManager {
         if (mediaListenBlocked) return
         if (_uiState.value.micMuted) return
         if (pipelineRunning || !pipelineDone) return
-        if (ttsSpeaking) return // drain callback resumes when speech ends
         setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
         startCurrentListening()
-    }
-
-    /**
-     * Appends [delta] to [buffer] and cuts out every completed
-     * sentence, leaving the trailing partial sentence in the buffer.
-     * A sentence counts as complete at [.!?…] followed by whitespace;
-     * an over-long fragment is cut at a word boundary so one giant
-     * utterance never stalls the speech.
-     *
-     * F5.1: while [allowClauseCut] is set (the reply's first chunk
-     * only) and no sentence end is buffered yet, the first clause
-     * boundary — `,` `;` `:` followed by a space, or `—` — at a chunk
-     * length of ≥ [FIRST_CLAUSE_MIN_CHARS] also cuts, so the user
-     * hears speech start noticeably sooner. The trailing space check
-     * keeps decimals ("1,000") and times ("12:30") unbroken; later
-     * chunks always wait for full sentences.
-     */
-    private fun extractSentences(
-        buffer: StringBuilder,
-        delta: String,
-        allowClauseCut: Boolean = false
-    ): List<String> {
-        buffer.append(delta)
-        val sentences = mutableListOf<String>()
-        while (true) {
-            val text = buffer.toString()
-            var cut = -1
-            var i = 0
-            while (i < text.length) {
-                val c = text[i]
-                if (c == '.' || c == '!' || c == '?' || c == '…') {
-                    if (i + 1 >= text.length) break // ender at buffer edge: wait for more
-                    if (text[i + 1] == ' ' || text[i + 1] == '\n') {
-                        cut = i + 1
-                        break
-                    }
-                }
-                i++
-            }
-            if (cut < 0 && allowClauseCut && sentences.isEmpty()) {
-                var j = FIRST_CLAUSE_MIN_CHARS - 1
-                while (j < text.length) {
-                    val c = text[j]
-                    val isClause = when (c) {
-                        ',', ';', ':' ->
-                            j + 1 < text.length &&
-                                (text[j + 1] == ' ' || text[j + 1] == '\n')
-                        '—' -> true
-                        else -> false
-                    }
-                    if (isClause) {
-                        cut = j + 1
-                        break
-                    }
-                    j++
-                }
-            }
-            if (cut < 0 && text.length > 240) {
-                val space = text.lastIndexOf(' ', 240)
-                if (space > 40) cut = space
-            }
-            if (cut < 0) break
-            val sentence = text.substring(0, cut).trim()
-            buffer.delete(0, cut)
-            if (sentence.isNotBlank()) sentences += sentence
-        }
-        return sentences
-    }
-
-    /** TTS has no real amplitude — synthesize a gentle pulse for the orb. */
-    private fun startSpeakingPulse() {
-        pulseJob?.cancel()
-        pulseJob = scope.launch {
-            var t = 0f
-            while (true) {
-                t += 0.35f
-                _amplitude.value = 0.35f + 0.25f * kotlin.math.sin(t)
-                delay(90)
-            }
-        }
     }
 
     // ── Caption bookkeeping ────────────────────────────────────────────
@@ -2546,12 +2450,8 @@ object VoiceSessionManager {
     /** F5.1: retained ONLY so the legacy persisted handle can be removed. */
     private const val KEY_RESUMPTION_HANDLE = "resumption_handle"
     private const val SETTINGS_PREFS = "jarvis_settings"
-    private const val KEY_TTS_RATE = "tts_rate"
-    private const val KEY_TTS_PITCH = "tts_pitch"
     /** v1.9.0 (#6): last STT language that produced a clean final. */
     private const val KEY_STT_LAST_CLEAN = "stt_last_clean_language"
-    /** F5.1: minimum first-chunk length before a clause cut is allowed. */
-    private const val FIRST_CLAUSE_MIN_CHARS = 24
     private const val MAX_RECONNECTS = 3
     private const val TAG = "voice"
     private const val MIC_ACQUIRE_TIMEOUT_MS = 900L

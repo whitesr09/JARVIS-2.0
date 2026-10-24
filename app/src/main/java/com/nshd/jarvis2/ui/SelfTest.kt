@@ -7,7 +7,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
 import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
 import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.ProbeStatus
@@ -72,24 +71,13 @@ object SelfTest {
             }
         )
 
-        // 3) TTS engine present (service query — no engine is started).
-        val ttsServices = runCatching {
-            appContext.packageManager.queryIntentServices(
-                Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0
-            )
-        }.getOrDefault(emptyList())
-        val googleTts = ttsServices.any {
-            it.serviceInfo.packageName == UniversalVoice.GOOGLE_TTS_ENGINE
-        }
+        // 3) v2.0.2: TTS is removed — replies are always text-only, so
+        // there is no TTS engine check anymore (check numbering kept
+        // stable for the diagnostics log).
         results += SelfTestResult(
             name = "Text-to-speech",
-            passed = ttsServices.isNotEmpty(),
-            detail = when {
-                googleTts -> "Google TTS engine present (preferred voice)"
-                ttsServices.isNotEmpty() ->
-                    "TTS engine present: ${ttsServices.first().serviceInfo.packageName}"
-                else -> "No TTS engine installed — replies will be text-only"
-            }
+            passed = true,
+            detail = "Removed in v2.0.2 — replies are text-only by design"
         )
 
         // 4) Accessibility service alive.

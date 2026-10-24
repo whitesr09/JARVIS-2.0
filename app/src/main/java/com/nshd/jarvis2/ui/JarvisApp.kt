@@ -410,21 +410,17 @@ fun JarvisApp(
                 if (showWhatsNew) {
                     AlertDialog(
                         onDismissRequest = { showWhatsNew = false },
-                        title = { Text("What's new in v2.0.1") },
+                        title = { Text("What's new in v2.0.2") },
                         text = {
                             Text(
-                                "Live voice fix: Gemini was rejecting " +
-                                    "the Live setup itself, so Live never " +
-                                    "connected on strict models. The bad " +
-                                    "value is fixed — and the setup now " +
-                                    "heals itself: if a model rejects a " +
-                                    "setup option, Jarvis removes just " +
-                                    "that option and retries automatically. " +
-                                    "Also new in Hands-Free & App Control: " +
-                                    "Overlay appearance — an avatar " +
-                                    "opacity slider, plus panel size and " +
-                                    "panel background opacity sliders for " +
-                                    "the floating task panel, applied live."
+                                "Orb always renders whole now, even at " +
+                                    "low quality — no more half-orb. Voice " +
+                                    "replies are text-only (no spoken " +
+                                    "replies, no mic sounds). And sends " +
+                                    "confirm just before sending: after " +
+                                    "the message is typed and verified, " +
+                                    "Jarvis asks in plain text and only " +
+                                    "sends on your yes."
                             )
                         },
                         confirmButton = {

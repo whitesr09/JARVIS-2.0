@@ -415,7 +415,7 @@ class WakeWordService : Service(), RecognitionListener {
 
     /**
      * F3 background wake: hearing the wake phrase NEVER opens the app.
-     * The earcon plays, the mic is handed to a background voice session
+     * The mic is handed to a background voice session
      * via [VoiceSessionManager.startFromWake], and the user keeps doing
      * whatever they were doing. Only a failure (mic permission, engine
      * error) surfaces anything — a notification whose tap may open the
@@ -428,7 +428,6 @@ class WakeWordService : Service(), RecognitionListener {
         WakeWordControl.setWakeMicHeld(false)
         pauseReasons += REASON_WAKE_TRANSIENT
         acquireWakeLockBriefly()
-        chime.playEarcon()
         WakeState.set(
             WakeStatus(
                 enabled = true,

@@ -10,7 +10,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
-import android.speech.tts.TextToSpeech
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -158,15 +157,13 @@ fun SettingsScreen(
     var personaTesting by remember { mutableStateOf(false) }
     var showLanguage by remember { mutableStateOf(false) }
     var showVoiceEngine by remember { mutableStateOf(false) }
-    // Plan v1.8.0 dialogs: barge-in (#4), TTS voice picker (#7),
+    // Plan v1.8.0 dialogs: barge-in (#4),
     // chat text size (#93), backup/restore (#101), transparency (#79).
     var showBargeIn by remember { mutableStateOf(false) }
-    var showTtsVoices by remember { mutableStateOf(false) }
     var showChatFont by remember { mutableStateOf(false) }
     var showBackup by remember { mutableStateOf(false) }
     var showKnows by remember { mutableStateOf(false) }
     var restoreJsonText by remember { mutableStateOf("") }
-    var ttsVoiceList by remember { mutableStateOf<List<android.speech.tts.Voice>>(emptyList()) }
     var knowsText by remember { mutableStateOf("") }
     var showTheme by remember { mutableStateOf(false) }
     var showVoice by remember { mutableStateOf(false) }
@@ -192,94 +189,6 @@ fun SettingsScreen(
     }
     val memoryDb = remember { MemoryDb(context) }
     val identityInfo = remember { loadIdentityInfo(context) }
-
-    // ── TTS voice preview (F5.1) ───────────────────────────────────────
-    // Standalone throwaway engine for the Voice section's "Test voice"
-    // button — created lazily on first tap, shut down when this screen
-    // leaves composition. Hoisted here per the F4 fixed-call-site rule.
-    var ttsPreview by remember { mutableStateOf<TextToSpeech?>(null) }
-    val latestSettings by rememberUpdatedState(settings)
-    DisposableEffect(Unit) {
-        onDispose {
-            runCatching { ttsPreview?.stop() }
-            runCatching { ttsPreview?.shutdown() }
-        }
-    }
-
-    /** Speaks the preview line with the CURRENT speed/pitch sliders. */
-    fun speakTtsPreview() {
-        runCatching {
-            val s = latestSettings
-            val text = "Hi ${s.callsign}, this is how I sound now."
-            val existing = ttsPreview
-            if (existing != null) {
-                existing.setSpeechRate(s.ttsRate)
-                existing.setPitch(s.ttsPitch)
-                existing.speak(text, TextToSpeech.QUEUE_FLUSH, null, "tts-preview")
-            } else {
-                ttsPreview = TextToSpeech(context.applicationContext) { status ->
-                    if (status == TextToSpeech.SUCCESS) {
-                        runCatching {
-                            ttsPreview?.let { engine ->
-                                engine.setSpeechRate(s.ttsRate)
-                                engine.setPitch(s.ttsPitch)
-                                engine.speak(
-                                    text, TextToSpeech.QUEUE_FLUSH, null, "tts-preview"
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // ── Plan #7: installed device-TTS voices for the picker ────────────
-    fun loadTtsVoices() {
-        runCatching {
-            val engine = ttsPreview ?: TextToSpeech(context.applicationContext) { status ->
-                if (status == TextToSpeech.SUCCESS) {
-                    runCatching {
-                        ttsVoiceList = (ttsPreview?.voices ?: emptySet())
-                            .sortedBy { it.name }
-                    }
-                }
-            }.also { ttsPreview = it }
-            val ready = runCatching { engine.voices }.getOrNull()
-            if (!ready.isNullOrEmpty()) {
-                ttsVoiceList = ready.sortedBy { it.name }
-            }
-        }
-    }
-
-    /** Plan #7: preview one named voice (or the automatic pick). */
-    fun previewTtsVoice(voiceName: String) {
-        runCatching {
-            val s = latestSettings
-            val text = "Hi ${s.callsign}, this is how I sound now."
-            fun speakWith(engine: TextToSpeech) {
-                runCatching {
-                    if (voiceName.isNotBlank()) {
-                        engine.voices?.firstOrNull { it.name == voiceName }
-                            ?.let { engine.voice = it }
-                    }
-                    engine.setSpeechRate(s.ttsRate)
-                    engine.setPitch(s.ttsPitch)
-                    engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "tts-voice-preview")
-                }
-            }
-            val existing = ttsPreview
-            if (existing != null) {
-                speakWith(existing)
-            } else {
-                ttsPreview = TextToSpeech(context.applicationContext) { status ->
-                    if (status == TextToSpeech.SUCCESS) {
-                        ttsPreview?.let { speakWith(it) }
-                    }
-                }
-            }
-        }
-    }
 
     // ── Plan #101: full backup / restore ───────────────────────────────
     fun exportBackup() {
@@ -971,79 +880,19 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = "Universal voice — device TTS",
+                text = "Universal voice — text-only replies",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "Speed and pitch for the Universal engine's spoken " +
-                    "replies (Gemini Live uses its own voices). Changes " +
-                    "apply from the next reply — no session restart needed.",
+                text = "v2.0.2: spoken replies are removed — the Universal " +
+                    "engine listens (STT) and answers in text (chat + " +
+                    "floating panel + Voice captions). No mic sounds.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(modifier = Modifier.height(10.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "TTS speed",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    text = String.format(Locale.US, "%.2f×", settings.ttsRate),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-            Slider(
-                value = settings.ttsRate,
-                onValueChange = { onSettingsChange(settings.copy(ttsRate = it)) },
-                valueRange = 0.80f..1.50f,
-                steps = 34,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "TTS pitch (girly ↔ deep)",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    text = String.format(Locale.US, "%.2f×", settings.ttsPitch),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-            Slider(
-                value = settings.ttsPitch,
-                onValueChange = { onSettingsChange(settings.copy(ttsPitch = it)) },
-                valueRange = 0.80f..1.60f,
-                steps = 39,
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedButton(
-                onClick = { speakTtsPreview() },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.PlayArrow,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Test voice")
-            }
             Spacer(modifier = Modifier.height(14.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            // Plan #7: pick the exact installed device voice.
-            GlassRow(
-                icon = Icons.Filled.RecordVoiceOver,
-                title = "Device voice (Universal)",
-                subtitle = settings.ttsVoiceName
-                    .ifBlank { "Automatic — best installed voice" },
-                showDivider = true,
-                onClick = { loadTtsVoices(); showTtsVoices = true }
-            )
             // Plan #4: how eagerly Jarvis may be interrupted.
             GlassRow(
                 icon = Icons.Filled.Mic,
@@ -1375,7 +1224,7 @@ fun SettingsScreen(
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "JARVIS • v2.0.1",
+                text = "JARVIS • v2.0.2",
                 style = MaterialTheme.typography.labelMedium.copy(
                     letterSpacing = 1.2.sp
                 ),
@@ -1880,56 +1729,6 @@ fun SettingsScreen(
                 }
             },
             confirmButton = { TextButton(onClick = { showBargeIn = false }) { Text("Done") } }
-        )
-    }
-
-    // Plan #7: device TTS voice picker with per-voice preview.
-    if (showTtsVoices) {
-        AlertDialog(
-            onDismissRequest = { showTtsVoices = false },
-            title = { Text("Device voice (Universal)") },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .height(420.dp)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    PersonaOption(
-                        name = "Automatic",
-                        desc = "The best installed voice for your language.",
-                        selected = settings.ttsVoiceName.isBlank()
-                    ) {
-                        onSettingsChange(settings.copy(ttsVoiceName = ""))
-                        previewTtsVoice("")
-                    }
-                    if (ttsVoiceList.isEmpty()) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Loading installed voices… if this stays " +
-                                "empty, no TTS engine on this phone exposes " +
-                                "a voice list.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    ttsVoiceList.forEach { voice ->
-                        PersonaOption(
-                            name = voice.name,
-                            desc = voice.locale.displayName +
-                                if (voice.isNetworkConnectionRequired) {
-                                    " • needs network"
-                                } else {
-                                    " • on-device"
-                                },
-                            selected = settings.ttsVoiceName == voice.name
-                        ) {
-                            onSettingsChange(settings.copy(ttsVoiceName = voice.name))
-                            previewTtsVoice(voice.name)
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showTtsVoices = false }) { Text("Done") } }
         )
     }
 

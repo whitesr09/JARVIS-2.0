@@ -311,24 +311,16 @@ private fun VoiceSessionBody(
         )
     }
 
-    // F5: in Universal mode, name the voice actually speaking — the
-    // DEVICE TTS voice — and make clear Gemini voices are Live-only.
-    if (uiState.mode == VoiceMode.UNIVERSAL && uiState.ttsVoiceName.isNotBlank()) {
+    // v2.0.2: Universal replies are text-only — no device-TTS voice
+    // line anymore (STT in, text answer out).
+    if (uiState.mode == VoiceMode.UNIVERSAL) {
         Text(
-            text = "Voice: ${uiState.ttsVoiceName} (device TTS)",
+            text = "Universal replies are text-only.",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier
                 .align(Alignment.CenterHorizontally)
                 .padding(top = 4.dp)
-        )
-        Text(
-            text = "Gemini voices work in Native Live; Universal uses the device voice.",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier
-                .align(Alignment.CenterHorizontally)
-                .padding(top = 2.dp)
         )
     }
 

@@ -47,14 +47,8 @@ data class JarvisSettings(
     val biometricsSampleCount: Int = 0,
     /** Human-readable enrollment date, e.g. "21 Oct 2026" ("" when none). */
     val biometricsEnrolledDate: String = "",
-    /** Device-TTS speed for the Universal voice (F5.1 slider, 0.80–1.50×). */
-    val ttsRate: Float = 1.18f,
-    /** Device-TTS pitch for the Universal voice (F5.1 slider, 0.80–1.60×; >1 = girlier). */
-    val ttsPitch: Float = 1.22f,
     /** Plan #4: Live barge-in sensitivity — "LOW" / "NORMAL" / "HIGH". */
     val bargeInSensitivity: String = "NORMAL",
-    /** Plan #7: chosen device-TTS voice name ("" = automatic best voice). */
-    val ttsVoiceName: String = "",
     /** Plan #93: chat message font size — "S" / "M" / "L". */
     val chatFontSize: String = "M",
     /** Plan #94: reduce-motion — calms orb + panel animations. */
@@ -302,10 +296,7 @@ class MainActivity : ComponentActivity() {
             biometricsEnrolled = prefs.getBoolean(KEY_BIO_ENROLLED, false),
             biometricsSampleCount = prefs.getInt(KEY_BIO_COUNT, 0),
             biometricsEnrolledDate = prefs.getString(KEY_BIO_DATE, "") ?: "",
-            ttsRate = prefs.getFloat(KEY_TTS_RATE, 1.18f),
-            ttsPitch = prefs.getFloat(KEY_TTS_PITCH, 1.22f),
             bargeInSensitivity = prefs.getString(KEY_BARGE_IN, "NORMAL") ?: "NORMAL",
-            ttsVoiceName = prefs.getString(KEY_TTS_VOICE, "") ?: "",
             chatFontSize = prefs.getString(KEY_CHAT_FONT, "M") ?: "M",
             reduceMotion = prefs.getBoolean(KEY_REDUCE_MOTION, false),
             panelHaptics = prefs.getBoolean(KEY_PANEL_HAPTICS, true),
@@ -351,10 +342,7 @@ class MainActivity : ComponentActivity() {
             .putBoolean(KEY_BIO_ENROLLED, s.biometricsEnrolled)
             .putInt(KEY_BIO_COUNT, s.biometricsSampleCount)
             .putString(KEY_BIO_DATE, s.biometricsEnrolledDate)
-            .putFloat(KEY_TTS_RATE, s.ttsRate)
-            .putFloat(KEY_TTS_PITCH, s.ttsPitch)
             .putString(KEY_BARGE_IN, s.bargeInSensitivity)
-            .putString(KEY_TTS_VOICE, s.ttsVoiceName)
             .putString(KEY_CHAT_FONT, s.chatFontSize)
             .putBoolean(KEY_REDUCE_MOTION, s.reduceMotion)
             .putBoolean(KEY_PANEL_HAPTICS, s.panelHaptics)
@@ -405,10 +393,7 @@ class MainActivity : ComponentActivity() {
         private const val KEY_BIO_ENROLLED = "biometrics_enrolled"
         private const val KEY_BIO_COUNT = "biometrics_sample_count"
         private const val KEY_BIO_DATE = "biometrics_enrolled_date"
-        private const val KEY_TTS_RATE = "tts_rate"
-        private const val KEY_TTS_PITCH = "tts_pitch"
         private const val KEY_BARGE_IN = "barge_in_sensitivity"
-        private const val KEY_TTS_VOICE = "tts_voice_name"
         private const val KEY_CHAT_FONT = "chat_font_size"
         private const val KEY_REDUCE_MOTION = "reduce_motion"
         private const val KEY_PANEL_HAPTICS = "panel_haptics"

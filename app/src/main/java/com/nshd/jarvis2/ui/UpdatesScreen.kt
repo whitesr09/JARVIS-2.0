@@ -91,6 +91,25 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v2.0.2 — Orb full-render fix, text-only replies, just-in-time send ask",
+            body = "Orb: at low quality the sphere used to draw only its " +
+                "first particles — a polar cap that looked like half an " +
+                "orb. It now stride-samples the whole sphere at any " +
+                "quality, and the per-frame scale is capped so the orb " +
+                "can never exceed its container. Voice: spoken replies " +
+                "are gone — STT in, TEXT answer out (chat + floating " +
+                "panel + Voice captions) — and the wake mic blip is " +
+                "removed too. Sends: confirmation no longer pops a card " +
+                "up front — after the chat opens and the message is " +
+                "typed and verified, Jarvis asks in plain text " +
+                "\"Ready to send to <name>? <full message>\" and only " +
+                "sends on your yes (voice or typed). Safety is " +
+                "unchanged: recipient + full text are still confirmed " +
+                "before every send."
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+
+        InfoCard(
             title = "v2.0.1 — Live self-healing + overlay appearance",
             body = "Live fix: Gemini was rejecting the voice setup " +
                 "itself (close code 1007 — an invalid speech-sensitivity " +

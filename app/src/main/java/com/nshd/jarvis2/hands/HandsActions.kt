@@ -87,8 +87,9 @@ object HandsActions {
 
     // ── F7 SendPermit ────────────────────────────────────────────────
     //
-    // The whatsapp_message tool runs its OWN ConfirmGate (every send
-    // confirms with recipient + full text — his standing rule). The
+    // The send tools run their OWN just-in-time SendAsk (v2.0.2:
+    // every send confirms with recipient + full text right before
+    // the tap — his standing rule). The
     // deep intent then taps WhatsApp's Send button, whose label
     // matches the guard's SEND class — so a SECOND gate fired for the
     // same already-approved send, in a context (WhatsApp foreground,
@@ -1097,7 +1098,7 @@ object HandsActions {
         if (labelText.isBlank()) return null
         val phrase = sensitivePhrase(labelText.lowercase()) ?: return null
         // F7 SendPermit: a SEND-class tap covered by a live permit
-        // (the whatsapp_message tool's own gate already approved THIS
+        // (the send tool's just-in-time ask already approved THIS
         // send) passes without a second gate. One-shot — consumed
         // here; SOCIAL/DESTRUCTIVE phrases never see the permit.
         if (phrase in SEND_PHRASES && consumeSendPermit(packageName)) {

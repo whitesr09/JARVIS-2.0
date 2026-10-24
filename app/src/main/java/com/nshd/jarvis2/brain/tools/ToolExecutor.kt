@@ -33,7 +33,10 @@ data class ToolResult(
  * Executes registry tools and enforces the Level 4 hard guardrails locally.
  * The model is never trusted to police itself: payment-like clicks/typing,
  * bulk calls and calls to numbers outside Contacts suspend in [ConfirmGate]
- * before any action runs.
+ * before any action runs. SENDS are different (v2.0.2): they suspend in
+ * [SendAsk] just-in-time — after the chat/composer is open and the text
+ * is filled + verified, before the send tap — never in a card, and
+ * never before the composer exists.
  */
 class ToolExecutor(
     context: Context,
@@ -830,13 +833,13 @@ class ToolExecutor(
         val message = args.requiredString("message") ?: return missing("message")
         // F7: the send chain is stage-logged end to end (tag "Send")
         // so a "not sending" report can be traced to the exact stage:
-        // routed → resolved → gate → opened → typed → tapped → verified.
+        // routed → resolved → opened → typed → verified → asked → tapped → verified.
         com.nshd.jarvis2.core.AppLog.i(
             "Send", "routed: whatsapp_message to '$contact' (${message.length} chars)"
         )
         // F7 plan: the panel walks these steps; "Confirm & send"
-        // (step 3) is the RUNNING step while the gate waits, so the
-        // user sees WHY the task is paused (see the gate block below).
+        // (step 3) is the RUNNING step while the just-in-time send
+        // ask waits, so the user sees WHY the task is paused.
         com.nshd.jarvis2.brain.TaskQueue.setPlanForRunning(
             listOf(
                 "Understand goal",
@@ -858,32 +861,35 @@ class ToolExecutor(
                 com.nshd.jarvis2.core.AppLog.i(
                     "Send", "contact resolved: '$contact' → $name (${resolution.contact.phone})"
                 )
-                // F3: EVERY message send is confirmed, always — the
-                // prompt names the recipient AND shows the full text.
+                // v2.0.2: NO upfront gate — the old
+                // whatsapp_message-always-ConfirmGate special case is
+                // DELETED. The just-in-time ask runs inside
+                // DeepIntents.whatsappMessage AFTER the chat opens and
+                // the field is verified, BEFORE the send tap. YES here
+                // grants the F7 SendPermit, so the approved send tap
+                // does not hit the tap guard's second gate (the F3
+                // double-gate that stalled sends). One permit per
+                // package variant; the guard consumes exactly one.
                 com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
-                com.nshd.jarvis2.core.AppLog.i(
-                    "Send", "gate shown: confirm send to $name"
-                )
-                val approved = ConfirmGate.confirm(
-                    "Send WhatsApp message to $name " +
-                        "(${resolution.contact.phone})?\n\nMessage: \"$message\""
-                )
-                com.nshd.jarvis2.core.AppLog.i(
-                    "Send", "gate decision: ${if (approved) "approved" else "denied/timeout"}"
-                )
-                if (!approved) {
+                if (SendAsk.isPending) {
                     return ToolResult(
                         false,
-                        "WhatsApp message was not confirmed, so nothing was sent."
+                        "Another send confirmation is already waiting — " +
+                            "answer that one first. Nothing was sent."
                     )
                 }
-                // F7 SendPermit: THIS approved send's tap on WhatsApp's
-                // Send button must not hit the tap guard's second gate
-                // (the F3 double-gate that stalled sends). One permit
-                // per package variant; the guard consumes exactly one.
-                HandsActions.grantSendPermit("com.whatsapp")
-                HandsActions.grantSendPermit("com.whatsapp.w4b")
-                val result = intents.whatsappMessage(resolution.contact.phone, message)
+                val result = intents.whatsappMessage(
+                    resolution.contact.phone, message
+                ) {
+                    val approved = SendAsk.ask(
+                        "$name (${resolution.contact.phone})", message
+                    )
+                    if (approved) {
+                        HandsActions.grantSendPermit("com.whatsapp")
+                        HandsActions.grantSendPermit("com.whatsapp.w4b")
+                    }
+                    approved
+                }
                 if (result.success) {
                     com.nshd.jarvis2.core.AppLog.i(
                         "Send", "verified: message sent to $name"
@@ -941,22 +947,34 @@ class ToolExecutor(
         }
     }
 
-    /** #43: send the latest gallery photo on WhatsApp — gated like every send. */
+    /** #43: send the latest gallery photo on WhatsApp — v2.0.2: the
+     * just-in-time ask runs inside the share flow, after the photo is
+     * attached and before the Send tap (never an upfront card). */
     private suspend fun whatsappPhoto(args: JSONObject): ToolResult {
         val contact = args.requiredString("contact") ?: return missing("contact")
+        if (SendAsk.isPending) {
+            return ToolResult(
+                false,
+                "Another send confirmation is already waiting — " +
+                    "answer that one first. Nothing was sent."
+            )
+        }
         return when (val resolution = contactsResolver.resolve(contact)) {
             is ContactResolution.Found -> {
                 val name = resolution.contact.displayName
-                val approved = ConfirmGate.confirm(
-                    "Send your most recent gallery photo on WhatsApp to " +
-                        "$name (${resolution.contact.phone})?"
-                )
-                if (!approved) {
-                    return ToolResult(false, "Photo send was not confirmed, so nothing was sent.")
-                }
-                HandsActions.grantSendPermit("com.whatsapp")
-                HandsActions.grantSendPermit("com.whatsapp.w4b")
-                intents.whatsappShareLatestPhoto(resolution.contact.phone).toToolResult()
+                intents.whatsappShareLatestPhoto(
+                    resolution.contact.phone
+                ) {
+                    val approved = SendAsk.ask(
+                        "$name (${resolution.contact.phone})",
+                        "Your most recent gallery photo"
+                    )
+                    if (approved) {
+                        HandsActions.grantSendPermit("com.whatsapp")
+                        HandsActions.grantSendPermit("com.whatsapp.w4b")
+                    }
+                    approved
+                }.toToolResult()
             }
             is ContactResolution.Ambiguous -> ToolResult(
                 false,
@@ -982,42 +1000,59 @@ class ToolExecutor(
                     "(e.g. from its notification), then ask again."
             )
         val title = intents.currentChatTitle(pkg) ?: "the open chat"
-        val approved = ConfirmGate.confirm(
-            "Reply on WhatsApp to $title?\n\nMessage: \"$message\""
-        )
-        if (!approved) {
-            return ToolResult(false, "Reply was not confirmed, so nothing was sent.")
+        if (SendAsk.isPending) {
+            return ToolResult(
+                false,
+                "Another send confirmation is already waiting — " +
+                    "answer that one first. Nothing was sent."
+            )
         }
-        HandsActions.grantSendPermit(pkg)
-        return intents.typeAndSendInOpenChat(pkg, message).toToolResult()
+        // v2.0.2: fill the open chat FIRST, then the just-in-time ask
+        // inside typeAndSendInOpenChat, then the send tap.
+        return intents.typeAndSendInOpenChat(pkg, message) {
+            val approved = SendAsk.ask(title, message)
+            if (approved) HandsActions.grantSendPermit(pkg)
+            approved
+        }.toToolResult()
     }
 
-    /** #45: Instagram DM — always-confirm rule, same as WhatsApp. */
+    /** #45: Instagram DM — always-confirm rule, same as WhatsApp,
+     * v2.0.2 via the just-in-time ask inside the DM flow (after the
+     * thread opens + the text is typed, before the send tap). */
     private suspend fun instagramMessage(args: JSONObject): ToolResult {
         val contact = args.requiredString("contact") ?: return missing("contact")
         val message = args.requiredString("message") ?: return missing("message")
-        val approved = ConfirmGate.confirm(
-            "Send Instagram DM to $contact?\n\nMessage: \"$message\""
-        )
-        if (!approved) {
-            return ToolResult(false, "Instagram DM was not confirmed, so nothing was sent.")
+        if (SendAsk.isPending) {
+            return ToolResult(
+                false,
+                "Another send confirmation is already waiting — " +
+                    "answer that one first. Nothing was sent."
+            )
         }
-        HandsActions.grantSendPermit("com.instagram.android")
-        return intents.instagramDm(contact, message).toToolResult()
+        return intents.instagramDm(contact, message) {
+            val approved = SendAsk.ask(contact, message)
+            if (approved) HandsActions.grantSendPermit("com.instagram.android")
+            approved
+        }.toToolResult()
     }
 
-    /** #46: Telegram message — always-confirm rule, same as WhatsApp. */
+    /** #46: Telegram message — always-confirm rule, same as WhatsApp,
+     * v2.0.2 via the just-in-time ask inside the message flow. */
     private suspend fun telegramMessage(args: JSONObject): ToolResult {
         val contact = args.requiredString("contact") ?: return missing("contact")
         val message = args.requiredString("message") ?: return missing("message")
-        val approved = ConfirmGate.confirm(
-            "Send Telegram message to $contact?\n\nMessage: \"$message\""
-        )
-        if (!approved) {
-            return ToolResult(false, "Telegram message was not confirmed, so nothing was sent.")
+        if (SendAsk.isPending) {
+            return ToolResult(
+                false,
+                "Another send confirmation is already waiting — " +
+                    "answer that one first. Nothing was sent."
+            )
         }
-        HandsActions.grantSendPermit("org.telegram.messenger")
-        return intents.telegramMessage(contact, message).toToolResult()
+        return intents.telegramMessage(contact, message) {
+            val approved = SendAsk.ask(contact, message)
+            if (approved) HandsActions.grantSendPermit("org.telegram.messenger")
+            approved
+        }.toToolResult()
     }
 
     /** #47: SMS via the default SMS app — resolved contact + gate first. */
@@ -1026,24 +1061,32 @@ class ToolExecutor(
         val message = args.requiredString("message") ?: return missing("message")
         if (ContactsResolver.looksLikePhone(contact)) {
             val number = ContactsResolver.normalizePhone(contact)
-            val approved = ConfirmGate.confirm(
-                "Send SMS to $number?\n\nMessage: \"$message\""
-            )
-            if (!approved) {
-                return ToolResult(false, "SMS was not confirmed, so nothing was sent.")
+            if (SendAsk.isPending) {
+                return ToolResult(
+                    false,
+                    "Another send confirmation is already waiting — " +
+                        "answer that one first. Nothing was sent."
+                )
             }
-            return intents.smsSend(number, message).toToolResult()
+            // v2.0.2: the just-in-time ask runs inside smsSend, after
+            // the composer opens, before the Send tap.
+            return intents.smsSend(number, message) {
+                SendAsk.ask(number, message)
+            }.toToolResult()
         }
         return when (val resolution = contactsResolver.resolve(contact)) {
             is ContactResolution.Found -> {
                 val name = resolution.contact.displayName
-                val approved = ConfirmGate.confirm(
-                    "Send SMS to $name (${resolution.contact.phone})?\n\nMessage: \"$message\""
-                )
-                if (!approved) {
-                    return ToolResult(false, "SMS was not confirmed, so nothing was sent.")
+                if (SendAsk.isPending) {
+                    return ToolResult(
+                        false,
+                        "Another send confirmation is already waiting — " +
+                            "answer that one first. Nothing was sent."
+                    )
                 }
-                intents.smsSend(resolution.contact.phone, message).toToolResult()
+                intents.smsSend(resolution.contact.phone, message) {
+                    SendAsk.ask("$name (${resolution.contact.phone})", message)
+                }.toToolResult()
             }
             is ContactResolution.Ambiguous -> ToolResult(
                 false,
@@ -1058,18 +1101,23 @@ class ToolExecutor(
         }
     }
 
-    /** #48: Gmail send — gate shows recipient + subject + body. */
+    /** #48: Gmail send — v2.0.2: the just-in-time ask inside
+     * gmailSend shows recipient + subject + body after compose is
+     * filled, before the Send tap. */
     private suspend fun gmailSend(args: JSONObject): ToolResult {
         val to = args.requiredString("to") ?: return missing("to")
         val subject = args.requiredString("subject") ?: return missing("subject")
         val body = args.requiredString("body") ?: return missing("body")
-        val approved = ConfirmGate.confirm(
-            "Send email via Gmail to $to?\n\nSubject: $subject\n\n$body"
-        )
-        if (!approved) {
-            return ToolResult(false, "Email was not confirmed, so nothing was sent.")
+        if (SendAsk.isPending) {
+            return ToolResult(
+                false,
+                "Another send confirmation is already waiting — " +
+                    "answer that one first. Nothing was sent."
+            )
         }
-        return intents.gmailSend(to, subject, body).toToolResult()
+        return intents.gmailSend(to, subject, body) {
+            SendAsk.ask(to, "Subject: $subject\n\n$body")
+        }.toToolResult()
     }
 
     // ── v2.0.0 tool implementations ──────────────────────────────────
@@ -1085,18 +1133,24 @@ class ToolExecutor(
         com.nshd.jarvis2.core.AppLog.i(
             "Send", "routed: whatsapp_group_message to group '$group'"
         )
-        val approved = ConfirmGate.confirm(
-            "Send WhatsApp message to the group \"$group\"?\n\nMessage: \"$message\""
-        )
-        if (!approved) {
+        if (SendAsk.isPending) {
             return ToolResult(
                 false,
-                "Group message was not confirmed, so nothing was sent."
+                "Another send confirmation is already waiting — " +
+                    "answer that one first. Nothing was sent."
             )
         }
-        HandsActions.grantSendPermit("com.whatsapp")
-        HandsActions.grantSendPermit("com.whatsapp.w4b")
-        return intents.whatsappGroupMessage(group, message).toToolResult()
+        // v2.0.2: the just-in-time ask runs inside the group flow,
+        // after the group chat opens + the text is typed, before the
+        // send tap (the per-group confirm, same substance, new timing).
+        return intents.whatsappGroupMessage(group, message) {
+            val approved = SendAsk.ask("the group \"$group\"", message)
+            if (approved) {
+                HandsActions.grantSendPermit("com.whatsapp")
+                HandsActions.grantSendPermit("com.whatsapp.w4b")
+            }
+            approved
+        }.toToolResult()
     }
 
     /**

@@ -521,7 +521,8 @@ private class OrbAnimState {
     // ── v1.8.0 (#24) adaptive quality + (#83) battery profile ──────
     // qualityScale steps 1.0 → 0.6 → 0.35 based on measured frame
     // times; the arrays stay allocated at full size and the draw loop
-    // simply stops early (first N particles / orbiters).
+    // STRIDE-samples them (v2.0.2 — a prefix draw rendered a polar
+    // cap, i.e. a half orb, whenever quality dropped).
     var qualityScale: Float = 1f
         private set
     private var frameWindowCount = 0
@@ -798,8 +799,13 @@ private fun DrawScope.drawOrbFrame(
 
     val idlePulse = maxOf(0f, sin(time * 0.5f)).pow(12f) * 0.15f * (1f - wobP)
     // HTML orb scale: breathing + level swell + thinking wobble.
-    val s = curP[P_SCALE] *
-        (1f + 0.018f * sin(time * 1.2f) + level * 0.07f + wobP * 0.025f * sin(time * 3.6f))
+    // v2.0.2: hard extent guarantee — the drawn sphere can never
+    // exceed its container in any state. Normal states peak ~1.17,
+    // so the 1.25 cap changes nothing visible; only pathological
+    // amplitude/state combos are capped.
+    val s = (curP[P_SCALE] *
+        (1f + 0.018f * sin(time * 1.2f) + level * 0.07f + wobP * 0.025f * sin(time * 3.6f)))
+        .coerceAtMost(1.25f)
     // Effective amp (displacement / point size) gains the wobble.
     val ampEff = level + wobP * 0.25f
     val brightEff = curP[P_BRIGHT] + idlePulse
@@ -900,12 +906,18 @@ private fun DrawScope.drawOrbFrame(
     )
 
     // ── Sphere particles.
-    // #24: adaptive quality draws only the first N particles (arrays
-    // stay full-size; the tail is simply not drawn this frame).
-    val particleLimit = (PARTICLE_COUNT * anim.effectiveQuality())
+    // v2.0.2 STRIDE sampling (replaces the #24 prefix draw): the
+    // Fibonacci arrays run pole-to-pole, so drawing only the first N
+    // particles drew a polar cap — after rotation a partial bowl
+    // ("sometimes half", only when quality dropped). Stride spreads
+    // the drawn particles uniformly over the whole sphere at any
+    // quality: drawn index i = (k / q), clamped to the array.
+    val quality = anim.effectiveQuality()
+    val particleDrawCount = (PARTICLE_COUNT * quality)
         .toInt().coerceIn(1, PARTICLE_COUNT)
     val sizeAmp = 1f + ampEff * 0.5f
-    for (i in 0 until particleLimit) {
+    for (k in 0 until particleDrawCount) {
+        val i = (k / quality).toInt().coerceIn(0, PARTICLE_COUNT - 1)
         val dx0 = scene.dirX[i]
         val dy0 = scene.dirY[i]
         val dz0 = scene.dirZ[i]
@@ -971,10 +983,12 @@ private fun DrawScope.drawOrbFrame(
     // screenshots). The orbit is scaled to 0.8× and every particle is
     // radially clamped inside the canvas as a hard guarantee.
     val thinking = state == OrbState.THINKING
-    // #24: orbit particles scale down with the same quality factor.
-    val orbitLimit = (ORBIT_COUNT * anim.effectiveQuality())
+    // v2.0.2: orbit particles stride-sample with the same quality
+    // factor (uniform spread, not a prefix subset).
+    val orbitDrawCount = (ORBIT_COUNT * quality)
         .toInt().coerceIn(1, ORBIT_COUNT)
-    for (j in 0 until orbitLimit) {
+    for (ok in 0 until orbitDrawCount) {
+        val j = (ok / quality).toInt().coerceIn(0, ORBIT_COUNT - 1)
         val a = scene.oAngle[j]
         val fs = scene.oFreq[j]
         val ph = scene.oPhase[j]
