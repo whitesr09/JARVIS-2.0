@@ -40,7 +40,10 @@ object SettingsLoader {
             liveModel = prefs.getString(
                 "live_model", "gemini-2.5-flash-native-audio-preview-12-2025"
             ) ?: "gemini-2.5-flash-native-audio-preview-12-2025",
-            voiceEngine = prefs.getString("voice_engine", "AUTO") ?: "AUTO",
+            // v2.0.3 migration: the Universal engine is removed —
+            // a stored UNIVERSAL value becomes NATIVE on load.
+            voiceEngine = (prefs.getString("voice_engine", "AUTO") ?: "AUTO")
+                .let { if (it.equals("UNIVERSAL", ignoreCase = true)) "NATIVE" else it },
             avatarId = prefs.getString("avatar_id", "droid") ?: "droid",
             biometricsEnrolled = prefs.getBoolean("biometrics_enrolled", false),
             biometricsSampleCount = prefs.getInt("biometrics_sample_count", 0),

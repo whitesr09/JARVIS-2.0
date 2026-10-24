@@ -91,6 +91,30 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v2.0.3 — Live voice replies restored, system-voice fallback removed, Spotify play fixed, send cards gone",
+            body = "Voice: Live sessions speak again — Gemini Live audio " +
+                "is played aloud (barge-in flush included) and the chat " +
+                "long-press Speak action is back. The system-voice " +
+                "(Universal) fallback engine is REMOVED: AUTO now " +
+                "behaves as Native Live, a stored Universal setting " +
+                "migrates to Native, and a Live failure ends with the " +
+                "friendly error + Why? diagnosis instead of switching " +
+                "engines. No mic sounds anywhere. Spotify: \"play X on " +
+                "Spotify\" now hardens every step (search-bar " +
+                "fallbacks, tap-then-type retry, second-row retry) and " +
+                "only reports success when playback is verified (a " +
+                "Pause control on screen) — a stall now names the " +
+                "failed step instead of stopping silently. Sends: " +
+                "every remaining confirmation card for sends is gone — " +
+                "generic Send taps now ask the same just-in-time " +
+                "voice ask (panel line + message, voice/text yes) " +
+                "instead of a card; ConfirmGate stays for payments, " +
+                "destructive actions, bulk and calls only. Live voice " +
+                "sends can now be answered with a spoken yes, too."
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+
+        InfoCard(
             title = "v2.0.2 — Orb full-render fix, text-only replies, just-in-time send ask",
             body = "Orb: at low quality the sphere used to draw only its " +
                 "first particles — a polar cap that looked like half an " +

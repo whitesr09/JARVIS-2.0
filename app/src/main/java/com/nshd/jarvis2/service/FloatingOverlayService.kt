@@ -1240,8 +1240,7 @@ class FloatingOverlayService : Service() {
     /** Show/hide the strip + start/stop its 80 ms sampler. */
     private fun updateWaveform() {
         val status = VoiceSessionManager.uiState.value.status
-        val listening = status == VoiceStatus.LISTENING ||
-            status == VoiceStatus.UNIVERSAL_ACTIVE
+        val listening = status == VoiceStatus.LISTENING
         waveformView?.visibility = if (listening) View.VISIBLE else View.GONE
         if (listening) startWaveformTicker() else stopWaveformTicker()
     }

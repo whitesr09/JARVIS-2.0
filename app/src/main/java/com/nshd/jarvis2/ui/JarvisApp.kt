@@ -410,17 +410,17 @@ fun JarvisApp(
                 if (showWhatsNew) {
                     AlertDialog(
                         onDismissRequest = { showWhatsNew = false },
-                        title = { Text("What's new in v2.0.2") },
+                        title = { Text("What's new in v2.0.3") },
                         text = {
                             Text(
-                                "Orb always renders whole now, even at " +
-                                    "low quality — no more half-orb. Voice " +
-                                    "replies are text-only (no spoken " +
-                                    "replies, no mic sounds). And sends " +
-                                    "confirm just before sending: after " +
-                                    "the message is typed and verified, " +
-                                    "Jarvis asks in plain text and only " +
-                                    "sends on your yes."
+                                "Live voice replies speak again, and the " +
+                                    "system-voice fallback is gone — a Live " +
+                                    "failure now ends with the Why? " +
+                                    "diagnosis. Spotify play-to-playback " +
+                                    "is fixed, and the last send " +
+                                    "confirmation cards are removed: " +
+                                    "sends ask just before sending, in " +
+                                    "plain text, and only send on your yes."
                             )
                         },
                         confirmButton = {

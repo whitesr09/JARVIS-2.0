@@ -376,7 +376,7 @@ fun ApiConnectionScreen(
                             Column(modifier = Modifier.padding(JarvisDimens.spaceMd)) {
                                 Text(
                                     text = "Live-only model — it can't answer chats. " +
-                                        "Pick a text model for Chat/Universal, keep " +
+                                        "Pick a text model for Chat, keep " +
                                         "this one as the Live model.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onErrorContainer

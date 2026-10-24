@@ -26,8 +26,10 @@ data class PendingConfirm(
  * dialog (ConfirmGateDialog in Chat/Voice), (b) the floating overlay's
  * gate card (FloatingOverlayService) for commands given while another
  * app is foreground, (c) spoken yes/no replies intercepted by
- * VoiceSessionManager during Universal voice turns. Whichever surface
- * the user reaches first wins; [complete] is idempotent per id.
+ * VoiceSessionManager's Live transcript intercept during Live voice
+ * turns. Whichever surface the user reaches first wins; [complete]
+ * is idempotent per id. v2.0.3: sends NEVER enter this gate — they
+ * suspend in SendAsk instead (see HandsActions.SensitiveTapGuard).
  */
 object ConfirmGate {
     private val nextId = AtomicLong(1)

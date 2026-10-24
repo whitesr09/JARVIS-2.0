@@ -42,7 +42,7 @@ object FriendlyErrors {
             lower.contains("unsupported language code") || lower.contains("language code") ->
                 Mapped(
                     "That voice model doesn't support the selected language — " +
-                        "switch the Voice Engine to Universal, or pick another language.",
+                        "pick another language, or check the Live model in Settings.",
                     detail
                 )
 
@@ -88,9 +88,9 @@ object FriendlyErrors {
     }
 
     /**
-     * F5: one short cause phrase for compact surfaces — the Universal
-     * switch caption ("Native Live unavailable (<reason>) — …") and
-     * logs. Never contains raw provider text.
+     * F5: one short cause phrase for compact surfaces — the Live
+     * failure caption ("Live unavailable (<reason>)…") and logs.
+     * Never contains raw provider text.
      */
     fun shortReason(raw: String?): String {
         val text = raw?.trim().orEmpty()

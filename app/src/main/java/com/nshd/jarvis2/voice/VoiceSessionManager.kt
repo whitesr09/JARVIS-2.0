@@ -49,14 +49,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class VoiceMode { NONE, LIVE, UNIVERSAL }
+enum class VoiceMode { NONE, LIVE }
 
 enum class VoiceStatus {
-    IDLE, CONNECTING, LISTENING, SPEAKING, THINKING, UNIVERSAL_ACTIVE, ERROR
+    IDLE, CONNECTING, LISTENING, SPEAKING, THINKING, ERROR
 }
 
 /** Which engine the user's Voice Engine setting asks for (F2). */
-enum class VoiceEngine { AUTO, NATIVE, UNIVERSAL }
+enum class VoiceEngine { AUTO, NATIVE }
 
 enum class CaptionKind { USER, ASSISTANT, TOOL, SYSTEM }
 
@@ -73,7 +73,7 @@ data class VoiceUiState(
     val mode: VoiceMode = VoiceMode.NONE,
     val voiceName: String = "",
     val liveModel: String = "",
-    /** Mode-badge text: "LIVE • Kore" / "UNIVERSAL • <chat model>". */
+    /** Mode-badge text: "LIVE • Kore". */
     val engineLabel: String = "",
     val micMuted: Boolean = false,
     /**
@@ -100,23 +100,19 @@ data class LiveDiagnosis(
 )
 
 /**
- * App-level voice session owner. Two engines (F2):
+ * App-level voice session owner. ONE engine (v2.0.3): NATIVE LIVE
+ * (Gemini key + a native-audio Live model): GeminiLiveClient
+ * WebSocket + 16 kHz capture uplink + 24 kHz playback, server VAD
+ * turn-taking, barge-in flush, session resumption across the ~10 min
+ * server limit. The v2.0.2 system-voice (Universal) fallback engine
+ * is REMOVED: if Live setup/connection fails, the session ENDS with
+ * the friendly error + the Voice screen's "Why?" diagnosis — it never
+ * switches to a system SpeechRecognizer/TTS mode.
  *
- *  - NATIVE LIVE (Gemini key + a native-audio Live model):
- *    GeminiLiveClient WebSocket + 16 kHz capture uplink + 24 kHz
- *    playback, server VAD turn-taking, barge-in flush, session
- *    resumption across the ~10 min server limit. If setup/connection
- *    fails, the session auto-switches to Universal in the same tap —
- *    the user never lands on a dead error screen while Universal runs.
- *  - UNIVERSAL (works with ANY provider/model): SpeechRecognizer with
- *    partial results → AgentPipeline (the Chat pipeline) with streamed
- *    deltas → live text captions. Listen → think → read → listen until
- *    the user ends the session.
- *
- * Engine choice: JarvisSettings.voiceEngine — AUTO picks Native Live
- * only when the active provider is Gemini, the configured Live model
- * looks native-audio capable, and a Gemini key is set; NATIVE forces
- * Live (with the Universal safety net); UNIVERSAL forces Universal.
+ * Engine choice: JarvisSettings.voiceEngine — AUTO behaves as NATIVE
+ * (a stored "UNIVERSAL" value migrates to NATIVE on load); NATIVE
+ * forces Live. A non-Gemini provider has no Live engine, so its
+ * session fails with the diagnosis instead of silently degrading.
  *
  * Finished turns on both paths are persisted into MemoryDb chat
  * history. Tool activity renders as status chips (CaptionKind.TOOL),
@@ -148,7 +144,6 @@ object VoiceSessionManager {
     private var client: GeminiLiveClient? = null
     private var capture: AudioCapture? = null
     private var player: AudioPlayer? = null
-    private var universal: UniversalVoice? = null
     private var chime: ChimePlayer? = null
 
     // Turn accumulation (transcripts / streamed replies arrive incrementally).
@@ -163,9 +158,6 @@ object VoiceSessionManager {
     @Volatile
     private var reconnecting = false
 
-    /** Set once a failed Live attempt has fallen back to Universal. */
-    @Volatile
-    private var liveSwitchedToUniversal = false
 
     /** F5: full reason of the last Native Live failure this session. */
     @Volatile
@@ -188,7 +180,7 @@ object VoiceSessionManager {
     // ── F8 (#2) Live model fallback chain ─────────────────────────────
     // When a Live start fails with a MODEL-class error, the next
     // candidate model is tried (fresh client/session each) BEFORE the
-    // Universal switch. A working fallback is remembered in-memory
+    // session is failed. A working fallback is remembered in-memory
     // for this app run only — the user's setting is never rewritten.
 
     /** Model of the CURRENT Live attempt (may be a fallback candidate). */
@@ -227,7 +219,7 @@ object VoiceSessionManager {
     // A slow setup (> 6 s) or two consecutive network-class Live
     // failures this app run marks the network as weak: the NEXT fresh
     // Live start gets a 6 s setup cap (instead of 12 s) so the
-    // Universal switch happens fast instead of hanging.
+    // the failure surfaces fast instead of hanging.
 
     @Volatile
     private var liveConnectStartMs = 0L
@@ -241,20 +233,6 @@ object VoiceSessionManager {
     /** The current fresh start is running under the weak-network cap. */
     @Volatile
     private var liveWeakNetworkStart = false
-
-    // ── F8 (#5) offline STT fallback (Vosk free-form commands) ───────
-
-    private var voskCommands: VoskCommandRecognizer? = null
-
-    @Volatile
-    private var offlineSttActive = false
-
-    /** The session's Universal listener — the Vosk fallback feeds it too. */
-    private var universalListener: UniversalListener? = null
-
-    /** F8 (#18): media pre-warm already fired for this listen cycle. */
-    @Volatile
-    private var prewarmedThisCycle = false
 
     // F3 Live tool-call dedupe: Gemini toolCall ids already processed in
     // this session, mapped to the exact response that was sent. A
@@ -285,25 +263,13 @@ object VoiceSessionManager {
     @Volatile
     private var liveFirstFrameLogged = false
 
-    @Volatile
-    private var universalFirstPartialLogged = false
-
     /**
      * F3 voice auto-listen guard: set when a media-play tool succeeds.
-     * While set, UniversalVoice must NOT auto-restart the recognizer —
-     * listening resumes only when the user taps the mic (setMicMuted)
-     * or wakes the assistant again.
+     * v2.0.3: kept for the mic-tap lift in setMicMuted; Live listens
+     * continuously via server VAD, so nothing auto-restarts.
      */
     @Volatile
     private var mediaListenBlocked = false
-
-    // Universal-turn bookkeeping: listening resumes once the
-    // pipeline has returned (v2.0.2: text-only, no speech queue).
-    @Volatile
-    private var pipelineRunning = false
-
-    @Volatile
-    private var pipelineDone = true
 
     /**
      * v1.8 (#8): "Stop reading" was tapped for the CURRENT turn —
@@ -337,38 +303,6 @@ object VoiceSessionManager {
 
     private var callWatchManager: TelephonyManager? = null
 
-    // ── F7 GateHost (c): spoken ConfirmGate confirmations ────────────
-    // While a gate raised by THIS session's own voice turn is pending,
-    // the recognizer listens for a yes/no reply instead of a command.
-    // Gates raised elsewhere (typed chat) never arm this — the
-    // floating overlay's gate card serves those.
-    @Volatile
-    private var gateArmed = false
-
-    private var gateWatcherStarted = false
-
-    // ── v2.0.2 SendAsk host: spoken just-in-time send answers ──────
-    // Mirrors the GateHost above, but for SendAsk (no card/dialog):
-    // while a send ask raised by THIS session's own voice turn is
-    // pending, the recognizer listens for a one-shot yes/no reply.
-    @Volatile
-    private var sendAskArmed = false
-
-    private var sendAskWatcherStarted = false
-
-    // ── F7/I mis-script guard ─────────────────────────────────────────
-    // A final STT result dominated by an Indic script while the
-    // effective language is Latin (en-*/Hinglish) is a recognizer
-    // language slip: re-listen ONCE with the alternate English tag.
-    @Volatile
-    private var guardRetryPending = false
-
-    @Volatile
-    private var guardOriginalText: String? = null
-
-    @Volatile
-    private var guardUsedThisTurn = false
-
     /** v2.0.0: pending Live session time warning (see onSetupComplete). */
     private var liveTimeWarningJob: Job? = null
 
@@ -396,49 +330,14 @@ object VoiceSessionManager {
                 android.app.NotificationManager.INTERRUPTION_FILTER_ALARMS
         }
 
-    // ── v1.9.0 (#6): STT language memory ─────────────────────────────
-    // The language NAME the running Universal engine was built with,
-    // and the last language that produced a CLEAN final (persisted —
-    // an "Auto" session starts there next time instead of en-IN).
-
-    @Volatile
-    private var universalLanguageName: String = "Auto"
-
-    /** The remembered clean STT language name, or null when none yet. */
-    fun rememberedSttLanguage(context: Context): String? =
-        context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_STT_LAST_CLEAN, null)
-            ?.takeIf { it.isNotBlank() }
-
-    private fun noteCleanSttResult() {
-        val ctx = appContext ?: return
-        // "Auto" effectively ran en-IN — remember it as "English" so
-        // the memory names a real language, not the Auto placeholder.
-        val name = universalLanguageName
-            .takeIf { it.isNotBlank() && it != "Auto" } ?: "English"
-        val prefs = ctx.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
-        if (prefs.getString(KEY_STT_LAST_CLEAN, null) != name) {
-            prefs.edit().putString(KEY_STT_LAST_CLEAN, name).apply()
-            AppLog.i("STT", "language memory: '$name' produced a clean result — remembered")
-        }
-    }
-
     // ── v1.9.0 (#14): push-to-talk ───────────────────────────────────
-    // Hold = talk now; release = finish this utterance. Universal:
-    // press starts a listen cycle, release stops the recognizer (its
-    // final result dispatches as usual). Live: press unmutes the mic,
-    // release mutes it again.
+    // Hold = talk now; release = finish this utterance. Live: press
+    // unmutes the mic, release mutes it again.
 
     fun pttDown() {
         if (!active) return
         mediaListenBlocked = false
         when (_uiState.value.mode) {
-            VoiceMode.UNIVERSAL -> {
-                if (_uiState.value.micMuted) setMicMuted(false)
-                // v2.0.2: nothing is ever spoken, so there is no speech
-                // to stop — just restart listening.
-                startCurrentListening()
-            }
             VoiceMode.LIVE -> setMicMuted(false)
             VoiceMode.NONE -> Unit
         }
@@ -447,7 +346,6 @@ object VoiceSessionManager {
     fun pttUp() {
         if (!active) return
         when (_uiState.value.mode) {
-            VoiceMode.UNIVERSAL -> universal?.stopListening()
             VoiceMode.LIVE -> setMicMuted(true)
             VoiceMode.NONE -> Unit
         }
@@ -492,7 +390,6 @@ object VoiceSessionManager {
         this.chime = ChimePlayer()
         active = true
         reconnectAttempts = 0
-        liveSwitchedToUniversal = false
         lastLiveFailureReason = null
         liveSessionHandle = null
         liveCleanRetried = false
@@ -507,16 +404,6 @@ object VoiceSessionManager {
         synchronized(liveProcessedToolCalls) { liveProcessedToolCalls.clear() }
         liveLedger = ExecutionLedger()
         mediaListenBlocked = false
-        // F7 audit fix: gate/guard state never leaks across sessions —
-        // a stale gateArmed (or a pending mis-script retry) from a
-        // dead session must not intercept the new session's first
-        // utterance.
-        gateArmed = false
-        guardRetryPending = false
-        guardOriginalText = null
-        guardUsedThisTurn = false
-        pipelineRunning = false
-        pipelineDone = true
         readingSuppressed = false
         callPaused = false
         callResumePending = false
@@ -528,7 +415,6 @@ object VoiceSessionManager {
             "session start engine=${settings.voiceEngine} persona=${settings.persona} " +
                 "language=${settings.language}"
         )
-        startGateWatcherIfNeeded()
         // v1.8 (#11): watch for phone calls so the session can pause
         // for the call and resume after it (no-op without permission).
         registerCallWatch()
@@ -551,9 +437,6 @@ object VoiceSessionManager {
     private fun beginEngine() {
         val store = providerStore ?: return
         val s = settings ?: return
-        val gemini = store.loadConfig(ProviderPresets.GEMINI.id)
-        val liveModelLooksNative = s.liveModel.contains("live", ignoreCase = true) ||
-            s.liveModel.contains("native-audio", ignoreCase = true)
         val engine = parseEngine(s.voiceEngine)
         CrashLogger.stage(TAG, "engine chosen: $engine")
         val activeConfig = store.orderedConfigs().firstOrNull()
@@ -563,21 +446,23 @@ object VoiceSessionManager {
                 "chatModel=${activeConfig?.chatModel?.ifBlank { "(none)" } ?: "(none)"} " +
                 "liveModel=${s.liveModel}"
         )
+        // v2.0.3: AUTO behaves as NATIVE — Live is the only engine.
+        // A stored UNIVERSAL value never reaches here (parseEngine
+        // migrates it); a non-Gemini provider fails in startLive's
+        // connect and ends with the "Why?" diagnosis via fail().
         when (engine) {
-            VoiceEngine.UNIVERSAL -> startUniversal()
-            VoiceEngine.NATIVE -> startLive()
-            VoiceEngine.AUTO -> {
-                val nativeOk = store.activeProviderId() == ProviderPresets.GEMINI.id &&
-                    gemini.apiKey.isNotBlank() && liveModelLooksNative
-                if (nativeOk) startLive() else startUniversal()
-            }
+            VoiceEngine.NATIVE, VoiceEngine.AUTO -> startLive()
         }
     }
 
-    private fun parseEngine(raw: String): VoiceEngine = try {
-        VoiceEngine.valueOf(raw.uppercase())
-    } catch (e: IllegalArgumentException) {
-        VoiceEngine.AUTO
+    private fun parseEngine(raw: String): VoiceEngine {
+        // v2.0.3 migration: a stored UNIVERSAL value becomes NATIVE.
+        if (raw.equals("UNIVERSAL", ignoreCase = true)) return VoiceEngine.NATIVE
+        return try {
+            VoiceEngine.valueOf(raw.uppercase())
+        } catch (e: IllegalArgumentException) {
+            VoiceEngine.AUTO
+        }
     }
 
     /**
@@ -670,22 +555,14 @@ object VoiceSessionManager {
     }
 
     /**
-     * A media-play tool just succeeded in this voice session (F3):
-     * block Universal auto-listen resume until the user taps the mic
-     * or wakes the assistant again, and say so once via a SYSTEM caption.
+     * A media-play tool just succeeded in this voice session (F3).
+     * v2.0.3: Live listens continuously via server VAD, so there is
+     * no recognizer auto-listen resume to block — the flag is kept
+     * only so a mic tap still clears it (see setMicMuted).
      */
     private fun noteMediaPlayed() {
         if (mediaListenBlocked) return
         mediaListenBlocked = true
-        if (_uiState.value.mode == VoiceMode.UNIVERSAL) {
-            addCaption(
-                VoiceCaption(
-                    fromUser = false,
-                    text = "Music playing — tap the mic when you want me again.",
-                    kind = CaptionKind.SYSTEM
-                )
-            )
-        }
     }
 
     /** Rebuild the session with the same inputs (error-screen retry). */
@@ -709,25 +586,14 @@ object VoiceSessionManager {
         mediaListenBlocked = false
         _uiState.value = _uiState.value.copy(micMuted = muted)
         if (muted) _amplitude.value = 0f
-        val uv = universal
-        if (uv != null) {
-            // On the Universal path the recognizer IS the mic, so
-            // muting stops listening (v2.0.2: nothing is spoken).
-            if (muted) {
-                uv.stopListening()
-                voskCommands?.stopListening()
-            } else if (active) {
-                maybeResumeUniversalListening()
-            }
-        }
+        // Live only: the mic is the AudioCapture stream; muting stops
+        // frames reaching the server (see startLive's onChunk guard).
     }
 
     /**
      * v1.8 (#8): "Stop reading" (Voice screen chip, shown while
-     * SPEAKING). v2.0.2: replies are text-only, so on Universal there
-     * is no speech to halt — the chip only suppresses the rest of
-     * this turn's text and ends the session state cleanly; on the
-     * Live path queued model audio is flushed (it is never played).
+     * SPEAKING). v2.0.3: queued Live model audio is flushed and the
+     * rest of this turn's text is suppressed.
      */
     fun stopReading() {
         if (!active) return
@@ -735,7 +601,6 @@ object VoiceSessionManager {
         readingSuppressed = true
         pulseJob?.cancel()
         when (_uiState.value.mode) {
-            VoiceMode.UNIVERSAL -> Unit // v2.0.2: text-only replies — nothing spoken to stop.
             VoiceMode.LIVE -> {
                 player?.flush()
                 if (_uiState.value.status == VoiceStatus.SPEAKING) {
@@ -849,10 +714,6 @@ object VoiceSessionManager {
                 _amplitude.value = 0f
                 when (callPausedMode) {
                     VoiceMode.LIVE -> teardownLive()
-                    VoiceMode.UNIVERSAL -> {
-                        universal?.stopListening()
-                        voskCommands?.stopListening()
-                    }
                     VoiceMode.NONE -> Unit
                 }
                 setStatus(VoiceStatus.IDLE)
@@ -870,10 +731,6 @@ object VoiceSessionManager {
                 _uiState.value = _uiState.value.copy(sttHint = null)
                 when (mode) {
                     VoiceMode.LIVE -> startLive(liveSessionHandle)
-                    VoiceMode.UNIVERSAL -> {
-                        setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
-                        maybeResumeUniversalListening()
-                    }
                     VoiceMode.NONE -> return
                 }
                 addCaption(
@@ -899,11 +756,6 @@ object VoiceSessionManager {
         pulseJob?.cancel()
         pulseJob = null
         teardownLive()
-        stopVoskFallback()
-        universal?.shutdown()
-        universal = null
-        universalListener = null
-        pipelineRunning = false
         userTurn.setLength(0)
         assistantTurn.setLength(0)
         userCaptionIndex = -1
@@ -912,9 +764,9 @@ object VoiceSessionManager {
         if (resetUi) _uiState.value = VoiceUiState()
     }
 
-    /** Stops only the Live pieces (used by stop and by the Universal switch). */
+    /** Stops only the Live pieces (used by stop and by failure paths). */
     private fun teardownLive() {
-        // F6: tearing Live down (stop, or the switch to Universal)
+        // F6: tearing Live down (stop, or a failure)
         // closes the task window. Idempotent — see stopInternal.
         closeLiveTaskWindow()
         liveTimeWarningJob?.cancel()
@@ -938,9 +790,6 @@ object VoiceSessionManager {
         unregisterCallWatch()
         pulseJob?.cancel()
         teardownLive()
-        stopVoskFallback()
-        universal?.shutdown()
-        universal = null
         active = false
         runCatching { WakeWordControl.setSessionActive(false) }
         _amplitude.value = 0f
@@ -1047,9 +896,9 @@ object VoiceSessionManager {
             client = liveClient
             liveClient.connect()
             CrashLogger.stage(TAG, "live: ws connect issued")
-            // connect() can fail synchronously (blank key) and switch
-            // the session to Universal — only forward frames if the
-            // session is still on the Live engine.
+            // connect() can fail synchronously (blank key) and fail
+            // the session — only forward frames if the session is
+            // still on the Live engine.
             if (_uiState.value.mode == VoiceMode.LIVE) startShareForwarder()
         }
     }
@@ -1207,8 +1056,8 @@ object VoiceSessionManager {
                 "Nothing to fix: Jarvis already retries once with a clean " +
                     "session. If it repeats, restart the app."
             isNetworkClassFailure(reason) ->
-                "Check your connection, then tap Retry — Universal voice " +
-                    "keeps working in the meantime."
+                "Check your connection, then tap Retry — Live is the only " +
+                    "voice engine now, so there is no fallback mode."
             else ->
                 "Tap Retry; if it keeps failing, the full trail is in " +
                     "Settings → App Logs (tag: Live)."
@@ -1224,17 +1073,15 @@ object VoiceSessionManager {
 
     /**
      * Native Live died (setup rejected, socket failure, dead close).
-     * First time: tear the Live pieces down and continue the SAME
-     * session on the Universal engine with a system note — never a dead
-     * error screen. Second failure (or Universal itself failing) is a
-     * real error.
+     * v2.0.3: after the clean-session retry and the model fallback
+     * chain below, the session ENDS with the friendly error + the
+     * Voice screen's "Why?" diagnosis. There is no Universal fallback
+     * anymore — no system SpeechRecognizer/TTS mode is ever started.
      */
     private fun handleLiveFailure(message: String) {
         // F4.1: this is called from GeminiLiveClient callbacks, which
-        // run on OkHttp WebSocket threads. The Universal switch below
-        // constructs SpeechRecognizer — main-thread-only
-        // APIs whose off-main use is a prime "crashes while connecting"
-        // suspect — so the whole failure path is marshalled to Main.
+        // run on OkHttp WebSocket threads — the whole failure path is
+        // marshalled to Main before touching session state.
         if (Looper.myLooper() != Looper.getMainLooper()) {
             scope.launch { handleLiveFailure(message) }
             return
@@ -1257,7 +1104,7 @@ object VoiceSessionManager {
         // F5.1: a session/handle rejection means the server refused
         // the resumption handle — not the model, not the key. Retry
         // ONCE with a guaranteed-clean session (fresh client, no
-        // handle) before any Universal fallback.
+        // handle) before failing the session.
         if (!liveCleanRetried && isSessionRejection(message)) {
             liveCleanRetried = true
             liveSessionHandle = null
@@ -1275,7 +1122,7 @@ object VoiceSessionManager {
         }
         // F8 (#2): a MODEL-class failure during setup advances the
         // fallback chain — the next candidate model gets a fresh
-        // client/session BEFORE Live is given up for Universal. The
+        // client/session BEFORE Live is given up. The
         // F5.1 clean retry above applies per attempt (liveCleanRetried
         // is per session start, and a session rejection for THIS
         // attempt still retries clean once).
@@ -1307,28 +1154,75 @@ object VoiceSessionManager {
                 "model fallback chain exhausted after ${liveCandidateIndex + 1} attempt(s)"
             )
         }
-        if (!liveSwitchedToUniversal && settings != null) {
-            liveSwitchedToUniversal = true
-            teardownLive()
-            pulseJob?.cancel()
-            _amplitude.value = 0f
-            addCaption(
-                VoiceCaption(
-                    fromUser = false,
-                    text = "Native Live unavailable " +
-                        "(${FriendlyErrors.shortReason(message)}) — switched to Universal" +
-                        if (liveWeakNetworkStart) {
-                            " (weak network suspected — Live was given 6s)"
-                        } else {
-                            ""
-                        },
-                    kind = CaptionKind.SYSTEM
-                )
+        // v2.0.3: no fallback engine — the failure IS the outcome.
+        // The friendly error + liveDiagnosis() ("Why?") carry the
+        // full reason; the caption names it in plain language.
+        addCaption(
+            VoiceCaption(
+                fromUser = false,
+                text = "Live unavailable (${FriendlyErrors.shortReason(message)}). " +
+                    "Tap Why? for the diagnosis, or Retry to reconnect.",
+                kind = CaptionKind.SYSTEM
             )
-            startUniversal()
-        } else {
-            fail(message)
+        )
+        fail(message)
+    }
+
+    /**
+     * v2.0.3 Live spoken-answer helpers (replace the deleted Universal
+     * STT host). Input-transcription chunks are incremental words, so
+     * a strict whole-message parse is tried first and a leading
+     * yes/no word (≤4 words, e.g. "yes, send it") second. Chunks that
+     * are neither are CONSUMED (return true) but do not answer —
+     * they are thinking-aloud, not the answer, and must not pollute
+     * the user turn. Returns true when the chunk was consumed.
+     */
+    private fun answerLiveSendAsk(chunk: String): Boolean {
+        val normalized = chunk.trim().lowercase()
+            .trimEnd('.', '!', '?', ' ').trim()
+        if (normalized.isBlank()) return true
+        when (com.nshd.jarvis2.brain.tools.SendAsk.parseAnswer(normalized)) {
+            com.nshd.jarvis2.brain.tools.SendAnswer.YES,
+            com.nshd.jarvis2.brain.tools.SendAnswer.NO -> {
+                com.nshd.jarvis2.brain.tools.SendAsk.answer(normalized)
+                return true
+            }
+            com.nshd.jarvis2.brain.tools.SendAnswer.NON_ANSWER -> Unit
         }
+        val words = normalized.split(Regex("\\s+"))
+        if (words.size <= 4) {
+            when (words.first()) {
+                "yes", "yeah", "send", "confirm", "ok", "okay" -> {
+                    com.nshd.jarvis2.brain.tools.SendAsk.answer(words.first())
+                    return true
+                }
+                "no", "cancel", "stop", "don't", "dont" -> {
+                    com.nshd.jarvis2.brain.tools.SendAsk.answer(words.first())
+                    return true
+                }
+            }
+        }
+        return true
+    }
+
+    /** Same leading-word rule for a non-send ConfirmGate in Live. */
+    private fun answerLiveGate(chunk: String, gateId: Long): Boolean {
+        val normalized = chunk.trim().lowercase()
+            .trimEnd('.', '!', '?', ' ').trim()
+        if (normalized.isBlank()) return true
+        val first = normalized.split(Regex("\\s+")).first()
+        val approved = when (first) {
+            "yes", "yeah", "send", "confirm", "ok", "okay" -> true
+            "no", "cancel", "stop", "don't", "dont" -> false
+            else -> return true // consumed, not an answer
+        }
+        // A gate's prompt is a single decision; only a short reply
+        // (≤4 words) counts, so a long sentence that merely starts
+        // with "yes" can never approve a payment/destructive action.
+        if (normalized.split(Regex("\\s+")).size > 4) return true
+        com.nshd.jarvis2.brain.tools.ConfirmGate.complete(gateId, approved)
+        AppLog.i("Gate", "Live spoken reply ${if (approved) "approved" else "denied"} gate #$gateId")
+        return true
     }
 
     private class LiveListener : GeminiLiveClient.Listener {
@@ -1361,7 +1255,7 @@ object VoiceSessionManager {
                             text = "This Live session has been running " +
                                 "about 9 minutes — Google may rotate it " +
                                 "soon. If it drops, I'll reconnect or " +
-                                "switch to Universal automatically.",
+                                "reconnect automatically, or end with a diagnosis.",
                             kind = CaptionKind.SYSTEM
                         )
                     )
@@ -1423,6 +1317,21 @@ object VoiceSessionManager {
 
         override fun onUserTranscript(text: String) {
             if (!active) return
+            // v2.0.3 Live send/gate answer intercept: a SendAsk or a
+            // non-send ConfirmGate suspended inside a Live tool turn
+            // can only be answered by SPOKEN yes/no in this session
+            // (the old Universal STT host is gone, and the typed-chat
+            // intercept never runs here). The chunk is the answer —
+            // it must not also accumulate into the user turn, or the
+            // next turn would carry a stale "yes". A non-answer chunk
+            // lets SendAsk re-ask once, exactly like typed chat.
+            if (com.nshd.jarvis2.brain.tools.SendAsk.isPending) {
+                if (answerLiveSendAsk(text)) return
+            } else {
+                val pendingGate =
+                    com.nshd.jarvis2.brain.tools.ConfirmGate.pending.value
+                if (pendingGate != null && answerLiveGate(text, pendingGate.id)) return
+            }
             synchronized(userTurn) { userTurn.append(text) }
             setTurnCaption(fromUser = true, text = userTurn.toString(), partial = true)
         }
@@ -1431,9 +1340,12 @@ object VoiceSessionManager {
             if (!active) return
             synchronized(assistantTurn) { assistantTurn.append(text) }
             setTurnCaption(fromUser = false, text = assistantTurn.toString(), partial = true)
-            // v2.0.2: text-only replies — the model generating text is
-            // THINKING, never SPEAKING (nothing is played aloud).
-            setStatus(VoiceStatus.THINKING)
+            // v2.0.3: text arriving before the first audio frame is
+            // THINKING; once audio is flowing the status is SPEAKING
+            // (set by onAudioChunk) and must not flip back here.
+            if (_uiState.value.status != VoiceStatus.SPEAKING) {
+                setStatus(VoiceStatus.THINKING)
+            }
         }
 
         override fun onAudioChunk(bytes: ByteArray) {
@@ -1442,13 +1354,14 @@ object VoiceSessionManager {
                 liveFirstFrameLogged = true
                 CrashLogger.stage(TAG, "live: first audio frame received")
             }
-            // v2.0.2: Live audio deltas are DISCARDED, never played —
-            // replies are text-only. The setup JSON modality is
+            // v2.0.3 RESTORE (reverts the v2.0.2 discard): Live audio
+            // deltas are enqueued to the AudioPlayer again, so Live
+            // voice sessions SPEAK. The setup JSON modality is
             // deliberately untouched (changing it risks another
             // setup-rejection class like the v2.0.1 sensitivity bug).
-            if (_uiState.value.status == VoiceStatus.SPEAKING) {
-                setStatus(VoiceStatus.LISTENING)
-            }
+            // Silent Execution mutes at the player (enqueue drops).
+            player?.enqueue(bytes)
+            setStatus(VoiceStatus.SPEAKING)
         }
 
         override fun onInterrupted() {
@@ -1538,6 +1451,20 @@ object VoiceSessionManager {
                 val myJob = currentCoroutineContext()[Job] ?: Job()
                 openLiveTaskWindow(myJob)
                 TaskState.step("🔧 $name")
+                // v2.0.3: a send tool's just-in-time ask must reach
+                // this Live session as a plain caption (the typed-chat
+                // pipeline sets askSink only for its own turns, and a
+                // Live turn has no typed turn). Panel line is published
+                // by SendAsk itself; this sink adds the caption.
+                com.nshd.jarvis2.brain.tools.SendAsk.askSink = { line ->
+                    addCaption(
+                        VoiceCaption(
+                            fromUser = false,
+                            text = line,
+                            kind = CaptionKind.ASSISTANT
+                        )
+                    )
+                }
                 val result: ToolResult = try {
                     // Per-turn ledger: identical repeat calls inside this
                     // Live turn return the cached result (F3).
@@ -1547,6 +1474,11 @@ object VoiceSessionManager {
                         false,
                         "Tool $name failed safely: ${e.message ?: "unexpected error"}"
                     )
+                } finally {
+                    // The ask sink lives only for this tool call's
+                    // window — a later typed turn must never deliver
+                    // an ask into a stale Live caption.
+                    com.nshd.jarvis2.brain.tools.SendAsk.askSink = null
                 }
                 if (!result.success) liveTaskFailed = true
                 TaskState.step(
@@ -1645,731 +1577,10 @@ object VoiceSessionManager {
         }
     }
 
-    // ── UNIVERSAL path ─────────────────────────────────────────────────
-
-    private fun startUniversal() {
-        // F4.1: SpeechRecognizer is main-thread-only.
-        // However we got here (UI tap — fine; a Live failure marshalled
-        // through handleLiveFailure — also fine; any future caller),
-        // never construct the engine off Main.
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            scope.launch { startUniversal() }
-            return
-        }
-        CrashLogger.stage(TAG, "universal: engine start")
-        universalFirstPartialLogged = false
-        val s = settings ?: return
-        val store = providerStore ?: return
-        teardownLive()
-        val activeConfig = store.orderedConfigs().firstOrNull()
-        val modelShort = shortModelName(
-            activeConfig?.chatModel?.takeIf { it.isNotBlank() }
-                ?: activeConfig?.reasoningModel
-                ?: ""
-        )
-        _uiState.value = VoiceUiState(
-            status = VoiceStatus.CONNECTING,
-            mode = VoiceMode.UNIVERSAL,
-            voiceName = modelShort,
-            liveModel = "",
-            engineLabel = "UNIVERSAL • $modelShort",
-            micMuted = _uiState.value.micMuted
-        )
-        val ctx = appContext ?: return
-        val listener = UniversalListener()
-        universalListener = listener
-        // v1.9.0 (#6): with the language setting on "Auto", start from
-        // the language that produced the last CLEAN result (persisted)
-        // instead of always defaulting to en-IN.
-        universalLanguageName = if (s.language == "Auto") {
-            rememberedSttLanguage(ctx) ?: "Auto"
-        } else {
-            s.language
-        }
-        if (universalLanguageName != s.language) {
-            AppLog.i(
-                "STT",
-                "language memory: starting in '$universalLanguageName' (setting: Auto)"
-            )
-        }
-        // v2.0.2: STT only — no TTS engine, no voice tuning, no
-        // barge-in (there is no speech to interrupt).
-        val uv = UniversalVoice(ctx, universalLanguageName, listener)
-        universal = uv
-        if (!uv.isRecognitionAvailable()) {
-            // F5: when Native Live already failed this session, its
-            // reason belongs in this error's Details too.
-            val liveNote = lastLiveFailureReason?.let { reason ->
-                "\n\nNative Live also failed: $reason"
-            } ?: ""
-            fail(
-                "Speech recognition is not available on this device. " +
-                    "Use text chat, or add a Gemini API key in Settings → " +
-                    "API & Connection for Native Live voice." + liveNote
-            )
-            return
-        }
-        pipelineDone = true
-        pipelineRunning = false
-        setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
-        CrashLogger.stage(TAG, "universal: recognizer ready — listening")
-        if (!_uiState.value.micMuted) {
-            // F8 (#5): device offline at engine start + the Vosk model
-            // present → the offline fallback owns recognition from the
-            // very first cycle (SpeechRecognizer would only error).
-            if (isDeviceOffline(ctx) && VoskModelManager.isModelComplete(ctx)) {
-                startVoskFallback("device offline at engine start")
-            } else {
-                uv.startListening()
-            }
-        }
-    }
-
-    // ── F8 (#5) offline STT fallback plumbing ──────────────────────────
-
-    /**
-     * True when the device currently has no internet-capable network.
-     *
-     * v1.9.1 hotfix (carried into v2.0.0): the whole check is guarded —
-     * [ConnectivityManager.getActiveNetwork] throws SecurityException
-     * when ACCESS_NETWORK_STATE is unavailable (the v1.9.0 crash on
-     * the Live → Universal fallback path). Any failure here means
-     * "treat as online" (the normal SpeechRecognizer path) instead of
-     * crashing a voice start.
-     */
-    private fun isDeviceOffline(context: Context): Boolean {
-        return try {
-            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
-                as? ConnectivityManager ?: return false
-            val network = cm.activeNetwork ?: return true
-            val caps = cm.getNetworkCapabilities(network) ?: return true
-            !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        } catch (e: Exception) {
-            AppLog.w(
-                "Voice",
-                "offline check failed (${e.javaClass.simpleName}: " +
-                    "${e.message}) — treating device as online"
-            )
-            false
-        }
-    }
-
-    /** Listen on whichever recognizer currently owns the cycle. */
-    private fun startCurrentListening() {
-        // v1.8 (#11): never open the mic while a call has the session paused.
-        if (callPaused) return
-        if (offlineSttActive) {
-            voskCommands?.startListening()
-        } else {
-            universal?.startListening()
-        }
-    }
-
-    /**
-     * Swap SpeechRecognizer → Vosk free-form command recognition.
-     * Finals/partials feed the session's Universal listener, so the
-     * dispatch pipeline (gates, mis-script logic, quick commands, the
-     * agent loop) is identical to the online path. When the Vosk
-     * model is NOT downloaded there is no fallback: the existing
-     * friendly error stays and a hint points at the wake-model
-     * download (which is the same model file).
-     */
-    private fun startVoskFallback(reason: String) {
-        val ctx = appContext ?: return
-        if (!VoskModelManager.isModelComplete(ctx)) {
-            AppLog.w(
-                "STT",
-                "offline STT fallback unavailable — Vosk model not " +
-                    "downloaded (reason: $reason)"
-            )
-            _uiState.value = _uiState.value.copy(
-                sttHint = "Offline speech needs the wake-word model — " +
-                    "download it in Settings → Wake Word to command Jarvis offline."
-            )
-            return
-        }
-        if (offlineSttActive) {
-            voskCommands?.startListening()
-            return
-        }
-        // One mic consumer at a time: SpeechRecognizer stands down.
-        universal?.stopListening()
-        val recognizer = VoskCommandRecognizer(
-            ctx,
-            object : VoskCommandRecognizer.Listener {
-                override fun onFinalResult(text: String) {
-                    universalListener?.onFinalResult(text)
-                }
-
-                override fun onPartialResult(text: String) {
-                    universalListener?.onPartialResult(text)
-                }
-
-                override fun onError(message: String) {
-                    AppLog.w("STT", "vosk command recognizer error: $message")
-                    stopVoskFallback()
-                    if (active && !callPaused &&
-                        _uiState.value.mode == VoiceMode.UNIVERSAL &&
-                        !_uiState.value.micMuted
-                    ) {
-                        universal?.startListening()
-                    }
-                }
-
-                override fun onListeningStarted() {
-                    universalListener?.onListeningStarted()
-                }
-            }
-        )
-        voskCommands = recognizer
-        offlineSttActive = true
-        AppLog.i("STT", "offline STT fallback ACTIVE (Vosk free-form) — reason: $reason")
-        _uiState.value = _uiState.value.copy(
-            sttHint = "Offline — on-device voice commands (small vocabulary)."
-        )
-        recognizer.startListening()
-    }
-
-    /** Tear the Vosk fallback down (session end / failure / mute). */
-    private fun stopVoskFallback() {
-        voskCommands?.shutdown()
-        voskCommands = null
-        offlineSttActive = false
-    }
-
     private fun shortModelName(model: String): String {
         val short = model.substringAfterLast('/').trim()
         if (short.isBlank()) return "chat model"
         return if (short.length > 26) short.take(25) + "…" else short
-    }
-
-    // ── F7 GateHost (c) + F7/I mis-script guard helpers ──────────────
-
-    /**
-     * Watch ConfirmGate for the lifetime of the process (started once
-     * from startSession). A gate that appears while THIS manager's
-     * Universal pipeline turn is running almost certainly belongs to
-     * that turn (a send waiting for its confirmation): arm the spoken
-     * yes/no intercept and start listening for it.
-     */
-    private fun startGateWatcherIfNeeded() {
-        startSendAskWatcherIfNeeded()
-        if (gateWatcherStarted) return
-        gateWatcherStarted = true
-        scope.launch {
-            com.nshd.jarvis2.brain.tools.ConfirmGate.pending.collect { pending ->
-                if (pending == null) {
-                    gateArmed = false
-                } else if (active && _uiState.value.mode == VoiceMode.UNIVERSAL &&
-                    pipelineRunning && !_uiState.value.micMuted
-                ) {
-                    gateArmed = true
-                    AppLog.i(
-                        "Gate",
-                        "gate #${pending.id} pending during a voice turn — " +
-                            "listening for a spoken yes/no"
-                    )
-                    startCurrentListening()
-                }
-            }
-        }
-    }
-
-    /**
-     * v2.0.2: watch SendAsk for the lifetime of the process (started
-     * once, beside the gate watcher). A send ask that appears while
-     * THIS manager's Universal pipeline turn is running belongs to
-     * that turn: arm the spoken yes/no intercept and listen for it.
-     * The ask text itself already reached the user as a caption via
-     * the pipeline's onAssistantDelta sink — never spoken.
-     */
-    private fun startSendAskWatcherIfNeeded() {
-        if (sendAskWatcherStarted) return
-        sendAskWatcherStarted = true
-        scope.launch {
-            SendAsk.pending.collect { pending ->
-                if (pending == null) {
-                    sendAskArmed = false
-                } else if (active && _uiState.value.mode == VoiceMode.UNIVERSAL &&
-                    pipelineRunning && !_uiState.value.micMuted
-                ) {
-                    sendAskArmed = true
-                    AppLog.i(
-                        "SendAsk",
-                        "ask #${pending.id} pending during a voice turn — " +
-                            "listening for a spoken yes/no"
-                    )
-                    startCurrentListening()
-                }
-            }
-        }
-    }
-
-    private enum class GateReply { APPROVE, DENY, NONE }
-
-    /** Spoken gate replies, normalized (lowercase, trailing punctuation stripped). */
-    private fun classifyGateReply(text: String): GateReply {
-        val normalized = text.trim().lowercase().trimEnd('.', '!', '?', ' ')
-        return when (normalized) {
-            "yes", "yeah", "send", "send it", "ok", "okay", "confirm" ->
-                GateReply.APPROVE
-            "no", "cancel", "stop" -> GateReply.DENY
-            else -> GateReply.NONE
-        }
-    }
-
-    /** Indic Unicode blocks checked by the mis-script guard. */
-    private val INDIC_RANGES = listOf(
-        0x0900..0x097F, // Devanagari
-        0x0980..0x09FF, // Bengali
-        0x0A00..0x0A7F, // Gurmukhi
-        0x0A80..0x0AFF, // Gujarati
-        0x0B80..0x0BFF, // Tamil
-        0x0C00..0x0C7F, // Telugu
-        0x0C80..0x0CFF, // Kannada
-        0x0D00..0x0D7F  // Malayalam
-    )
-
-    /** Share of letters in [text] that fall in an Indic block (0 when no letters). */
-    private fun indicLetterRatio(text: String): Float {
-        var letters = 0
-        var indic = 0
-        for (ch in text) {
-            if (ch.isLetter()) {
-                letters++
-                if (INDIC_RANGES.any { ch.code in it }) indic++
-            }
-        }
-        return if (letters == 0) 0f else indic.toFloat() / letters
-    }
-
-    /**
-     * True when [text] looks like a recognizer language slip: the
-     * effective STT language expects Latin script (en-* or Hinglish)
-     * but the final transcript is >40% Indic-script letters. Once per
-     * command only — the retry's result is always accepted.
-     */
-    private fun misScriptSuspected(text: String): Boolean {
-        if (guardUsedThisTurn) return false
-        val s = settings ?: return false
-        val tag = UniversalVoice.sttLanguageTag(s.language)
-        val latinExpected = tag.startsWith("en") || s.language == "Hinglish"
-        if (!latinExpected) return false
-        return indicLetterRatio(text) > 0.40f
-    }
-
-    /** The other English tag for the guard's one re-listen (en-IN ↔ en-US). */
-    private fun alternateEnglishTag(): String {
-        val s = settings ?: return "en-US"
-        return if (UniversalVoice.sttLanguageTag(s.language) == "en-IN") {
-            "en-US"
-        } else {
-            "en-IN"
-        }
-    }
-
-    /**
-     * F8 (#18): partial-result pre-warm. A partial that confidently
-     * names a media target ("play … spotify / youtube / video")
-     * pre-LAUNCHES that app — only the launch, never a search or
-     * playback — so when the final command lands, its deep intent
-     * finds the app already foreground and waitForPackage returns
-     * instantly. At most once per listen cycle; ambiguous partials
-     * (no platform word) never pre-warm. If the final command turns
-     * out different, the only cost is an app sitting open.
-     */
-    private fun maybePrewarm(partial: String) {
-        if (prewarmedThisCycle || pipelineRunning) return
-        if (_uiState.value.mode != VoiceMode.UNIVERSAL) return
-        val normalized = partial.lowercase()
-        if (!normalized.contains("play")) return
-        val app = when {
-            normalized.contains("spotify") -> "Spotify"
-            normalized.contains("youtube") || normalized.contains("video") ->
-                "YouTube"
-            else -> return
-        }
-        prewarmedThisCycle = true
-        val ctx = appContext ?: return
-        AppLog.i("Agent", "prewarm=$app (partial: '${partial.take(40)}')")
-        scope.launch(Dispatchers.IO) {
-            runCatching { DeepIntents(ctx).openApp(app) }
-        }
-    }
-
-    /** A final STT result that passed every intercept — run the turn. */
-    private fun dispatchUniversalFinal(text: String) {
-        // v1.9.0 (#6): a final that reached dispatch is a CLEAN
-        // result — remember the language it was heard in.
-        noteCleanSttResult()
-        guardUsedThisTurn = false
-        // v1.8 (#8): a new turn lifts any previous "Stop reading".
-        readingSuppressed = false
-        CrashLogger.stage(TAG, "universal: final result received")
-        AppLog.d("STT", "final result (${text.length} chars): ${text.take(80)}")
-        _uiState.value = _uiState.value.copy(sttHint = null)
-        setTurnCaption(fromUser = true, text = text, partial = false)
-        userCaptionIndex = -1
-        setStatus(VoiceStatus.THINKING)
-        routeUniversalTurn(text)
-    }
-
-    private class UniversalListener : UniversalVoice.Listener {
-        override fun onListeningStarted() {
-            if (!active) return
-            // F8 (#18): a new listen cycle re-arms the media pre-warm.
-            prewarmedThisCycle = false
-            // F5: a fresh listen cycle buries any stale recognizer hint.
-            if (_uiState.value.sttHint != null) {
-                _uiState.value = _uiState.value.copy(sttHint = null)
-            }
-        }
-
-        /**
-         * F8 (#5): SpeechRecognizer hit a network error — swap to the
-         * offline Vosk fallback (which restarts the listen cycle
-         * on-device). When the model is missing, startVoskFallback
-         * only shows the hint and the normal error path below continues.
-         */
-        override fun onNetworkError() {
-            if (!active) return
-            if (_uiState.value.mode != VoiceMode.UNIVERSAL) return
-            AppLog.w("STT", "SpeechRecognizer network error — trying Vosk offline fallback")
-            startVoskFallback("SpeechRecognizer network error")
-        }
-
-        override fun onBeginningOfSpeech() {
-            if (!active) return
-            if (_uiState.value.sttHint != null) {
-                _uiState.value = _uiState.value.copy(sttHint = null)
-            }
-        }
-
-        override fun onPartialResult(text: String) {
-            if (!active) return
-            if (!universalFirstPartialLogged) {
-                universalFirstPartialLogged = true
-                CrashLogger.stage(TAG, "universal: first partial result")
-            }
-            if (_uiState.value.sttHint != null) {
-                _uiState.value = _uiState.value.copy(sttHint = null)
-            }
-            setTurnCaption(fromUser = true, text = text, partial = true)
-            // F8 (#18): a confident media partial pre-launches the app.
-            maybePrewarm(text)
-        }
-
-        override fun onFinalResult(text: String) {
-            if (!active) return
-            // v2.0.2 SendAsk host: while a just-in-time send ask from
-            // THIS voice turn is pending, the utterance is its yes/no
-            // reply — never a new command. Same word patterns as the
-            // gate replies, plus "don't" (see SendAsk.parseAnswer).
-            val pendingAsk = SendAsk.pending.value
-            if (sendAskArmed && pendingAsk != null) {
-                when (SendAsk.answer(text)) {
-                    SendAnswer.YES -> {
-                        sendAskArmed = false
-                        AppLog.i("SendAsk", "spoken reply APPROVED ask #${pendingAsk.id}")
-                        addCaption(
-                            VoiceCaption(
-                                fromUser = false,
-                                text = "Confirmed — sending.",
-                                kind = CaptionKind.SYSTEM,
-                                partial = false
-                            )
-                        )
-                    }
-                    SendAnswer.NO -> {
-                        sendAskArmed = false
-                        AppLog.i("SendAsk", "spoken reply DENIED ask #${pendingAsk.id}")
-                        addCaption(
-                            VoiceCaption(
-                                fromUser = false,
-                                text = "Not sending.",
-                                kind = CaptionKind.SYSTEM,
-                                partial = false
-                            )
-                        )
-                    }
-                    SendAnswer.NON_ANSWER -> {
-                        AppLog.d(
-                            "SendAsk",
-                            "utterance was not a yes/no — send ask re-asks once"
-                        )
-                        startCurrentListening()
-                    }
-                }
-                return
-            }
-            // F7 GateHost (c): while a gate from THIS voice turn is
-            // pending, the utterance is its yes/no reply — it must
-            // never be routed as a new command.
-            val pendingGate = com.nshd.jarvis2.brain.tools.ConfirmGate.pending.value
-            if (gateArmed && pendingGate != null) {
-                when (classifyGateReply(text)) {
-                    GateReply.APPROVE -> {
-                        gateArmed = false
-                        AppLog.i("Gate", "spoken reply APPROVED gate #${pendingGate.id}")
-                        addCaption(
-                            VoiceCaption(
-                                fromUser = false,
-                                text = "You confirmed — approved.",
-                                kind = CaptionKind.SYSTEM,
-                                partial = false
-                            )
-                        )
-                        com.nshd.jarvis2.brain.tools.ConfirmGate.complete(
-                            pendingGate.id, approved = true
-                        )
-                    }
-                    GateReply.DENY -> {
-                        gateArmed = false
-                        AppLog.i("Gate", "spoken reply DENIED gate #${pendingGate.id}")
-                        addCaption(
-                            VoiceCaption(
-                                fromUser = false,
-                                text = "You said no — cancelled.",
-                                kind = CaptionKind.SYSTEM,
-                                partial = false
-                            )
-                        )
-                        com.nshd.jarvis2.brain.tools.ConfirmGate.complete(
-                            pendingGate.id, approved = false
-                        )
-                    }
-                    GateReply.NONE -> {
-                        AppLog.d(
-                            "Gate",
-                            "utterance was not a yes/no — still waiting for confirmation"
-                        )
-                        startCurrentListening()
-                    }
-                }
-                return
-            }
-            // F7/I: this final IS the mis-script guard's re-listen —
-            // accept it in whatever script it landed (he may genuinely
-            // be speaking that language) and dispatch it.
-            if (guardRetryPending) {
-                guardRetryPending = false
-                guardOriginalText = null
-                AppLog.i("STT", "mis-script retry accepted (${text.length} chars)")
-                dispatchUniversalFinal(text)
-                return
-            }
-            // F7/I mis-script guard: effective language expects Latin
-            // script but the transcript is Indic-dominated → the
-            // recognizer slipped language. Suppress dispatch, re-listen
-            // ONCE with the alternate English tag; the retry's final
-            // (handled above) replaces this one. A no-match on the
-            // retry falls back to THIS text in onError — a command is
-            // never silently dropped.
-            if (misScriptSuspected(text)) {
-                guardUsedThisTurn = true
-                guardRetryPending = true
-                guardOriginalText = text
-                val altTag = alternateEnglishTag()
-                AppLog.w(
-                    "STT",
-                    "mis-script suspected (>40% Indic letters under a Latin " +
-                        "language) — re-listening once with $altTag"
-                )
-                _uiState.value = _uiState.value.copy(
-                    sttHint = "Heard it in the wrong script — listening again…"
-                )
-                universal?.startListeningWithLanguage(altTag)
-                return
-            }
-            // F7/F: dispatch is immediate — no handler delay sits
-            // between the final result and the pipeline.
-            dispatchUniversalFinal(text)
-        }
-
-        override fun onRms(rmsDb: Float) {
-            if (!active) return
-            // Recognizer dB range is roughly -2 (quiet) .. +10 (loud).
-            _amplitude.value = ((rmsDb + 2f) / 12f).coerceIn(0f, 1f)
-        }
-
-        override fun onError(message: String, fatal: Boolean) {
-            if (!active) return
-            if (fatal) {
-                fail(message)
-                return
-            }
-            // F7/I: the mis-script guard's re-listen heard nothing —
-            // dispatch the ORIGINAL transcript rather than losing the
-            // command entirely.
-            if (guardRetryPending &&
-                (message == "Didn't catch that" || message == "Didn't hear anything")
-            ) {
-                guardRetryPending = false
-                val original = guardOriginalText
-                guardOriginalText = null
-                if (!original.isNullOrBlank()) {
-                    AppLog.w(
-                        "STT",
-                        "mis-script retry heard nothing — dispatching the original transcript"
-                    )
-                    dispatchUniversalFinal(original)
-                    return
-                }
-            }
-            AppLog.w("STT", "recognizer error: $message")
-            // F8 (#5): under the Vosk fallback the hint belongs to the
-            // fallback ("Offline — on-device commands"), not this error.
-            if (!offlineSttActive) {
-                _uiState.value = _uiState.value.copy(sttHint = message)
-            }
-            // One-shot recognizer ended (silence / no match / transient
-            // service error) — brief pause, then the loop listens
-            // again. F7: the pause dropped 300 ms → 150 ms (the
-            // recognizer instance is now reused, so restart is cheap).
-            // F7 GateHost: while gateArmed, re-listening for the
-            // confirmation reply is allowed even mid-pipeline-turn.
-            scope.launch {
-                delay(150)
-                if (active && !callPaused &&
-                    _uiState.value.mode == VoiceMode.UNIVERSAL &&
-                    !_uiState.value.micMuted && !mediaListenBlocked &&
-                    !offlineSttActive &&
-                    (!pipelineRunning || gateArmed || sendAskArmed)
-                ) {
-                    setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
-                    universal?.startListening()
-                }
-            }
-        }
-
-    }
-
-    /** F5: pipeline failure replies — friendly-mapped before display/speech. */
-    private fun isFailureReply(reply: String): Boolean =
-        reply.startsWith("I couldn't") ||
-            reply.startsWith("Please configure") ||
-            reply.startsWith("I hit a problem") ||
-            reply.startsWith("Failed:")
-
-    private fun routeUniversalTurn(userText: String) {
-        val store = providerStore ?: return
-        val s = settings ?: return
-        val db = memoryDb ?: return
-        val ctx = appContext ?: return
-        AppLog.d("Agent", "user turn received (${userText.length} chars)")
-        pipelineRunning = true
-        pipelineDone = false
-        val silent = isSilent
-        scope.launch {
-            // Universal voice uses exactly the same pipeline as text
-            // chat: local memory commands, deterministic quick commands
-            // (which work with no API key), then the tool agent loop —
-            // now with streamed deltas for live captions (text-only).
-            val reply = try {
-                AgentPipeline.handleUserText(
-                    context = ctx,
-                    text = userText,
-                    settings = s,
-                    memoryDb = db,
-                    providerStore = store,
-                    codeMode = false,
-                    onEvent = { event ->
-                        // F3: media started → the recognizer must not
-                        // auto-restart over the music (see noteMediaPlayed).
-                        if (event.kind == ToolEventKind.SUCCESS &&
-                            event.toolName in ToolRegistry.MEDIA_PLAY_TOOLS
-                        ) {
-                            noteMediaPlayed()
-                        }
-                        addCaption(
-                            VoiceCaption(
-                                fromUser = false,
-                                text = event.chipText,
-                                kind = CaptionKind.TOOL
-                            )
-                        )
-                    },
-                    // v2.0.2: deltas are CAPTIONS ONLY — nothing is
-                    // spoken. A just-in-time send ask also arrives here
-                    // (via the pipeline's ask sink) as a plain caption.
-                    onAssistantDelta = { delta ->
-                        if (!active) return@handleUserText
-                        synchronized(assistantTurn) { assistantTurn.append(delta) }
-                        setTurnCaption(
-                            fromUser = false,
-                            text = assistantTurn.toString(),
-                            partial = true
-                        )
-                    }
-                )
-            } catch (e: Exception) {
-                // Raw exception text goes to the log ONLY (F5) — the
-                // reply string is a clean failure marker.
-                AppLog.e("Agent", "universal turn crashed: ${e.message ?: "unknown"}", e)
-                "I couldn't reach the model — something went wrong handling that."
-            }
-            pipelineRunning = false
-            pipelineDone = true
-            if (!active) return@launch
-            val failed = isFailureReply(reply)
-            // F5 error hygiene: a failed turn's raw provider text never
-            // becomes the caption or the chat history. The
-            // caption/history get the FriendlyErrors headline; the raw
-            // text already lives in AppLog under the API tag.
-            val displayReply = if (failed) FriendlyErrors.map(reply).headline else reply
-            withContext(Dispatchers.IO) {
-                db.addMessage("user", userText)
-                db.addMessage("assistant", displayReply)
-            }
-            // Finalize the assistant caption with the display reply.
-            synchronized(assistantTurn) {
-                assistantTurn.setLength(0)
-                assistantTurn.append(displayReply)
-            }
-            setTurnCaption(fromUser = false, text = displayReply, partial = false)
-            assistantCaptionIndex = -1
-            synchronized(assistantTurn) { assistantTurn.setLength(0) }
-            // Turn complete — no recognizer hint survives into the
-            // next state (the stale "Didn't catch that" bug, F5).
-            _uiState.value = _uiState.value.copy(sttHint = null)
-
-            when {
-                silent -> {
-                    if (failed) chime?.playError() else chime?.playSuccess()
-                    maybeResumeUniversalListening()
-                }
-                failed -> {
-                    chime?.playError()
-                    // v2.0.2: the friendly line is text-only (caption +
-                    // history already hold it) — listening resumes at once.
-                    maybeResumeUniversalListening()
-                }
-                else -> {
-                    // v2.0.2: the reply is already in captions/history
-                    // as text — listening resumes at once.
-                    maybeResumeUniversalListening()
-                }
-            }
-        }
-    }
-
-    /**
-     * Listening resumes once the pipeline has finished (v2.0.2:
-     * replies are text-only, so there is no speech queue to drain).
-     * Called from turn-end/unmute paths.
-     */
-    private fun maybeResumeUniversalListening() {
-        if (!active) return
-        // v1.8 (#11): a phone call owns the mic — resume waits for IDLE.
-        if (callPaused) return
-        if (_uiState.value.mode != VoiceMode.UNIVERSAL) return
-        // F3: media is playing — never auto-restart the recognizer;
-        // only a mic tap (setMicMuted) or a new wake clears the block.
-        if (mediaListenBlocked) return
-        if (_uiState.value.micMuted) return
-        if (pipelineRunning || !pipelineDone) return
-        setStatus(VoiceStatus.UNIVERSAL_ACTIVE)
-        startCurrentListening()
     }
 
     // ── Caption bookkeeping ────────────────────────────────────────────

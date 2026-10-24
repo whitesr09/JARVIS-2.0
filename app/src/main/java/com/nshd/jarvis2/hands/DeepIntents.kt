@@ -297,17 +297,22 @@ class DeepIntents(context: Context) {
     suspend fun spotifyPlay(query: String): ActionResult {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return ActionResult(false, "The Spotify search query is blank.")
+        AppLog.i("Hands", "spotify_play: start query='$cleanQuery'")
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Opening Spotify…")
         // F7 plan phases: 1 Open Spotify → 2 Search → 3 Play.
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(1)
         val opened = openApp("Spotify")
-        if (!opened.success) return opened
+        if (!opened.success) {
+            AppLog.w("Hands", "spotify_play: step=open FAILED: ${opened.message}")
+            return opened
+        }
         TaskState.throwIfStopRequested() // #61: after open-app
 
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
-                true,
-                "Opened Spotify. Enable Accessibility to let Jarvis search and play automatically."
+                false,
+                "Spotify opened, but Accessibility is not enabled, so Jarvis " +
+                    "cannot search or play automatically — nothing was played."
             )
         val reader = service.screenReader()
         val metrics = appContext.resources.displayMetrics
@@ -322,6 +327,7 @@ class DeepIntents(context: Context) {
         } else {
             HandsActions.waitForPackage(SPOTIFY_PACKAGE, APP_WINDOW_WAIT_MS)
         }
+        AppLog.i("Hands", "spotify_play: step=open done, package=${reader.currentPackage()}")
 
         // 1) Search tab (bottom nav) — poll until it shows up.
         // F8 (#36): the positional primary stays; the Spotify
@@ -340,13 +346,20 @@ class DeepIntents(context: Context) {
             )
         val tabClick = HandsActions.clickElement(tab.index)
         if (!tabClick.success) {
+            AppLog.w("Hands", "spotify_play: step=search-tab tap FAILED: ${tabClick.message}")
             return ActionResult(false, "Spotify opened, but the Search tab could not be tapped: ${tabClick.message}")
         }
+        AppLog.i("Hands", "spotify_play: step=search-tab tapped")
         TaskState.throwIfStopRequested() // #61: after search-tab tap
 
         // 2) Search input: tap the search bar if the field isn't
         // already focused/editable, then type the query (SET_TEXT —
         // search fields use replace semantics).
+        // v2.0.3 stall hardening: the old code stopped at the search
+        // page whenever the bar matched neither the primary selector
+        // nor the playbook. Now it falls back to tapping the search
+        // field area and re-snapshotting before giving up, and a
+        // failed SET_TEXT retries tap-then-type once.
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Searching '$cleanQuery'…")
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(2)
         val inputReady = HandsActions.waitForSnapshot(SEARCH_INPUT_WAIT_MS) { snapshot ->
@@ -356,39 +369,88 @@ class DeepIntents(context: Context) {
             false,
             "Spotify's search screen opened, but no search field appeared."
         )
-        val directField = inputReady.firstOrNull { it.editable }
-        if (directField == null) {
-            // F8 (#36): inline search-bar check first (primary), the
-            // playbook's search_field descriptors as its fallback.
-            val bar = inputReady.firstOrNull { isSpotifySearchBar(it) }
+        var field = inputReady.firstOrNull { it.editable }
+        if (field == null) {
+            var bar = inputReady.firstOrNull { isSpotifySearchBar(it) }
                 ?: Playbooks.find(
                     inputReady, Playbooks.SPOTIFY_PACKAGE, Playbooks.ROLE_SEARCH_FIELD
                 )
-                ?: return ActionResult(false, "Spotify's search field could not be found.")
-            val barClick = HandsActions.clickElement(bar.index)
-            if (!barClick.success) {
-                return ActionResult(false, "Spotify's search bar could not be tapped: ${barClick.message}")
+            if (bar == null) {
+                // Last-resort search-page recovery: tap where the
+                // search field lives, then look again. Spotify builds
+                // vary the bar's viewId/label; a blind tap + fresh
+                // snapshot beats dying on the search page.
+                AppLog.w(
+                    "Hands",
+                    "spotify_play: step=search-bar primary+playbook missed — " +
+                        "tapping search-field area and re-snapshotting"
+                )
+                HandsActions.tapPercent(50.0, 12.0)
+                val retried = HandsActions.waitForSnapshot(SEARCH_INPUT_WAIT_MS) { snapshot ->
+                    snapshot.any { it.editable } ||
+                        snapshot.any { isSpotifySearchBar(it) }
+                }
+                if (retried != null) {
+                    field = retried.firstOrNull { it.editable }
+                    bar = retried.firstOrNull { isSpotifySearchBar(it) }
+                        ?: Playbooks.find(
+                            retried, Playbooks.SPOTIFY_PACKAGE, Playbooks.ROLE_SEARCH_FIELD
+                        )
+                }
             }
-            if (!HandsActions.waitForEditable(SEARCH_INPUT_WAIT_MS)) {
-                return ActionResult(false, "Spotify's search field never became editable.")
+            if (field == null) {
+                if (bar == null) {
+                    AppLog.w("Hands", "spotify_play: step=search-bar FAILED (all fallbacks)")
+                    return ActionResult(
+                        false,
+                        "Spotify's search field could not be found " +
+                            "(primary selector, playbook and search-area tap all missed)."
+                    )
+                }
+                val barClick = HandsActions.clickElement(bar.index)
+                if (!barClick.success) {
+                    AppLog.w("Hands", "spotify_play: step=search-bar tap FAILED: ${barClick.message}")
+                    return ActionResult(false, "Spotify's search bar could not be tapped: ${barClick.message}")
+                }
+                if (!HandsActions.waitForEditable(SEARCH_INPUT_WAIT_MS)) {
+                    return ActionResult(false, "Spotify's search field never became editable.")
+                }
             }
-        } else {
-            // Focus the field so SET_TEXT lands in it.
-            HandsActions.clickElement(directField.index)
         }
-        val typed = HandsActions.setTextOnFocused(cleanQuery)
+        if (field != null) {
+            // Focus the field so SET_TEXT lands in it (a failed focus
+            // tap is logged, not fatal — the field may already be focused).
+            val focusClick = HandsActions.clickElement(field.index)
+            if (!focusClick.success) {
+                AppLog.w("Hands", "spotify_play: step=search-field focus tap FAILED: ${focusClick.message}")
+            }
+        }
+        var typed = HandsActions.setTextOnFocused(cleanQuery)
         if (!typed.success) {
+            // v2.0.3: SET_TEXT failed — retry tap-then-type once
+            // against a fresh snapshot before reporting failure.
+            AppLog.w(
+                "Hands",
+                "spotify_play: step=type SET_TEXT FAILED (${typed.message}) — retrying tap-then-type"
+            )
+            val freshField = reader.snapshot().firstOrNull { it.editable }
+            if (freshField != null) HandsActions.clickElement(freshField.index)
+            typed = HandsActions.setTextOnFocused(cleanQuery)
+        }
+        if (!typed.success) {
+            AppLog.w("Hands", "spotify_play: step=type FAILED after retry: ${typed.message}")
             return ActionResult(false, "Spotify search opened, but the query could not be typed: ${typed.message}")
         }
+        AppLog.i("Hands", "spotify_play: step=type done query='$cleanQuery'")
         TaskState.throwIfStopRequested() // #61: after search-field set
 
         // 3) First song row — poll results until a pick exists.
-        var pick: SpotifyPick? = null
+        var rows: List<SpotifyPick> = emptyList()
         val results = HandsActions.waitForSnapshot(RESULTS_WAIT_MS) { snapshot ->
-            pick = pickSpotifyResult(snapshot, screenWidth, screenHeight)
-            pick != null
+            rows = pickSpotifyResults(snapshot, screenWidth, screenHeight)
+            rows.isNotEmpty()
         }
-        val chosen = pick ?: run {
+        val chosen = rows.firstOrNull() ?: run {
             AppLog.w(
                 "Hands",
                 "spotify_play: no song row after waiting. Screen: ${reader.serialize(25)}"
@@ -400,24 +462,50 @@ class DeepIntents(context: Context) {
                     "Spotify is showing a different layout."
             )
         }
+        AppLog.i("Hands", "spotify_play: step=results picked '${chosen.title}' (${rows.size} rows)")
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Playing…")
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
         TaskState.throwIfStopRequested() // #61: before final tap
         val rowClick = HandsActions.clickElement(chosen.element.index)
         if (!rowClick.success) {
+            AppLog.w("Hands", "spotify_play: step=row-tap FAILED: ${rowClick.message}")
             return ActionResult(
                 false,
                 "Spotify results were shown, but the song could not be tapped: ${rowClick.message}"
             )
         }
+        AppLog.i("Hands", "spotify_play: step=row-tap done '${chosen.title}'")
 
         // 4) Verify playback: a Pause affordance means audio is
         // playing. If a track/album page opened instead of playing,
         // tap its Play button and verify again.
+        // v2.0.3: success means PLAYBACK VERIFIED, never merely
+        // "the search page was reached" or "the row was tapped".
+        // A failed first verify retries the tap once on the next row
+        // candidate before falling through to the Play button.
         TaskState.throwIfStopRequested() // #61: before playback verify
         if (awaitPauseAffordance(PAUSE_VERIFY_MS)) {
             markWarm(SPOTIFY_PACKAGE) // #23
+            AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED '${chosen.title}'")
             return ActionResult(true, "Playing '${chosen.title}' on Spotify.")
+        }
+        val nextRow = rows.getOrNull(1)
+        if (nextRow != null) {
+            AppLog.w(
+                "Hands",
+                "spotify_play: step=verify no Pause after first row — " +
+                    "retrying tap once on next row '${nextRow.title}'"
+            )
+            val retryClick = HandsActions.clickElement(nextRow.element.index)
+            if (retryClick.success && awaitPauseAffordance(PAUSE_VERIFY_MS)) {
+                markWarm(SPOTIFY_PACKAGE) // #23
+                AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED on retry '${nextRow.title}'")
+                return ActionResult(true, "Playing '${nextRow.title}' on Spotify.")
+            }
+            AppLog.w(
+                "Hands",
+                "spotify_play: step=verify retry row tap success=${retryClick.success} — still no Pause"
+            )
         }
         val pageSnapshot = reader.snapshot()
         // F8 (#36): inline Play check is the primary; the playbook's
@@ -434,14 +522,19 @@ class DeepIntents(context: Context) {
             HandsActions.clickElement(playButton.index)
             if (awaitPauseAffordance(PAUSE_VERIFY_MS)) {
                 markWarm(SPOTIFY_PACKAGE) // #23
+                AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED via Play button")
                 return ActionResult(true, "Playing '${chosen.title}' on Spotify.")
             }
         }
-        markWarm(SPOTIFY_PACKAGE) // #23: row tap succeeded (playback unconfirmed)
+        // v2.0.3 honesty: a row tap without a Pause affordance is a
+        // FAILURE naming the step — never a success. The song row was
+        // tapped, but playback could not be confirmed on screen.
+        AppLog.w("Hands", "spotify_play: step=verify FAILED — no Pause affordance after row tap(s)")
         return ActionResult(
-            true,
-            "Started '${chosen.title}' on Spotify (the player state " +
-                "couldn't be confirmed on screen)."
+            false,
+            "Spotify's '${chosen.title}' row was tapped, but playback " +
+                "could not be confirmed (no Pause control appeared) — " +
+                "the song may not have started."
         )
     }
 
@@ -475,11 +568,11 @@ class DeepIntents(context: Context) {
      * exists only rows below it compete (the top hit above it can be
      * an artist/album card). Topmost wins.
      */
-    private fun pickSpotifyResult(
+    private fun pickSpotifyResults(
         snapshot: List<UiElement>,
         screenWidth: Int,
         screenHeight: Int
-    ): SpotifyPick? {
+    ): List<SpotifyPick> {
         val regionTop = screenHeight / 8
         val regionBottom = screenHeight * 7 / 8
         val songsHeader = snapshot.firstOrNull { element ->
@@ -508,22 +601,28 @@ class DeepIntents(context: Context) {
                     SPOTIFY_CHROME_WORDS.any { label.equals(it, ignoreCase = true) } -> false
                 else -> true
             }
-        }
-        val primary = rows.minByOrNull { it.bounds.top }
-        if (primary == null) {
+        }.sortedBy { it.bounds.top }
+        if (rows.isEmpty()) {
             AppLog.d(
                 "Hands",
                 "spotify_play pick: none (${candidates.size} candidates, ads skipped=$skippedAds)"
             )
-            return null
+            return emptyList()
         }
         AppLog.d(
             "Hands",
             "spotify_play pick: ${rows.size} rows considered (ads skipped=$skippedAds), " +
-                "tapped index=${primary.index} label='${primary.label.take(60)}'"
+                "first index=${rows.first().index} label='${rows.first().label.take(60)}'"
         )
-        return SpotifyPick(primary, spotifyTitle(primary.label))
+        return rows.map { SpotifyPick(it, spotifyTitle(it.label)) }
     }
+
+    /** First song row (the list version's head), kept for callers that need one pick. */
+    private fun pickSpotifyResult(
+        snapshot: List<UiElement>,
+        screenWidth: Int,
+        screenHeight: Int
+    ): SpotifyPick? = pickSpotifyResults(snapshot, screenWidth, screenHeight).firstOrNull()
 
     /** "Song Name • Artist Name" → "Song Name" (rows merge descendant text). */
     private fun spotifyTitle(label: String): String {

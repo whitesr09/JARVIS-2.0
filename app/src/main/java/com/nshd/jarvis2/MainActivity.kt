@@ -34,10 +34,9 @@ data class JarvisSettings(
     /** Gemini Live model, WITHOUT the "models/" prefix (the client adds it). */
     val liveModel: String = "gemini-2.5-flash-native-audio-preview-12-2025",
     /**
-     * Voice engine selection (F2): "AUTO" (Native Live when the model
-     * supports it, otherwise Universal), "NATIVE" (Gemini Live only,
-     * with Universal fallback on failure), "UNIVERSAL" (SpeechRecognizer
-     * → chat model → TTS; works with any provider/model).
+     * Voice engine selection (F2): "AUTO" and "NATIVE" both mean
+     * Gemini Live only (v2.0.3 removed the Universal fallback engine;
+     * a stored "UNIVERSAL" value migrates to "NATIVE" on load).
      */
     val voiceEngine: String = "AUTO",
     /** Floating-overlay companion (see AvatarCatalog); default "droid". */

@@ -166,7 +166,7 @@ fun HomeScreen(
 
         // F4: the Canvas orb (orb.html system) at hero size — state
         // mapped from the live voice session via toOrbState()
-        // (CONNECTING renders as THINKING, UNIVERSAL_ACTIVE as
+        // (CONNECTING renders as THINKING;
         // LISTENING); the legacy `listening` flag still forces LISTENING.
         // F7: BIGGER (min(screenWidth × 0.92, 420dp)) and state via
         // the single orbStateFor helper — task activity shows as
@@ -294,7 +294,7 @@ private fun StatusPill(
             label = "CONNECTING…"
             pulsing = true
         }
-        VoiceStatus.LISTENING, VoiceStatus.UNIVERSAL_ACTIVE -> {
+        VoiceStatus.LISTENING -> {
             dotColor = scheme.primary
             label = "LISTENING"
             pulsing = true

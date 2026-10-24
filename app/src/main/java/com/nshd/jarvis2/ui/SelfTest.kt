@@ -71,13 +71,16 @@ object SelfTest {
             }
         )
 
-        // 3) v2.0.2: TTS is removed — replies are always text-only, so
-        // there is no TTS engine check anymore (check numbering kept
-        // stable for the diagnostics log).
+        // 3) v2.0.3: Live voice replies speak again (Gemini Live
+        // audio, not a session TTS engine); the only system TTS use
+        // is the manual chat-bubble "Speak" action. No session TTS
+        // engine exists to check (check numbering kept stable for
+        // the diagnostics log).
         results += SelfTestResult(
-            name = "Text-to-speech",
+            name = "Voice replies",
             passed = true,
-            detail = "Removed in v2.0.2 — replies are text-only by design"
+            detail = "Live audio replies restored in v2.0.3; manual " +
+                "chat Speak is the only system-TTS use"
         )
 
         // 4) Accessibility service alive.

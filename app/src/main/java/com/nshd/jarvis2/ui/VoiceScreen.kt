@@ -254,14 +254,12 @@ private fun VoiceSessionBody(
         )
     }
 
-    // F8 (#1): "Why?" — after a Live failure (error state, or a
-    // session that switched to Universal), open the self-diagnosis:
-    // the failure explained + the recent Live log + the next step.
-    val switchedToUniversal = captions.any {
-        it.kind == CaptionKind.SYSTEM && it.text.contains("switched to Universal")
-    }
+    // F8 (#1): "Why?" — after a Live failure (error state),
+    // open the self-diagnosis: the failure explained + the recent
+    // Live log + the next step. (v2.0.3: the old "switched to
+    // Universal" caption path is deleted with the fallback engine.)
     if (manager.liveDiagnosis() != null &&
-        (uiState.status == VoiceStatus.ERROR || switchedToUniversal)
+        uiState.status == VoiceStatus.ERROR
     ) {
         TextButton(
             onClick = { showLiveDiagnosis = true },
@@ -311,18 +309,6 @@ private fun VoiceSessionBody(
         )
     }
 
-    // v2.0.2: Universal replies are text-only — no device-TTS voice
-    // line anymore (STT in, text answer out).
-    if (uiState.mode == VoiceMode.UNIVERSAL) {
-        Text(
-            text = "Universal replies are text-only.",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier
-                .align(Alignment.CenterHorizontally)
-                .padding(top = 4.dp)
-        )
-    }
 
     Spacer(modifier = Modifier.height(JarvisDimens.spaceMd))
 
@@ -579,16 +565,15 @@ private fun VoiceSessionBody(
 
 @Composable
 private fun ModeBadge(uiState: VoiceUiState) {
-    // The badge names the ENGINE (F2): "LIVE • Kore" for native audio,
-    // "UNIVERSAL • <chat model>" for the any-model engine. LIVE reads
-    // as a success state, Universal stays neutral.
+    // The badge names the ENGINE (F2): "LIVE • Kore" for native
+    // audio. LIVE reads as a success state. (v2.0.3: the Universal
+    // engine is removed, so no Universal badge arm remains.)
     // F5: local pill (not JarvisPill) so the text is 10sp, single-line,
     // and the model part is truncated to 18 chars — the full label
     // used to push the header title into a second line.
     val raw = uiState.engineLabel.ifBlank {
         when (uiState.mode) {
             VoiceMode.LIVE -> "LIVE • ${uiState.voiceName}"
-            VoiceMode.UNIVERSAL -> "UNIVERSAL"
             VoiceMode.NONE -> "VOICE"
         }
     }
@@ -766,6 +751,5 @@ private fun statusText(status: VoiceStatus, assistantName: String, micMuted: Boo
         VoiceStatus.LISTENING -> if (micMuted) "Microphone muted — tap the mic to resume" else "Listening…"
         VoiceStatus.SPEAKING -> "$assistantName is speaking…"
         VoiceStatus.THINKING -> "$assistantName is thinking…"
-        VoiceStatus.UNIVERSAL_ACTIVE -> "Listening…"
         VoiceStatus.ERROR -> "Something went wrong"
     }

@@ -25,9 +25,11 @@ import java.util.concurrent.atomic.AtomicLong
  *    as ordinary text. It is never spoken.
  *
  * Answers: a voice session in progress answers with one spoken
- * yes/no (VoiceSessionManager's SendAsk host intercepts it); a
- * typed-chat session answers with its next message (AgentPipeline
- * checks [pending] BEFORE normal routing — no mic auto-start).
+ * yes/no (v2.0.3: VoiceSessionManager's Live transcript intercept
+ * answers it — the old Universal STT host is deleted with that
+ * engine); a typed-chat session answers with its next message
+ * (AgentPipeline checks [pending] BEFORE normal routing — no mic
+ * auto-start).
  * Yes → the caller grants the existing one-shot SendPermit and
  * performs the send immediately (permit coverage is what prevents
  * the F7 second-gate deadlock). No / timeout → abort, "Not sent.",

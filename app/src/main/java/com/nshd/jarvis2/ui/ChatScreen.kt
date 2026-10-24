@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -105,7 +106,7 @@ private data class UiMessage(
 )
 
 /** #65/#66: actions offered by a chat bubble's long-press menu. */
-private enum class BubbleAction { COPY, SAVE, SHARE, EDIT, REGENERATE }
+private enum class BubbleAction { COPY, SPEAK, SAVE, SHARE, EDIT, REGENERATE }
 
 private enum class ChatMode { JARVIS, CODE }
 
@@ -183,9 +184,43 @@ fun ChatScreen(
         }
 
     // #72: release the dictation recognizer with the screen.
+    // v2.0.3: manual "Speak" for a long-pressed assistant bubble
+    // (pre-v2.0.2 behaviour, restored). This is a MANUAL chat
+    // action only — it never runs inside a voice session, and it
+    // is the only TextToSpeech use in the app. Speaking a second
+    // bubble stops the first; leaving the screen shuts TTS down.
+    var chatTts by remember { mutableStateOf<TextToSpeech?>(null) }
+    var ttsPendingText by remember { mutableStateOf<String?>(null) }
     DisposableEffect(Unit) {
         onDispose {
             dictRecognizer?.let { rec -> runCatching { rec.destroy() } }
+            chatTts?.let { tts -> runCatching { tts.stop(); tts.shutdown() } }
+        }
+    }
+    fun speakBubble(text: String) {
+        val clean = text.trim()
+        if (clean.isBlank()) return
+        val existing = chatTts
+        if (existing != null) {
+            runCatching { existing.stop() }
+            runCatching {
+                existing.speak(clean, TextToSpeech.QUEUE_FLUSH, null, "jarvis-chat-speak")
+            }
+            return
+        }
+        ttsPendingText = clean
+        chatTts = TextToSpeech(context.applicationContext) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                ttsPendingText?.let { pending ->
+                    ttsPendingText = null
+                    runCatching {
+                        chatTts?.speak(pending, TextToSpeech.QUEUE_FLUSH, null, "jarvis-chat-speak")
+                    }
+                }
+            } else {
+                ttsPendingText = null
+                hint = "Speech playback is not available on this device"
+            }
         }
     }
 
@@ -593,6 +628,8 @@ fun ChatScreen(
                 hint = "Editing — press send to replace that turn"
             }
 
+            BubbleAction.SPEAK -> speakBubble(msg.text)
+
             BubbleAction.REGENERATE -> regenerate()
         }
     }
@@ -661,10 +698,7 @@ fun ChatScreen(
                 )
                 val sessionActive = voiceState.status != VoiceStatus.IDLE
                 val engineLabel = when {
-                    sessionActive && voiceState.mode == VoiceMode.UNIVERSAL ->
-                        "Universal • ${voiceState.voiceName}"
                     sessionActive && voiceState.mode == VoiceMode.LIVE -> "Gemini Live"
-                    settings.voiceEngine.uppercase() == "UNIVERSAL" -> "Universal"
                     else -> "Gemini Live"
                 }
                 val statusWord = if (sessionActive) "Active" else "Off"
@@ -1235,6 +1269,15 @@ private fun MessageBubble(
                             onAction(BubbleAction.COPY, msg)
                         }
                     )
+                    if (!msg.fromUser) {
+                        DropdownMenuItem(
+                            text = { Text("Speak") },
+                            onClick = {
+                                menuOpen = false
+                                onAction(BubbleAction.SPEAK, msg)
+                            }
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("Save to Memory") },
                         onClick = {

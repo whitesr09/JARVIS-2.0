@@ -74,13 +74,14 @@ import kotlin.random.Random
 enum class OrbState { IDLE, LISTENING, THINKING, SPEAKING, ERROR }
 
 /**
- * Voice-session → orb mapping (CONNECTING renders as THINKING;
- * UNIVERSAL_ACTIVE is the Universal engine's listening state).
+ * Voice-session → orb mapping (CONNECTING renders as THINKING).
+ * v2.0.3: the Universal engine (and its UNIVERSAL_ACTIVE state) is
+ * removed; Live LISTENING covers the listening state.
  */
 fun VoiceStatus.toOrbState(): OrbState = when (this) {
     VoiceStatus.IDLE -> OrbState.IDLE
     VoiceStatus.CONNECTING -> OrbState.THINKING
-    VoiceStatus.LISTENING, VoiceStatus.UNIVERSAL_ACTIVE -> OrbState.LISTENING
+    VoiceStatus.LISTENING -> OrbState.LISTENING
     VoiceStatus.SPEAKING -> OrbState.SPEAKING
     VoiceStatus.THINKING -> OrbState.THINKING
     VoiceStatus.ERROR -> OrbState.ERROR

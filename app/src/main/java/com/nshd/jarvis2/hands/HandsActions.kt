@@ -18,6 +18,7 @@ import java.io.FileOutputStream
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import com.nshd.jarvis2.brain.tools.ConfirmGate
+import com.nshd.jarvis2.brain.tools.SendAsk
 import com.nshd.jarvis2.service.JarvisAccessibilityService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -1063,8 +1064,9 @@ object HandsActions {
 
     /**
      * Same single-mutex serialization, but with a 45-second bound: tap
-     * actions may suspend in the SensitiveTapGuard's ConfirmGate, whose
-     * own timeout is 30 s — the 15 s bound would cut the prompt short.
+     * actions may suspend in the SensitiveTapGuard's ConfirmGate or
+     * SendAsk, whose own timeouts are 30 s — the 15 s bound would cut
+     * the prompt short.
      */
     private suspend fun <T> serializedLong(block: suspend () -> T): T =
         mutex.withLock { withTimeout(45_000) { block() } }
@@ -1072,9 +1074,13 @@ object HandsActions {
     // ── SensitiveTapGuard (F3) ─────────────────────────────────────────
     //
     // Before any tap executes, the target's label / contentDescription /
-    // text is classified. SEND, SOCIAL and DESTRUCTIVE targets suspend
-    // in ConfirmGate (the same mechanism ToolExecutor uses); Allow runs
-    // the tap, Deny/timeout returns ActionResult(false, "User declined
+    // text is classified. v2.0.3: SEND targets NEVER reach ConfirmGate
+    // (no card) — a send tap without a live SendPermit suspends in
+    // SendAsk, the just-in-time voice ask (plain panel line + chat /
+    // caption message, voice/text "yes"), exactly like a send tool's
+    // own ask. SOCIAL and DESTRUCTIVE targets still suspend in
+    // ConfirmGate (non-send classes keep their card). Allow runs the
+    // tap, Deny/timeout returns ActionResult(false, "User declined
     // this action"). Never gated: our own package (including the
     // ConfirmGate dialog's own buttons), soft-keyboard keys, pure
     // navigation (back/home/tabs and friends), switches and sliders.
@@ -1112,12 +1118,38 @@ object HandsActions {
         val displayLabel = element?.label?.ifBlank { fallbackLabel }
             ?: fallbackLabel.ifBlank { labelText }
         // F5: every guard trigger is a log line (the ConfirmGate prompt
-        // + decision are logged by the gate itself).
+        // + decision are logged by the gate itself; SendAsk logs its
+        // own ask + decision under the "SendAsk" tag).
         com.nshd.jarvis2.core.AppLog.w(
             "Hands",
             "SensitiveTapGuard triggered ('$phrase') on " +
                 "'${displayLabel.trim().take(50)}' in ${packageName ?: "unknown app"}"
         )
+        if (phrase in SEND_PHRASES) {
+            // v2.0.3: the surviving send card lived HERE. A generic
+            // tap on a Send/Post control (model tap, macro replay,
+            // any path that did not come through a send tool) used to
+            // pop a ConfirmGate card — often invisible over the
+            // foreground app, so it timed out and the send died. Now
+            // it asks the same just-in-time voice ask instead: the
+            // recipient is the app, the text names the control. A
+            // send tool's own tap never reaches this branch (its
+            // permit is consumed above), so an approved send is never
+            // asked twice. If another ask is already pending,
+            // SendAsk.ask returns false (no stacking) and the tap is
+            // denied — never auto-sent.
+            val approved = SendAsk.ask(
+                appDisplayName(service, packageName),
+                "Send action '${displayLabel.trim().take(60)}'"
+            )
+            return if (approved) {
+                null
+            } else {
+                ActionResult(false, "Send tap was not confirmed — nothing was sent.")
+            }
+        }
+        // SOCIAL / DESTRUCTIVE only from here down: ConfirmGate
+        // STAYS for these non-send classes (v2.0.3 keeps that gate).
         val approved = ConfirmGate.confirm(
             "Tap '${displayLabel.trim().take(60)}' in ${appDisplayName(service, packageName)}?"
         )

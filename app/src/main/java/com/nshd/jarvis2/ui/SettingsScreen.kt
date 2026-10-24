@@ -716,7 +716,6 @@ fun SettingsScreen(
                 title = "Voice Engine",
                 subtitle = when (settings.voiceEngine) {
                     "NATIVE" -> "Native Live"
-                    "UNIVERSAL" -> "Universal"
                     else -> "Auto"
                 },
                 showDivider = true,
@@ -884,14 +883,15 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = "Universal voice — text-only replies",
+                text = "Voice replies — Live audio",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "v2.0.2: spoken replies are removed — the Universal " +
-                    "engine listens (STT) and answers in text (chat + " +
-                    "floating panel + Voice captions). No mic sounds.",
+                text = "v2.0.3: Live voice sessions speak again (Gemini " +
+                    "Live audio). The old system-voice fallback is gone: " +
+                    "if Live fails, the session ends with the Why? " +
+                    "diagnosis instead of switching engines. No mic sounds.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1228,7 +1228,7 @@ fun SettingsScreen(
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "JARVIS • v2.0.2",
+                text = "JARVIS • v2.0.3",
                 style = MaterialTheme.typography.labelMedium.copy(
                     letterSpacing = 1.2.sp
                 ),
@@ -1409,7 +1409,7 @@ fun SettingsScreen(
                 Column {
                     PersonaOption(
                         name = "Auto",
-                        desc = "Native Live when the model supports it, otherwise Universal.",
+                        desc = "Gemini Live voice (same as Native Live).",
                         selected = settings.voiceEngine == "AUTO"
                     ) { onSettingsChange(settings.copy(voiceEngine = "AUTO")) }
                     PersonaOption(
@@ -1417,16 +1417,12 @@ fun SettingsScreen(
                         desc = "Gemini real-time audio models only.",
                         selected = settings.voiceEngine == "NATIVE"
                     ) { onSettingsChange(settings.copy(voiceEngine = "NATIVE")) }
-                    PersonaOption(
-                        name = "Universal",
-                        desc = "Mic → text → your chat model → voice. Works with any model.",
-                        selected = settings.voiceEngine == "UNIVERSAL"
-                    ) { onSettingsChange(settings.copy(voiceEngine = "UNIVERSAL")) }
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "If Native Live fails to connect, the session " +
-                            "switches to Universal automatically — you're never " +
-                            "left on a dead error screen.",
+                        text = "v2.0.3: Live is the only voice engine. If " +
+                            "it fails to connect, the session ends with " +
+                            "the Why? diagnosis instead of switching to " +
+                            "a system-voice fallback.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

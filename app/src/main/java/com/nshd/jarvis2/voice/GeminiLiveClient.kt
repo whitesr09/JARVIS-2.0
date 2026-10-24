@@ -68,7 +68,7 @@ class GeminiLiveClient(
     /**
      * F8 (#13): how long to wait for setupComplete before failing.
      * The session manager lowers this to 6 s when a weak network is
-     * suspected, so a doomed Live start falls back to Universal fast
+     * suspected, so a doomed Live start fails fast (v2.0.3: no fallback)
      * instead of hanging the full 12 s.
      */
     private val setupTimeoutMs: Long = SETUP_TIMEOUT_MS,
@@ -479,7 +479,7 @@ class GeminiLiveClient(
     // session_resumption) is never stripped. These retries run
     // INSIDE one model attempt: the session manager only hears
     // failure after they are exhausted, so its F5.1 clean retry,
-    // F8 model chain and Universal fallback keep their order.
+    // F8 model chain order is kept (v2.0.3: no Universal fallback).
 
     /** The setup path out of "Invalid value at 'setup.<path>'", if any. */
     private fun extractInvalidSetupPath(text: String?): String? {
