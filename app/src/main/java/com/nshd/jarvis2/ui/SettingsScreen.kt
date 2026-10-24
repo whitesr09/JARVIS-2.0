@@ -190,6 +190,10 @@ fun SettingsScreen(
     val memoryDb = remember { MemoryDb(context) }
     val identityInfo = remember { loadIdentityInfo(context) }
 
+    // Latest settings snapshot for the Knows / persona-test sections
+    // below (previously hoisted with the removed TTS preview block).
+    val latestSettings by rememberUpdatedState(settings)
+
     // ── Plan #101: full backup / restore ───────────────────────────────
     fun exportBackup() {
         settingsScope.launch {

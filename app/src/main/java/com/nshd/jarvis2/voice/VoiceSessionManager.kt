@@ -305,8 +305,6 @@ object VoiceSessionManager {
     @Volatile
     private var pipelineDone = true
 
-    @Volatile
-
     /**
      * v1.8 (#8): "Stop reading" was tapped for the CURRENT turn —
      * speech is halted and any sentences the pipeline still streams
