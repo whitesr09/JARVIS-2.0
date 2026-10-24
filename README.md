@@ -6,6 +6,12 @@ Jarvis talks (real-time voice), sees your screen (accessibility tree + screen-vi
 
 > **Current release: v1.2.0 — task queue, background wake, Connection Test v2.** Real-time voice (Gemini Live + on-device fallback), a provider-failover brain with Memory Core, accessibility automation with hard safety guardrails, screen vision, a floating avatar with a task-queue HUD, and an offline "Hey Jarvis" wake word that now starts listening in the background without opening the app. The UI runs the Warm Minimal · Purple design system (Purple / Light / Dark / Red themes + custom hex).
 
+## Agent Playground + HUD prototype
+
+A new browser-based interactive prototype is available at [simulator/agent-playground.html](simulator/agent-playground.html). It combines a visual agent workflow (User Request → AI Brain → Planner / Tool Registry → Verify & Reply) with a task HUD, progress tracking, event log, risk-confirmation demo, custom visual tool nodes, and workflow JSON export.
+
+Open the HTML file in a browser to try it on your phone. **This is a UI simulation only:** it does not call an AI provider, access Android, or execute real device actions. It is a safe design prototype for shaping the native agent workflow before connecting it to the existing provider and accessibility layers.
+
 ## Build the APK (GitHub Actions)
 
 Every push to `main` builds a debug APK in CI — no local Android Studio needed:
@@ -34,7 +40,7 @@ You can also run the workflow manually from the Actions tab (**Run workflow**).
 | **L5 Vision + Overlay** | MediaProjection 1 FPS vision fallback, floating avatar (12 designs, drag/edge-snap, tap/double-tap) + 4-step Task HUD |
 | **L6 Always-on** | Vosk wake word (screen-off), voice biometrics (3-sample enroll), battery-aware mode switching |
 
-Full design: see [MASTER-PLAN.md](MASTER-PLAN.md). A clickable pre-build replica lives in [simulator/](simulator/).
+Full design: see [MASTER-PLAN.md](MASTER-PLAN.md). The original clickable pre-build replica lives in [simulator/](simulator/).
 
 ## Developer
 
