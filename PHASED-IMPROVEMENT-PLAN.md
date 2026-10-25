@@ -56,10 +56,13 @@ Implemented on the working branch:
 - Confirmation-gate admission check and prompt publication now happen in one synchronized section, preventing two concurrent callers from replacing one another's pending prompt.
 - Confirmation cleanup now runs in a `finally` block, so cancellation of the owning action clears its stale pending prompt and cannot block later confirmations.
 - Confirmation logs no longer include action descriptions, which may contain contact names or message text; logs use gate IDs and decisions instead.
-- Added unit tests for cancellation cleanup and concurrent confirmation requests.
+- Send-confirmation asks now reserve one active ask ID for the full ask/re-ask sequence; concurrent asks fail closed without replacing the active prompt.
+- Send-answer callbacks validate that the currently visible ask and active deferred still correspond, preventing stale callbacks from approving an ended ask.
+- Send-confirmation cleanup is cancellation-safe; pending UI state and the active reservation are cleared on all exit paths.
+- Send-confirmation logs no longer include recipient names or send contents.
+- Added unit tests for confirmation cancellation/concurrency and send-ask cancellation, concurrent requests, and strict answer parsing.
 
 Still required before Phase 4 acceptance:
-- Audit send confirmation and spoken/typed answer parsing for precise, short answers tied to the current pending action.
 - Centralize risk classification for send, delete, call, and other consequential actions.
 - Verify action outcomes from resulting UI/state rather than assuming a successful tap means success.
 - Add dry-run mode and a user-visible audit trail with redacted values.
