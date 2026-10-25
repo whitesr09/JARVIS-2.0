@@ -63,6 +63,8 @@ Implemented on the working branch:
 - WhatsApp sends no longer grant a permit to both regular and Business package variants. The permit is scoped to the recognized foreground WhatsApp package, issued immediately before the confirmed send tap, expires quickly, and is revoked when that tap exits.
 - Send permits are now one-shot across the entire app rather than one-shot per package; a package mismatch clears the permit instead of leaving it available for a later app switch.
 - Device-action arguments enforce explicit ranges for screen coordinates, percentages, alarm values, timer lengths, wait timeouts, calendar bounds, and deletion counts; `delete_last_chars` requires a count.
+- Coroutine cancellation now propagates through `ToolExecutor` and the agent tool-dispatch boundary, rather than being converted into a normal tool failure that could let the agent continue.
+- WhatsApp action logs no longer include the recipient name or raw failure detail; the actionable details are returned to the current task instead.
 - Added unit tests for confirmation cancellation/concurrency, send-ask cancellation/concurrency, strict answer parsing, and rejection of out-of-range action values.
 
 Still required before Phase 4 acceptance:
