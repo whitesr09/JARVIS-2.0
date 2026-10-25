@@ -36,6 +36,7 @@ class DeepIntents(context: Context) {
     ): ActionResult {
         val digits = ContactsResolver.normalizePhone(phone)
         if (digits.length < 10) return ActionResult(false, "The WhatsApp number looks incomplete.")
+        if (text.isBlank()) return ActionResult(false, "The message is empty; nothing was sent.")
         val url = "https://api.whatsapp.com/send?phone=$digits&text=${Uri.encode(text)}"
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -65,17 +66,14 @@ class DeepIntents(context: Context) {
         val reader = service.screenReader()
         var snapshot = reader.snapshot()
         val entry = snapshot.firstOrNull { it.editable }
-        if (entry != null && entry.text.isBlank()) {
-            AppLog.w("Send", "stage FAILED: message field empty after open — prefill lost")
+        if (entry == null || entry.text != text) {
+            AppLog.w("Send", "stage FAILED: composer draft could not be verified exactly")
             return ActionResult(
                 false,
-                "Aborted: the WhatsApp message field is empty, so Send was not pressed."
+                "Aborted: I couldn't verify that WhatsApp's draft exactly matches the approved message. Nothing was sent."
             )
         }
-        AppLog.i(
-            "Send",
-            "stage: typed — message field holds ${entry?.text?.length ?: 0} chars"
-        )
+        AppLog.i("Send", "stage: exact draft verified (${entry.text.length} chars)")
 
         // v2.0.2 JIT ask: composer filled + verified, send NOT yet
         // tapped. A decline/timeout leaves the typed text in place.
@@ -84,43 +82,51 @@ class DeepIntents(context: Context) {
             return ActionResult(false, "Not sent.")
         }
 
-        // F8 (#36): the send control comes from the WhatsApp
-        // playbook now — its primary descriptors ARE the inline
-        // checks this code used before (viewId …:id/send, desc/text
-        // "Send"), so a primary hit behaves identically.
-        val send = Playbooks.find(snapshot, Playbooks.WHATSAPP_PACKAGE, Playbooks.ROLE_SEND_BUTTON)
-            ?: Playbooks.find(snapshot, Playbooks.WHATSAPP_BUSINESS_PACKAGE, Playbooks.ROLE_SEND_BUTTON)
-            ?: reader.findByText("Send", snapshot)?.takeIf { it.clickable || it.desc.contains("send", true) }
-
-        if (send == null) {
-            // F7: the tree dump belongs in the log, not the reply text.
-            AppLog.w(
-                "Hands",
-                "whatsapp send: Send control not found. Screen: ${reader.serialize(25)}"
-            )
-            AppLog.w("Send", "stage FAILED: Send control not found on screen")
-            return ActionResult(
-                false,
-                "WhatsApp opened with the message typed, but the Send button " +
-                    "was not found on screen."
-            )
-        }
-
-        val activePackage = reader.currentPackage()
+        // The confirmation may take up to 30 seconds. Refresh the
+        // screen afterward so approval cannot authorize a stale index,
+        // a changed draft, or a switch to an unrelated app.
+        TaskState.throwIfStopRequested()
+        snapshot = reader.snapshot()
+        val activePackage = JarvisAccessibilityService.lastPackageName
+            ?: reader.currentPackage()
         if (activePackage != Playbooks.WHATSAPP_PACKAGE &&
             activePackage != Playbooks.WHATSAPP_BUSINESS_PACKAGE
         ) {
             return ActionResult(
                 false,
-                "Aborted: the active app is not a recognized WhatsApp composer. Nothing was sent."
+                "Aborted: the active app changed after confirmation. Nothing was sent."
             )
         }
+        val confirmedEntry = snapshot.firstOrNull { it.editable }
+        if (confirmedEntry == null || confirmedEntry.text != text) {
+            AppLog.w("Send", "stage FAILED: composer changed after confirmation")
+            return ActionResult(
+                false,
+                "Aborted: the message draft changed after confirmation. Nothing was sent."
+            )
+        }
+
+        // Resolve the send control again from the fresh post-confirmation
+        // snapshot; never reuse an element index from before the prompt.
+        val confirmedSend =
+            Playbooks.find(snapshot, Playbooks.WHATSAPP_PACKAGE, Playbooks.ROLE_SEND_BUTTON)
+                ?: Playbooks.find(snapshot, Playbooks.WHATSAPP_BUSINESS_PACKAGE, Playbooks.ROLE_SEND_BUTTON)
+                ?: reader.findByText("Send", snapshot)
+                    ?.takeIf { it.clickable || it.desc.contains("send", true) }
+        if (confirmedSend == null) {
+            AppLog.w("Send", "stage FAILED: Send control disappeared after confirmation")
+            return ActionResult(
+                false,
+                "The Send button is no longer available. Nothing was sent."
+            )
+        }
+
         TaskState.throwIfStopRequested() // #61: before final tap
         // Permit exactly the package containing this confirmed composer.
         // It expires quickly and is revoked after the tap even on failure.
         HandsActions.grantSendPermit(activePackage, ttlMs = 5_000L)
         val click = try {
-            HandsActions.clickElement(send.index)
+            HandsActions.clickElement(confirmedSend.index)
         } finally {
             HandsActions.revokeSendPermit(activePackage)
         }
