@@ -102,36 +102,52 @@ object HandsActions {
     // never cover SOCIAL/DESTRUCTIVE phrases, expire in ~30 s, and a
     // second send tap gates again as usual.
 
-    /** Packages with a live permit (both WhatsApp variants are granted together). */
-    private val sendPermitPackages = mutableSetOf<String>()
+    /** Exactly one confirmed package may consume the next send permit. */
+    private var sendPermitPackage: String? = null
 
     @Volatile
     private var sendPermitExpiresAtMs: Long = 0L
 
-    /** Issue the one-shot permit for [packageName] (called post-gate). */
+    /** Issue a one-shot permit for the exact app containing the confirmed composer. */
     @Synchronized
-    fun grantSendPermit(packageName: String, ttlMs: Long = 30_000L) {
-        sendPermitPackages += packageName
+    fun grantSendPermit(packageName: String, ttlMs: Long = 5_000L) {
+        if (packageName.isBlank() || ttlMs <= 0L) {
+            sendPermitPackage = null
+            sendPermitExpiresAtMs = 0L
+            return
+        }
+        sendPermitPackage = packageName
         sendPermitExpiresAtMs = System.currentTimeMillis() + ttlMs
         com.nshd.jarvis2.core.AppLog.i(
             "Send",
-            "permit granted for $packageName (one send tap, ${ttlMs / 1000}s)"
+            "one-shot permit granted (5s max, package-scoped)"
         )
     }
 
-    /** Consume the permit iff it matches [packageName] and is unexpired. */
+    /** Revoke an unused permit when the associated tap exits without consuming it. */
+    @Synchronized
+    fun revokeSendPermit(packageName: String? = null) {
+        if (packageName == null || sendPermitPackage == packageName) {
+            sendPermitPackage = null
+            sendPermitExpiresAtMs = 0L
+        }
+    }
+
+    /** Consume the permit once, and only in the exact confirmed package. */
     @Synchronized
     private fun consumeSendPermit(packageName: String?): Boolean {
-        if (packageName == null || packageName !in sendPermitPackages) return false
-        if (System.currentTimeMillis() > sendPermitExpiresAtMs) {
-            sendPermitPackages.clear()
-            com.nshd.jarvis2.core.AppLog.d("Send", "permit expired unused for $packageName")
+        val permittedPackage = sendPermitPackage ?: return false
+        if (System.currentTimeMillis() > sendPermitExpiresAtMs ||
+            packageName == null || packageName != permittedPackage
+        ) {
+            // Do not allow an unused permit to survive an app/package switch.
+            sendPermitPackage = null
+            sendPermitExpiresAtMs = 0L
+            com.nshd.jarvis2.core.AppLog.d("Send", "one-shot permit expired or package mismatch")
             return false
         }
-        // One-shot per package: the tap that consumes it is the only
-        // one the permit ever covers.
-        sendPermitPackages -= packageName
-        if (sendPermitPackages.isEmpty()) sendPermitExpiresAtMs = 0L
+        sendPermitPackage = null
+        sendPermitExpiresAtMs = 0L
         return true
     }
 
