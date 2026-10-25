@@ -52,6 +52,49 @@ class ToolRegistryValidationTest {
     }
 
     @Test
+    fun rejectsOutOfRangeDeviceActionValues() {
+        assertEquals(
+            "Argument 'x' must be between 0 and 100",
+            ToolRegistry.validateArguments(
+                "tap_percent",
+                JSONObject().put("x", 101).put("y", 40)
+            )
+        )
+        assertEquals(
+            "Argument 'percent' must be between 0 and 100",
+            ToolRegistry.validateArguments(
+                "set_volume",
+                JSONObject().put("percent", -1)
+            )
+        )
+        assertEquals(
+            "Argument 'hour' must be between 0 and 23",
+            ToolRegistry.validateArguments(
+                "set_alarm",
+                JSONObject().put("hour", 24).put("minute", 30)
+            )
+        )
+    }
+
+    @Test
+    fun requiresCountForDeleteLastChars() {
+        assertEquals(
+            "Argument 'count' is required for delete_last_chars",
+            ToolRegistry.validateArguments(
+                "edit_text",
+                JSONObject().put("action", "delete_last_chars")
+            )
+        )
+        assertEquals(
+            "Argument 'count' must be between 1 and 16384",
+            ToolRegistry.validateArguments(
+                "edit_text",
+                JSONObject().put("action", "delete_last_chars").put("count", 0)
+            )
+        )
+    }
+
+    @Test
     fun rejectsWrongTypesAndOversizedPayloads() {
         assertEquals(
             "Argument 'element_id' must be integer",
