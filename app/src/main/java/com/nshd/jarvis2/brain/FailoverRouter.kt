@@ -54,12 +54,16 @@ class FailoverRouter(
                 continue
             }
             try {
-                // Streamed for responsiveness; deltas flow to the caller.
-                // Failover still applies because a provider that dies before
-                // emitting anything throws (see chatStream's rules).
-                val reply = config.toProvider()
-                    .chatStream(messages, model, tools = null, onDelta = onDelta)
+                // Keep each provider's stream private until the provider has
+                // completed successfully. Otherwise partial text from a failed
+                // provider leaks into the UI before the fallback answer.
+                val pendingDelta = StringBuilder()
+                val reply = config.toProvider().chatStream(
+                    messages, model, tools = null,
+                    onDelta = { delta -> pendingDelta.append(delta) }
+                )
                 if (reply.content.isBlank()) throw AiException("Empty reply from model")
+                onDelta(reply.content)
                 return ChatOutcome.Success(reply.content, config.label, model)
             } catch (e: AiException) {
                 failures += config.label to (e.message ?: "failed")
@@ -143,7 +147,9 @@ class FailoverRouter(
             // v2.0.0: dynamic step budget — a turn that keeps making
             // successful progress earns more steps (up to HARD_CAP);
             // a stalled or failing turn keeps the configured budget.
-            var stepBudget = maxSteps.coerceAtLeast(1)
+            // Keep callers from disabling the loop guard with an excessive
+            // budget. Successful progress can still extend this to HARD_STEP_CAP.
+            var stepBudget = maxSteps.coerceIn(1, HARD_STEP_CAP)
             try {
                 var step = 0
                 while (step < stepBudget) {
@@ -417,10 +423,17 @@ class FailoverRouter(
     ): ModelReply {
         var retriesUsed = 0
         while (true) {
+            // Deltas are attempt-local. A transiently failed attempt must not
+            // leak partial text or duplicate text when the retry succeeds.
+            val pendingDelta = StringBuilder()
             try {
-                return provider.chatStream(
-                    messages, model, tools, onDelta, onToolCallReady
+                val reply = provider.chatStream(
+                    messages, model, tools,
+                    onDelta = { delta -> pendingDelta.append(delta) },
+                    onToolCallReady = onToolCallReady
                 )
+                if (pendingDelta.isNotEmpty()) onDelta(pendingDelta.toString())
+                return reply
             } catch (e: Exception) {
                 val detail = e.message ?: "unexpected error"
                 val maxRetries = if (toolsExecuted()) 2 else 1
