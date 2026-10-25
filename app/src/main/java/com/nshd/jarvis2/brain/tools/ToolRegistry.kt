@@ -410,6 +410,74 @@ object ToolRegistry {
         )
     )
 
+
+    /**
+     * Validate model-supplied tool arguments locally before dispatch. Provider
+     * JSON schemas are guidance, not a security boundary: some endpoints emit
+     * malformed types, missing required fields, or invented tool names.
+     * Returns a short validation error, or null when the call is acceptable.
+     */
+    fun validateArguments(name: String, args: JSONObject): String? {
+        if (args.toString().length > MAX_ARGUMENT_JSON_CHARS) {
+            return "Tool arguments are too large"
+        }
+        val tool = spec(name) ?: return "Unknown tool: $name"
+        val schema = tool.paramsJsonSchema
+        val properties = schema.optJSONObject("properties") ?: JSONObject()
+        val required = schema.optJSONArray("required") ?: JSONArray()
+
+        for (index in 0 until required.length()) {
+            val key = required.optString(index)
+            if (!args.has(key) || args.isNull(key)) {
+                return "Missing required argument: $key"
+            }
+        }
+
+        val keys = args.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val property = properties.optJSONObject(key)
+                ?: return "Unexpected argument: $key"
+            val value = args.opt(key)
+            if (value == null || value === JSONObject.NULL) {
+                return "Argument '$key' cannot be null"
+            }
+            val expectedType = property.optString("type")
+            val validType = when (expectedType) {
+                "string" -> value is String
+                "integer" -> value is Int || value is Long ||
+                    (value is Number && value.toDouble().isFinite() &&
+                        value.toDouble() % 1.0 == 0.0)
+                "number" -> value is Number && value.toDouble().isFinite()
+                "boolean" -> value is Boolean
+                "object" -> value is JSONObject
+                "array" -> value is JSONArray
+                else -> true
+            }
+            if (!validType) return "Argument '$key' must be $expectedType"
+
+            val enumValues = property.optJSONArray("enum")
+            if (enumValues != null) {
+                var found = false
+                for (i in 0 until enumValues.length()) {
+                    if (enumValues.opt(i) == value) {
+                        found = true
+                        break
+                    }
+                }
+                if (!found) return "Argument '$key' has an unsupported value"
+            }
+
+            if (value is String && value.length > MAX_ARGUMENT_STRING_CHARS) {
+                return "Argument '$key' is too long"
+            }
+        }
+        return null
+    }
+
+    private const val MAX_ARGUMENT_JSON_CHARS = 32_768
+    private const val MAX_ARGUMENT_STRING_CHARS = 16_384
+
     fun spec(name: String): ToolSpec? = specs.firstOrNull { it.name == name }
 
     /**
