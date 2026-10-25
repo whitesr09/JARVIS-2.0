@@ -5,6 +5,7 @@ import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
 import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.ui.FriendlyErrors
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
@@ -65,6 +66,8 @@ class FailoverRouter(
                 if (reply.content.isBlank()) throw AiException("Empty reply from model")
                 onDelta(reply.content)
                 return ChatOutcome.Success(reply.content, config.label, model)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: AiException) {
                 failures += config.label to (e.message ?: "failed")
             } catch (e: Exception) {
@@ -356,6 +359,10 @@ class FailoverRouter(
                 return summary.content.ifBlank {
                     "I reached the tool-step limit. The actions and results above show what was completed."
                 }
+            } catch (e: CancellationException) {
+                // User aborts and lifecycle cancellation must propagate to the
+                // owning coroutine; never turn cancellation into a chat reply.
+                throw e
             } catch (e: Exception) {
                 val detail = e.message ?: "unexpected error"
                 if (executedAnyTool) {
@@ -434,6 +441,8 @@ class FailoverRouter(
                 )
                 if (pendingDelta.isNotEmpty()) onDelta(pendingDelta.toString())
                 return reply
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 val detail = e.message ?: "unexpected error"
                 val maxRetries = if (toolsExecuted()) 2 else 1
