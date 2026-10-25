@@ -44,10 +44,10 @@ class DeepIntents(context: Context) {
             else if (isPackageInstalled("com.whatsapp.w4b")) setPackage("com.whatsapp.w4b")
         }
         if (!launch(intent)) {
-            AppLog.w("Send", "stage FAILED: chat could not be opened for $digits")
+            AppLog.w("Send", "stage FAILED: WhatsApp chat could not be opened")
             return ActionResult(false, "WhatsApp could not be opened for this chat.")
         }
-        AppLog.i("Send", "stage: chat opened for $digits (deep link, text prefilled)")
+        AppLog.i("Send", "stage: WhatsApp chat opened (deep link, draft prefilled)")
         TaskState.throwIfStopRequested() // #61: after open-app
         // F7 plan: the deep link opens the chat AND types the text
         // atomically, so plan steps 1–2 complete here; step 3
@@ -139,7 +139,7 @@ class DeepIntents(context: Context) {
             HandsActions.revokeSendPermit(activePackage)
         }
         if (!click.success) {
-            AppLog.w("Send", "stage FAILED: send tap failed — ${click.message}")
+            AppLog.w("Send", "stage FAILED: Send tap was not accepted")
             return ActionResult(false, "WhatsApp opened, but Send could not be pressed: ${click.message}")
         }
         AppLog.i("Send", "stage: send tapped")
