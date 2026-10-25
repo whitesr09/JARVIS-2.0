@@ -61,6 +61,8 @@ Implemented on the working branch:
 - Send-confirmation cleanup is cancellation-safe; pending UI state and the active reservation are cleared on all exit paths.
 - Send-confirmation logs no longer include recipient names or send contents.
 - WhatsApp sends no longer grant a permit to both regular and Business package variants. The permit is scoped to the recognized foreground WhatsApp package, issued immediately before the confirmed send tap, expires quickly, and is revoked when that tap exits.
+- WhatsApp send approval is bound to the same package that was active when the user was asked; the composer text and Send target are re-read from a fresh accessibility snapshot after approval, and the exact draft must still match before the tap.
+- WhatsApp send logs avoid phone numbers, recipient names, full accessibility dumps, and raw send-tap failure details; the action result reports whether delivery was verified.
 - Send permits are now one-shot across the entire app rather than one-shot per package; a package mismatch clears the permit instead of leaving it available for a later app switch.
 - Device-action arguments enforce explicit ranges for screen coordinates, percentages, alarm values, timer lengths, wait timeouts, calendar bounds, and deletion counts; `delete_last_chars` requires a count.
 - Coroutine cancellation now propagates through `ToolExecutor` and the agent tool-dispatch boundary, rather than being converted into a normal tool failure that could let the agent continue.
