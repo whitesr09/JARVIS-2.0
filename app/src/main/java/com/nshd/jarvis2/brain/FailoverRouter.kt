@@ -254,6 +254,10 @@ class FailoverRouter(
                                 call.name, args,
                                 includeScreenSummary = isLastCall
                             )
+                        } catch (e: CancellationException) {
+                            // Do not report a cancelled task as a completed tool
+                            // result or let the model continue with another action.
+                            throw e
                         } catch (e: Exception) {
                             ToolResult(
                                 false,
