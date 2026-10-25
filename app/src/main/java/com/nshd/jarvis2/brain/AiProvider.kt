@@ -7,6 +7,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.ResponseBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -174,7 +175,7 @@ class OpenAiCompatibleProvider(
             throw AiException("Network error: ${e.message ?: "unreachable"}")
         }
         response.use {
-            val bodyText = it.body?.string().orEmpty()
+            val bodyText = readLimitedBody(it.body, MAX_RESPONSE_BYTES)
             val latencyMs = System.currentTimeMillis() - startedAt
             if (!it.isSuccessful) {
                 AppLog.e(
@@ -286,7 +287,7 @@ class OpenAiCompatibleProvider(
 
         response.use {
             if (!it.isSuccessful) {
-                val bodyText = it.body?.string().orEmpty()
+                val bodyText = readLimitedBody(it.body, MAX_RESPONSE_BYTES)
                 if (it.code == 400 && bodyText.contains("stream", ignoreCase = true)) {
                     AppLog.i(
                         "API",
@@ -314,9 +315,14 @@ class OpenAiCompatibleProvider(
             val readyAnnounced = mutableSetOf<Int>()
             var emittedAny = false
             var sawDone = false
+            var streamedChars = 0L
             try {
                 while (true) {
                     val line = source.readUtf8Line() ?: break
+                    streamedChars += line.length.toLong()
+                    if (streamedChars > MAX_STREAM_CHARS) {
+                        throw AiException("Streaming response exceeded the size limit")
+                    }
                     val trimmed = line.trim()
                     if (!trimmed.startsWith("data:")) continue
                     val data = trimmed.removePrefix("data:").trim()
@@ -418,6 +424,37 @@ class OpenAiCompatibleProvider(
             )
             ModelReply(content = content.toString(), toolCalls = calls)
         }
+    }
+
+    /**
+     * Read a non-streaming response with a strict byte ceiling. Content-Length
+     * alone is not sufficient because chunked responses may omit it.
+     */
+    private fun readLimitedBody(body: ResponseBody?, maxBytes: Int): String {
+        if (body == null) return ""
+        if (body.contentLength() > maxBytes) {
+            throw AiException("Provider response exceeded the size limit")
+        }
+        val output = java.io.ByteArrayOutputStream()
+        body.byteStream().use { input ->
+            val buffer = ByteArray(8_192)
+            while (true) {
+                val remaining = maxBytes + 1 - output.size()
+                if (remaining <= 0) throw AiException("Provider response exceeded the size limit")
+                val count = input.read(buffer, 0, minOf(buffer.size, remaining))
+                if (count < 0) break
+                output.write(buffer, 0, count)
+                if (output.size() > maxBytes) {
+                    throw AiException("Provider response exceeded the size limit")
+                }
+            }
+        }
+        return output.toString(Charsets.UTF_8.name())
+    }
+
+    private companion object {
+        const val MAX_RESPONSE_BYTES = 1_048_576
+        const val MAX_STREAM_CHARS = 2_097_152L
     }
 
     /** Accumulates one streamed tool call (id + name + argument fragments). */
