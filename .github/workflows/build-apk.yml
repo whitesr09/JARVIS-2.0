@@ -2,14 +2,18 @@ name: Build JARVIS-2.0 APK
 
 on:
   push:
+    branches: ["main", "improvement/phase-1-release-hardening"]
+  pull_request:
     branches: ["main"]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
     env:
-      # Permanent signing credentials (values live only in GitHub Secrets)
       JARVIS_KEYSTORE_PASSWORD: ${{ secrets.JARVIS_KEYSTORE_PASSWORD }}
       JARVIS_KEY_ALIAS: ${{ secrets.JARVIS_KEY_ALIAS }}
       JARVIS_KEY_PASSWORD: ${{ secrets.JARVIS_KEY_PASSWORD }}
@@ -39,6 +43,9 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
       - name: Decode permanent signing keystore
         env:
           KS_B64: ${{ secrets.JARVIS_KEYSTORE_BASE64 }}
@@ -46,30 +53,45 @@ jobs:
         run: |
           if [ -n "$KS_B64" ]; then
             echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/jarvis2-release.jks"
-            echo "JARVIS_KEYSTORE_PATH=$RUNNER_TEMP/jarvis2-release.jks" >> $GITHUB_ENV
-            echo "HAS_KEYSTORE=true" >> $GITHUB_ENV
+            test -s "$RUNNER_TEMP/jarvis2-release.jks"
+            echo "JARVIS_KEYSTORE_PATH=$RUNNER_TEMP/jarvis2-release.jks" >> "$GITHUB_ENV"
+            echo "HAS_KEYSTORE=true" >> "$GITHUB_ENV"
           else
-            echo "no keystore secret — debug signing fallback"
+            echo "No keystore secret configured; producing a debug APK for testing only."
+            echo "HAS_KEYSTORE=false" >> "$GITHUB_ENV"
           fi
 
       - name: Build release APK (permanent signing)
         if: env.HAS_KEYSTORE == 'true'
         run: ./gradlew assembleRelease --stacktrace
 
-      - name: Build debug APK (fallback signing)
+      - name: Build debug APK (testing only)
         if: env.HAS_KEYSTORE != 'true'
         run: ./gradlew assembleDebug --stacktrace
+
+      - name: Verify APK exists
+        shell: bash
+        run: |
+          if [ "$HAS_KEYSTORE" = "true" ]; then
+            test -s app/build/outputs/apk/release/app-release.apk
+          else
+            test -s app/build/outputs/apk/debug/app-debug.apk
+          fi
 
       - name: Upload Jarvis APK (release)
         if: env.HAS_KEYSTORE == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: jarvis-2.0-apk
+          name: jarvis-2.0-release-apk
           path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload Jarvis APK (debug)
         if: env.HAS_KEYSTORE != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: jarvis-2.0-apk
+          name: jarvis-2.0-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
