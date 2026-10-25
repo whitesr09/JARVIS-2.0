@@ -21,12 +21,13 @@ Implemented on the working branch:
 - Chat failover now buffers provider output and only publishes the completed successful reply; partial output from a failed provider is discarded.
 - Agent model-call retries now buffer deltas per attempt, so a transient failure cannot leak partial text or duplicate output on retry.
 - Caller-supplied tool-step budgets are clamped to 1..HARD_STEP_CAP before the existing progress-based extension logic.
+- Model-supplied tool calls are validated locally for known tool names, required arguments, schema types, enum values, unexpected fields, and bounded JSON/string sizes before any phone-side dispatch.
+- Non-streaming provider response bodies are capped at 1 MiB; streaming responses are capped at 2 MiB of line content.
+- Added unit tests for valid arguments, missing required values, unknown tools/fields, invalid enums, wrong types, and oversized payloads.
 
 Still required before Phase 2 acceptance:
 - Define provider capabilities and supported modalities explicitly.
-- Fix partial-stream leakage across provider failover and preserve cancellation semantics.
-- Bound request duration, response size, retries, and model discovery.
-- Validate tool arguments against schemas before execution.
+- Add deterministic fake-provider tests for timeout, cancellation, malformed response, partial stream, and fallback behavior.
 - Make task/turn IDs explicit and isolate state between concurrent requests.
 - Add deterministic fake-provider tests for timeout, cancellation, malformed response, partial stream, and fallback behavior.
 
