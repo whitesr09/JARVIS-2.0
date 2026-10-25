@@ -893,10 +893,8 @@ class ToolExecutor(
                     val approved = SendAsk.ask(
                         "$name (${resolution.contact.phone})", message
                     )
-                    if (approved) {
-                        HandsActions.grantSendPermit("com.whatsapp")
-                        HandsActions.grantSendPermit("com.whatsapp.w4b")
-                    }
+                    // DeepIntents grants a short-lived permit for the
+                    // exact foreground package immediately before the send tap.
                     approved
                 }
                 if (result.success) {
