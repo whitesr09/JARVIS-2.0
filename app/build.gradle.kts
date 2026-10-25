@@ -73,4 +73,6 @@ dependencies {
     implementation("com.alphacephei:vosk-android:0.3.75")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    // Android's platform org.json methods are stubbed in local JVM tests; use the real implementation.
+    testImplementation("org.json:json:20240303")
 }
