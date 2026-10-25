@@ -30,6 +30,47 @@ class ConfirmGateTest {
     }
 
     @Test
+    fun staleGateIdCannotApproveLaterConfirmation() = runBlocking {
+        var firstResult = true
+        val first = launch {
+            firstResult = ConfirmGate.confirm("first action")
+        }
+        val firstGate = withTimeout(2_000) {
+            while (true) {
+                ConfirmGate.pending.value?.let { return@withTimeout it }
+                yield()
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("unreachable")
+        }
+        ConfirmGate.complete(firstGate.id, approved = false)
+        first.join()
+        assertFalse(firstResult)
+
+        var secondResult = true
+        val second = launch {
+            secondResult = ConfirmGate.confirm("second action")
+        }
+        val secondGate = withTimeout(2_000) {
+            while (true) {
+                ConfirmGate.pending.value?.takeIf { it.id != firstGate.id }
+                    ?.let { return@withTimeout it }
+                yield()
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("unreachable")
+        }
+
+        ConfirmGate.complete(firstGate.id, approved = true)
+        assertEquals(secondGate.id, ConfirmGate.pending.value?.id)
+
+        ConfirmGate.complete(secondGate.id, approved = false)
+        second.join()
+        assertFalse(secondResult)
+        assertNull(ConfirmGate.pending.value)
+    }
+
+    @Test
     fun secondConfirmationCannotReplaceFirstPendingGate() = runBlocking {
         ConfirmGate.pending.value?.let { ConfirmGate.dismiss(it.id) }
         var firstResult = false
