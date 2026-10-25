@@ -60,7 +60,8 @@ Implemented on the working branch:
 - Send-answer callbacks validate that the currently visible ask and active deferred still correspond, preventing stale callbacks from approving an ended ask.
 - Send-confirmation cleanup is cancellation-safe; pending UI state and the active reservation are cleared on all exit paths.
 - Send-confirmation logs no longer include recipient names or send contents.
-- Added unit tests for confirmation cancellation/concurrency and send-ask cancellation, concurrent requests, and strict answer parsing.
+- Device-action arguments enforce explicit ranges for screen coordinates, percentages, alarm values, timer lengths, wait timeouts, calendar bounds, and deletion counts; `delete_last_chars` requires a count.
+- Added unit tests for confirmation cancellation/concurrency, send-ask cancellation/concurrency, strict answer parsing, and rejection of out-of-range action values.
 
 Still required before Phase 4 acceptance:
 - Centralize risk classification for send, delete, call, and other consequential actions.
