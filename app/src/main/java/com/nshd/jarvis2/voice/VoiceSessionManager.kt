@@ -47,6 +47,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
 enum class VoiceMode { NONE, LIVE }
@@ -919,6 +920,7 @@ object VoiceSessionManager {
                 if (active) fail(startFailureMessage(e))
             }
         }
+    }
 
     /**
      * While a Live session runs and screen share is active, forward the
