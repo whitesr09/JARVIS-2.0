@@ -65,6 +65,16 @@ class DeepIntents(context: Context) {
         TaskState.throwIfStopRequested() // #61: after settle, before reading the field
         val reader = service.screenReader()
         var snapshot = reader.snapshot()
+        val composerPackage = JarvisAccessibilityService.lastPackageName
+            ?: reader.currentPackage()
+        if (composerPackage != Playbooks.WHATSAPP_PACKAGE &&
+            composerPackage != Playbooks.WHATSAPP_BUSINESS_PACKAGE
+        ) {
+            return ActionResult(
+                false,
+                "Aborted: the opened screen is not a recognized WhatsApp composer. Nothing was sent."
+            )
+        }
         val entry = snapshot.firstOrNull { it.editable }
         if (entry == null || entry.text != text) {
             AppLog.w("Send", "stage FAILED: composer draft could not be verified exactly")
@@ -89,9 +99,7 @@ class DeepIntents(context: Context) {
         snapshot = reader.snapshot()
         val activePackage = JarvisAccessibilityService.lastPackageName
             ?: reader.currentPackage()
-        if (activePackage != Playbooks.WHATSAPP_PACKAGE &&
-            activePackage != Playbooks.WHATSAPP_BUSINESS_PACKAGE
-        ) {
+        if (activePackage != composerPackage) {
             return ActionResult(
                 false,
                 "Aborted: the active app changed after confirmation. Nothing was sent."
