@@ -310,6 +310,9 @@ object VoiceSessionManager {
     /** Startup / Live setup coroutine; cancelled whenever the session is stopped. */
     private var sessionJob: Job? = null
 
+    /** Delayed reconnect; cancelled when the session ends or is replaced. */
+    private var reconnectJob: Job? = null
+
     private var pulseJob: Job? = null
 
     /** Screen-share → Live video forwarder (Level 5), Live path only. */
@@ -758,6 +761,9 @@ object VoiceSessionManager {
         active = false
         sessionJob?.cancel()
         sessionJob = null
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnecting = false
         // v1.8 (#11): the call watch lives only while a session does.
         unregisterCallWatch()
         // F6: a stopped session closes any open Live task window so
@@ -1421,9 +1427,18 @@ object VoiceSessionManager {
             client?.close()
             client = null
             setStatus(VoiceStatus.CONNECTING)
-            scope.launch {
-                delay(600)
-                if (active) startLive(liveSessionHandle)
+            reconnectJob?.cancel()
+            reconnectJob = scope.launch {
+                try {
+                    delay(600)
+                    if (active && currentCoroutineContext().isActive) {
+                        startLive(liveSessionHandle)
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } finally {
+                    reconnectJob = null
+                }
             }
         }
 
