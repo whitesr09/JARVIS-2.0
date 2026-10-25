@@ -67,7 +67,7 @@ Implemented on the working branch:
 - Device-action arguments enforce explicit ranges for screen coordinates, percentages, alarm values, timer lengths, wait timeouts, calendar bounds, and deletion counts; `delete_last_chars` requires a count.
 - Coroutine cancellation now propagates through `ToolExecutor` and the agent tool-dispatch boundary, rather than being converted into a normal tool failure that could let the agent continue.
 - WhatsApp action logs no longer include the recipient name or raw failure detail; the actionable details are returned to the current task instead.
-- Added unit tests for confirmation cancellation/concurrency, send-ask cancellation/concurrency, strict answer parsing, and rejection of out-of-range action values.
+- Added unit tests for confirmation cancellation/concurrency/stale gate IDs, send-ask cancellation/concurrency, strict answer parsing, and rejection of out-of-range action values.
 
 Still required before Phase 4 acceptance:
 - Centralize risk classification for send, delete, call, and other consequential actions.
