@@ -33,13 +33,20 @@ Still required before Phase 2 acceptance:
 
 Acceptance: provider tests cover all failure paths; no duplicate tool execution or mixed-provider response; user-visible failures are actionable.
 
-## Phase 3 — Voice, wake word, and lifecycle reliability
-- Make audio-session ownership explicit across tap-to-talk, Gemini Live, wake word, and speech recognition.
-- Add reconnect/backoff with a hard retry limit and clear user-facing state.
-- Ensure microphone and recognizer resources release on cancellation, service stop, permission revocation, and process recreation.
-- Add battery-aware wake-word modes and clear OEM background-restriction guidance.
+## Phase 3 — Voice, wake word, and lifecycle reliability (in progress)
+
+Implemented on the working branch:
+- Track the microphone-acquisition startup coroutine as a session job; cancel it when a session is stopped or replaced.
+- Track Live setup work as a session job, check cancellation after loading memory and before connecting, and rethrow coroutine cancellation rather than converting it into a user-facing error.
+- Route unexpected microphone-acquisition and Live setup exceptions through the existing voice failure handler.
+- CI passed unit tests and APK build workflow for commit fc72e3a3c2c71fbbd895950cb75fed34bd2e705d.
+
+Still required before Phase 3 acceptance:
+- Audit and bound all reconnect paths; prevent duplicate concurrent reconnect attempts and cancel delayed reconnect work on stop.
+- Verify AudioCapture, GeminiLiveClient/WebSocket, AudioPlayer, wake-word service, and speech recognizer ownership and cleanup across all exit paths.
+- Add deterministic lifecycle tests where feasible and a manual device matrix for screen-off, Bluetooth, interruptions, permission revocation, and network changes.
 - Report voice round-trip checks as verified only after a real session produces valid audio.
-- Add lifecycle tests and a manual device matrix for screen-off, Bluetooth, interruptions, and network changes.
+- Add battery-aware wake-word modes and clear OEM background-restriction guidance.
 
 Acceptance: no stuck microphone/recording state; bounded recovery; voice tests honestly distinguish simulated, cached, and live checks.
 
