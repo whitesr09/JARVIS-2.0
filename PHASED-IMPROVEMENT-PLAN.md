@@ -15,7 +15,14 @@ Target: keep main stable; deliver each phase as a reviewable change set and requ
 
 Acceptance: Gradle unit tests and APK build pass; no API key is written to plaintext preferences; update status never claims a version comparison it cannot prove; README links resolve.
 
-## Phase 2 — Provider, streaming, and agent correctness
+## Phase 2 — Provider, streaming, and agent correctness (in progress)
+
+Implemented on the working branch:
+- Chat failover now buffers provider output and only publishes the completed successful reply; partial output from a failed provider is discarded.
+- Agent model-call retries now buffer deltas per attempt, so a transient failure cannot leak partial text or duplicate output on retry.
+- Caller-supplied tool-step budgets are clamped to 1..HARD_STEP_CAP before the existing progress-based extension logic.
+
+Still required before Phase 2 acceptance:
 - Define provider capabilities and supported modalities explicitly.
 - Fix partial-stream leakage across provider failover and preserve cancellation semantics.
 - Bound request duration, response size, retries, and model discovery.
