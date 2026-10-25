@@ -40,39 +40,51 @@ object ConfirmGate {
     private var deferred: CompletableDeferred<Boolean>? = null
 
     suspend fun confirm(description: String): Boolean {
-        // Only one native prompt can be meaningfully answered at a time.
+        val answer = CompletableDeferred<Boolean>()
+        val item: PendingConfirm
+
+        // Check and publish atomically. Keeping this in one critical section
+        // prevents two near-simultaneous callers from replacing each other's
+        // pending confirmation.
         synchronized(this) {
             if (deferred?.isActive == true) {
                 com.nshd.jarvis2.core.AppLog.w(
-                    "Gate", "prompt suppressed (another is open): ${description.take(80)}"
+                    "Gate", "confirmation suppressed because another gate is pending"
                 )
                 return false
             }
-        }
-        com.nshd.jarvis2.core.AppLog.d("Gate", "prompt: ${description.take(100)}")
-        val answer = CompletableDeferred<Boolean>()
-        val item = PendingConfirm(nextId.getAndIncrement(), description)
-        synchronized(this) {
+            item = PendingConfirm(nextId.getAndIncrement(), description)
             deferred = answer
             _pending.value = item
         }
-        val answered = withTimeoutOrNull(30_000) { answer.await() }
-        synchronized(this) {
-            if (deferred === answer) {
-                deferred = null
-                _pending.value = null
+
+        // Do not log the description: it can contain contact names, message
+        // text, or other private details from the proposed phone action.
+        com.nshd.jarvis2.core.AppLog.d("Gate", "prompt opened: id=${item.id}")
+        try {
+            val result = withTimeoutOrNull(CONFIRM_TIMEOUT_MS) { answer.await() }
+            val approved = result == true
+            com.nshd.jarvis2.core.AppLog.i(
+                "Gate",
+                "decision: ${when {
+                    result == null -> "timeout (deny)"
+                    approved -> "allow"
+                    else -> "deny"
+                }} — gate #${item.id}"
+            )
+            return approved
+        } finally {
+            // Also runs when the owning tool/task is cancelled. Without this,
+            // a cancelled caller could leave a stale prompt that blocks all
+            // later confirmations until timeout (or indefinitely after a bug).
+            synchronized(this) {
+                if (deferred === answer) {
+                    deferred = null
+                    if (_pending.value?.id == item.id) _pending.value = null
+                }
             }
+            if (answer.isActive) answer.cancel()
         }
-        val approved = answered ?: false
-        com.nshd.jarvis2.core.AppLog.i(
-            "Gate",
-            "decision: " + when {
-                answered == null -> "timeout (deny)"
-                approved -> "allow"
-                else -> "deny"
-            } + " — ${description.take(60)}"
-        )
-        return approved
     }
 
     fun complete(id: Long, approved: Boolean) {
@@ -86,4 +98,6 @@ object ConfirmGate {
     }
 
     fun dismiss(id: Long) = complete(id, approved = false)
+
+    private const val CONFIRM_TIMEOUT_MS = 30_000L
 }
