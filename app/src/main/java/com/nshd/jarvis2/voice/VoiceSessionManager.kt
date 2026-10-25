@@ -306,6 +306,9 @@ object VoiceSessionManager {
     /** v2.0.0: pending Live session time warning (see onSetupComplete). */
     private var liveTimeWarningJob: Job? = null
 
+    /** Startup / Live setup coroutine; cancelled whenever the session is stopped. */
+    private var sessionJob: Job? = null
+
     private var pulseJob: Job? = null
 
     /** Screen-share → Live video forwarder (Level 5), Live path only. */
@@ -424,12 +427,18 @@ object VoiceSessionManager {
         // consumers racing is a classic OEM-stack crash. The engine
         // starts only after acquireForSession confirms the mic is free
         // (or the short timeout elapses, which is logged).
-        scope.launch {
+        sessionJob = scope.launch {
             CrashLogger.stage(TAG, "mic acquire: begin")
-            val acquired = WakeWordControl.acquireForSession(MIC_ACQUIRE_TIMEOUT_MS)
-            CrashLogger.stage(TAG, "mic acquire: acquired=$acquired")
-            if (!active) return@launch
-            beginEngine()
+            try {
+                val acquired = WakeWordControl.acquireForSession(MIC_ACQUIRE_TIMEOUT_MS)
+                CrashLogger.stage(TAG, "mic acquire: acquired=$acquired")
+                if (!active || !currentCoroutineContext().isActive) return@launch
+                beginEngine()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (active) fail(startFailureMessage(e))
+            }
         }
     }
 
@@ -746,6 +755,8 @@ object VoiceSessionManager {
 
     private fun stopInternal(resetUi: Boolean) {
         active = false
+        sessionJob?.cancel()
+        sessionJob = null
         // v1.8 (#11): the call watch lives only while a session does.
         unregisterCallWatch()
         // F6: a stopped session closes any open Live task window so
@@ -863,10 +874,12 @@ object VoiceSessionManager {
         player = playback
         CrashLogger.stage(TAG, "live: audio player started")
 
-        scope.launch {
-            val facts = withContext(Dispatchers.IO) { db.allFacts(null, null) }
-            if (!active) return@launch
-            val prompt = PersonaPrompts.build(s, facts, codeMode = false)
+        sessionJob?.cancel()
+        sessionJob = scope.launch {
+            try {
+                val facts = withContext(Dispatchers.IO) { db.allFacts(null, null) }
+                if (!active || !currentCoroutineContext().isActive) return@launch
+                val prompt = PersonaPrompts.build(s, facts, codeMode = false)
             // F5.1: NO persisted handle is read here anymore — the
             // only handle a connect may carry is the in-memory one
             // from THIS session's goAway reconnect (resumeHandle).
@@ -899,9 +912,13 @@ object VoiceSessionManager {
             // connect() can fail synchronously (blank key) and fail
             // the session — only forward frames if the session is
             // still on the Live engine.
-            if (_uiState.value.mode == VoiceMode.LIVE) startShareForwarder()
+                if (_uiState.value.mode == VoiceMode.LIVE) startShareForwarder()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (active) fail(startFailureMessage(e))
+            }
         }
-    }
 
     /**
      * While a Live session runs and screen share is active, forward the
