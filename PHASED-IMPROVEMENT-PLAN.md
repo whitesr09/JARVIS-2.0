@@ -60,6 +60,8 @@ Implemented on the working branch:
 - Send-answer callbacks validate that the currently visible ask and active deferred still correspond, preventing stale callbacks from approving an ended ask.
 - Send-confirmation cleanup is cancellation-safe; pending UI state and the active reservation are cleared on all exit paths.
 - Send-confirmation logs no longer include recipient names or send contents.
+- WhatsApp sends no longer grant a permit to both regular and Business package variants. The permit is scoped to the recognized foreground WhatsApp package, issued immediately before the confirmed send tap, expires quickly, and is revoked when that tap exits.
+- Send permits are now one-shot across the entire app rather than one-shot per package; a package mismatch clears the permit instead of leaving it available for a later app switch.
 - Device-action arguments enforce explicit ranges for screen coordinates, percentages, alarm values, timer lengths, wait timeouts, calendar bounds, and deletion counts; `delete_last_chars` requires a count.
 - Added unit tests for confirmation cancellation/concurrency, send-ask cancellation/concurrency, strict answer parsing, and rejection of out-of-range action values.
 
