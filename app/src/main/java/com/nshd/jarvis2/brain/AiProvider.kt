@@ -550,7 +550,7 @@ class OpenAiCompatibleProvider(
                     )
                     TestResult(true, elapsed(), "OK")
                 } else {
-                    val brief = resp.body?.string().orEmpty()
+                    val brief = readLimitedBody(resp.body, MAX_RESPONSE_BYTES)
                         .replace('\n', ' ').trim().take(120)
                     AppLog.w(
                         "API",
