@@ -32,7 +32,7 @@ class DeepIntents(context: Context) {
     suspend fun whatsappMessage(
         phone: String,
         text: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val digits = ContactsResolver.normalizePhone(phone)
         if (digits.length < 10) return ActionResult(false, "The WhatsApp number looks incomplete.")
@@ -79,7 +79,7 @@ class DeepIntents(context: Context) {
 
         // v2.0.2 JIT ask: composer filled + verified, send NOT yet
         // tapped. A decline/timeout leaves the typed text in place.
-        if (askBeforeSend != null && !askBeforeSend()) {
+        if (!askBeforeSend()) {
             AppLog.i("Send", "stage: send ask declined/timeout — composer left untouched")
             return ActionResult(false, "Not sent.")
         }
@@ -106,8 +106,24 @@ class DeepIntents(context: Context) {
             )
         }
 
+        val activePackage = reader.currentPackage()
+        if (activePackage != Playbooks.WHATSAPP_PACKAGE &&
+            activePackage != Playbooks.WHATSAPP_BUSINESS_PACKAGE
+        ) {
+            return ActionResult(
+                false,
+                "Aborted: the active app is not a recognized WhatsApp composer. Nothing was sent."
+            )
+        }
         TaskState.throwIfStopRequested() // #61: before final tap
-        val click = HandsActions.clickElement(send.index)
+        // Permit exactly the package containing this confirmed composer.
+        // It expires quickly and is revoked after the tap even on failure.
+        HandsActions.grantSendPermit(activePackage, ttlMs = 5_000L)
+        val click = try {
+            HandsActions.clickElement(send.index)
+        } finally {
+            HandsActions.revokeSendPermit(activePackage)
+        }
         if (!click.success) {
             AppLog.w("Send", "stage FAILED: send tap failed — ${click.message}")
             return ActionResult(false, "WhatsApp opened, but Send could not be pressed: ${click.message}")
