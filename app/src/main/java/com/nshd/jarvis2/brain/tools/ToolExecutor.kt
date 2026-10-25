@@ -70,6 +70,15 @@ class ToolExecutor(
         args: JSONObject,
         includeScreenSummary: Boolean
     ): ToolResult {
+        // Model-provided tool calls are untrusted input. Validate the name,
+        // required fields, JSON types, enums and payload bounds before task
+        // bookkeeping, dedupe-ledger access, or any phone-side effect.
+        ToolRegistry.validateArguments(name, args)?.let { validationError ->
+            com.nshd.jarvis2.core.AppLog.w(
+                "Agent", "rejected invalid tool call '$name': $validationError"
+            )
+            return ToolResult(false, "I didn't run that action: $validationError.")
+        }
         // F6: the running queue item's live step line follows the
         // tool (friendly label + argument gist — never typed content).
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning(stepTextFor(name, args))
