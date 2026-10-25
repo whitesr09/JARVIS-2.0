@@ -19,6 +19,7 @@ import com.nshd.jarvis2.hands.HandsActions
 import com.nshd.jarvis2.hands.VisionGrounder
 import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.service.JarvisAccessibilityService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 
@@ -124,6 +125,10 @@ class ToolExecutor(
         }
         val raw = try {
             dispatch(name, args)
+        } catch (e: CancellationException) {
+            // Task cancellation must stop device actions immediately; never
+            // turn it into a normal tool failure and continue the agent loop.
+            throw e
         } catch (e: Exception) {
             ToolResult(false, "Tool $name failed safely: ${e.message ?: "unexpected error"}")
         }
