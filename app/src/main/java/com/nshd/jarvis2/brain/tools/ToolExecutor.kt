@@ -904,7 +904,7 @@ class ToolExecutor(
                 }
                 if (result.success) {
                     com.nshd.jarvis2.core.AppLog.i(
-                        "Send", "WhatsApp send completed and verified"
+                        "Send", "WhatsApp action returned success; see task result for delivery state"
                     )
                     ToolResult(true, "WhatsApp message to $name: ${result.message}")
                 } else {
