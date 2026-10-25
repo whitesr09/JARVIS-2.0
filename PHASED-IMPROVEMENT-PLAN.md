@@ -50,13 +50,21 @@ Still required before Phase 3 acceptance:
 
 Acceptance: no stuck microphone/recording state; bounded recovery; voice tests honestly distinguish simulated, cached, and live checks.
 
-## Phase 4 — Digital Hands safety and action verification
-- Centralize risk classification for send, purchase, delete, call, settings, and navigation actions.
-- Require a visible, cancellable confirmation for consequential actions; a spoken yes must be tied to the current action and expire quickly.
-- Prevent stale, replayed, duplicate, or ambiguous confirmation tokens.
-- Verify action outcomes from the resulting UI/state rather than assuming a successful tap means success.
-- Add dry-run mode, action receipts, and a user-visible audit trail with redacted values.
-- Test ambiguous contacts, duplicate names, permission loss, app layout changes, timeouts, and cancellation.
+## Phase 4 — Digital Hands safety and action verification (in progress)
+
+Implemented on the working branch:
+- Confirmation-gate admission check and prompt publication now happen in one synchronized section, preventing two concurrent callers from replacing one another's pending prompt.
+- Confirmation cleanup now runs in a `finally` block, so cancellation of the owning action clears its stale pending prompt and cannot block later confirmations.
+- Confirmation logs no longer include action descriptions, which may contain contact names or message text; logs use gate IDs and decisions instead.
+- Added unit tests for cancellation cleanup and concurrent confirmation requests.
+
+Still required before Phase 4 acceptance:
+- Audit send confirmation and spoken/typed answer parsing for precise, short answers tied to the current pending action.
+- Centralize risk classification for send, delete, call, and other consequential actions.
+- Verify action outcomes from resulting UI/state rather than assuming a successful tap means success.
+- Add dry-run mode and a user-visible audit trail with redacted values.
+- Test ambiguous contacts, duplicate names, permission loss, app layout changes, timeouts, and confirmation replay.
+
 
 Acceptance: no consequential action can bypass current consent; failures are reported instead of falsely marked successful; regression tests cover duplicate/replayed confirmation.
 
