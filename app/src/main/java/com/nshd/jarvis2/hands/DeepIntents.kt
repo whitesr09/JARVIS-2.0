@@ -1250,13 +1250,9 @@ class DeepIntents(context: Context) {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        try {
-            appContext.grantUriPermission(
-                pkg, photo, Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
-        } catch (e: Exception) {
-            // The intent flag usually suffices; the explicit grant is a bonus.
-        }
+        // FLAG_GRANT_READ_URI_PERMISSION scopes access to this share intent.
+        // Avoid a separate explicit grant, which would require extra revocation
+        // bookkeeping on every early return from the consent flow.
         if (!launch(intent)) {
             return ActionResult(false, "WhatsApp could not be opened for the photo share.")
         }
