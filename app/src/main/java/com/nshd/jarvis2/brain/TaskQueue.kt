@@ -116,11 +116,8 @@ object TaskQueue {
         }
         _tasks.value = items
         _currentIndex.value = -1
-        AppLog.i(
-            "Queue",
-            "submit ${items.size} task(s): " +
-                items.joinToString(" | ") { "'${it.title.take(40)}'" }
-        )
+        // Titles are user goals and may contain personal content; don't persist them in logs.
+        AppLog.i("Queue", "submit ${items.size} task(s)")
         return items
     }
 
@@ -143,7 +140,7 @@ object TaskQueue {
         )
         _tasks.value = listOf(item)
         _currentIndex.value = 0
-        AppLog.i("Queue", "task #${item.id} created+running: '${title.take(50)}'")
+        AppLog.i("Queue", "task #${item.id} created+running")
         return item
     }
 
@@ -156,7 +153,7 @@ object TaskQueue {
         _tasks.value = current.map {
             if (it.id == id) it.copy(step = text) else it
         }
-        AppLog.d("Queue", "task #$id step: $text")
+        AppLog.d("Queue", "task #$id step updated (${text.length} chars)")
     }
 
     /** F6: step text for whichever item is RUNNING right now. */
@@ -184,7 +181,7 @@ object TaskQueue {
                 item
             }
         }
-        AppLog.d("Queue", "task #$id plan ($kind): ${labels.joinToString(" → ")}")
+        AppLog.d("Queue", "task #$id plan set ($kind, ${labels.size} steps)")
     }
 
     /** Declare a plan on whichever item is RUNNING right now. */
@@ -402,7 +399,7 @@ object TaskQueue {
             AppLog.d("Queue", "skip ignored for task #$id (status=${item.status})")
             return
         }
-        AppLog.i("Queue", "task #$id SKIPPED from panel: '${item.title.take(40)}'")
+        AppLog.i("Queue", "task #$id SKIPPED from panel")
         update(id, TaskStatus.SKIPPED)
     }
 
