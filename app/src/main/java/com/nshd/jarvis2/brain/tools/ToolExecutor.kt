@@ -140,7 +140,7 @@ class ToolExecutor(
             // the target app. Conservatively make mutations terminal for this
             // turn, so neither the ledger nor the model retries an uncertain
             // side effect. Read-only failures remain ordinary retryable errors.
-            if (name in UI_MUTATION_TOOLS || name in EXTERNAL_SIDE_EFFECT_TOOLS) {
+            if (ActionRiskPolicy.shouldTreatFailureAsOutcomeUnknown(name)) {
                 ToolResult(
                     success = false,
                     message = "OUTCOME_UNKNOWN — Tool $name stopped unexpectedly " +
