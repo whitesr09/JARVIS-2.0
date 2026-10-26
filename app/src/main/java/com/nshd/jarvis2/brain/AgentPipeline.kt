@@ -1123,8 +1123,7 @@ object AgentPipeline {
                 // Raw text → AppLog; the queue summary line is friendly.
                 AppLog.e(
                     "Agent",
-                    "sub-task failed (${e.javaClass.simpleName})",
-                    e
+                    "sub-task failed (${e.javaClass.simpleName})"
                 )
                 "Failed: " + com.nshd.jarvis2.ui.FriendlyErrors.shortReason(e.message)
             }
