@@ -410,17 +410,17 @@ fun JarvisApp(
                 if (showWhatsNew) {
                     AlertDialog(
                         onDismissRequest = { showWhatsNew = false },
-                        title = { Text("What's new in v2.0.3") },
+                        title = { Text("What's new in v2.0.4") },
                         text = {
                             Text(
-                                "Live voice replies speak again, and the " +
-                                    "system-voice fallback is gone — a Live " +
-                                    "failure now ends with the Why? " +
-                                    "diagnosis. Spotify play-to-playback " +
-                                    "is fixed, and the last send " +
-                                    "confirmation cards are removed: " +
-                                    "sends ask just before sending, in " +
-                                    "plain text, and only send on your yes."
+                                "Live Bridge: Settings → Live Bridge " +
+                                    "starts a debug server the jarvis-cli " +
+                                    "can reach over Tailscale — status, " +
+                                    "logs, tasks, screen, and commands, " +
+                                    "all behind a token. Remote send " +
+                                    "confirmation stays OFF unless you " +
+                                    "enable it. Turn the bridge off " +
+                                    "when you are done debugging."
                             )
                         },
                         confirmButton = {

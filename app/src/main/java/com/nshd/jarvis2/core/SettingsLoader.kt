@@ -73,7 +73,11 @@ object SettingsLoader {
             panelSizePercent = prefs.getInt("panel_size_percent", 100)
                 .coerceIn(80, 120),
             panelBgOpacity = prefs.getFloat("panel_bg_opacity", 0.97f)
-                .coerceIn(0.35f, 1.0f)
+                .coerceIn(0.35f, 1.0f),
+            bridgeEnabled = prefs.getBoolean("bridge_enabled", false),
+            bridgePort = prefs.getInt("bridge_port", 8765).coerceIn(1, 65535),
+            bridgeToken = prefs.getString("bridge_token", "") ?: "",
+            bridgeRemoteConfirm = prefs.getBoolean("bridge_remote_confirm", false)
         )
     }
 }

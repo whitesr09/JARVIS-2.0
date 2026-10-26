@@ -91,6 +91,17 @@ fun UpdatesScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         InfoCard(
+            title = "v2.0.4 — Live Bridge: debug server + jarvis-cli",
+            body = "Settings → Live Bridge turns on a token-authenticated " +
+                "HTTP debug server (tailnet/loopback only) that the " +
+                "jarvis-cli in the repo's cli/ folder can reach over " +
+                "Tailscale: status, logs, tasks, screen, run commands, " +
+                "and — only if you enable it — answer a send " +
+                "confirmation. Turn it OFF when you are not debugging."
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+
+        InfoCard(
             title = "v2.0.3 — Live voice replies restored, system-voice fallback removed, Spotify play fixed, send cards gone",
             body = "Voice: Live sessions speak again — Gemini Live audio " +
                 "is played aloud (barge-in flush included) and the chat " +

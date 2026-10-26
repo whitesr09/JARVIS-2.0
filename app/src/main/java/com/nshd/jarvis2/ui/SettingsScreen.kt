@@ -89,7 +89,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -100,6 +102,8 @@ import com.nshd.jarvis2.JarvisSettings
 import com.nshd.jarvis2.brain.ProviderStore
 import com.nshd.jarvis2.memory.MemoryCategories
 import com.nshd.jarvis2.memory.MemoryDb
+import com.nshd.jarvis2.service.BridgeServer
+import com.nshd.jarvis2.service.BridgeService
 import com.nshd.jarvis2.service.FloatingOverlayService
 import com.nshd.jarvis2.service.WakeState
 import com.nshd.jarvis2.service.WakeWordControl
@@ -1059,6 +1063,114 @@ fun SettingsScreen(
             }
         }
 
+        // ── Live Bridge (v2.0.4) ──────────────────────────────────────
+        SectionLabel(
+            text = "LIVE BRIDGE",
+            modifier = Modifier.padding(
+                top = JarvisDimens.sectionGap,
+                bottom = JarvisDimens.spaceSm
+            )
+        )
+        GlassCard {
+            val clipboard = LocalClipboardManager.current
+            val tailnetIp = remember { BridgeServer.tailnetIp() }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Live Bridge", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        text = "Debug server for the jarvis-cli over " +
+                            "Tailscale. Keep it OFF unless you are debugging.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = settings.bridgeEnabled,
+                    onCheckedChange = {
+                        onSettingsChange(settings.copy(bridgeEnabled = it))
+                    }
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = when {
+                    BridgeService.lastError != null ->
+                        "Error: ${BridgeService.lastError}"
+                    BridgeService.isRunning() ->
+                        "Running on port ${BridgeService.boundPort}"
+                    settings.bridgeEnabled -> "Starting…"
+                    else -> "Off"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Tailnet IP: ${tailnetIp ?: "not on a tailnet"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            OutlinedTextField(
+                value = settings.bridgePort.toString(),
+                onValueChange = { raw ->
+                    raw.toIntOrNull()?.takeIf { it in 1..65535 }?.let { port ->
+                        onSettingsChange(settings.copy(bridgePort = port))
+                    }
+                },
+                label = { Text("Port") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Text("Auth token", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = settings.bridgeToken.ifBlank {
+                    "Enable the bridge to generate a token"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row {
+                TextButton(
+                    enabled = settings.bridgeToken.isNotBlank(),
+                    onClick = {
+                        clipboard.setText(AnnotatedString(settings.bridgeToken))
+                    }
+                ) { Text("Copy") }
+                TextButton(
+                    onClick = {
+                        onSettingsChange(
+                            settings.copy(
+                                bridgeToken = BridgeServer.generateToken()
+                            )
+                        )
+                    }
+                ) { Text("Regenerate") }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Allow remote send confirmations",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = "Lets the CLI answer a send confirmation. " +
+                            "Off = sends must be confirmed on the phone.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = settings.bridgeRemoteConfirm,
+                    onCheckedChange = {
+                        onSettingsChange(settings.copy(bridgeRemoteConfirm = it))
+                    }
+                )
+            }
+        }
+
         // ── Appearance & Security ──────────────────────────────────────
         SectionLabel(
             text = "APPEARANCE & SECURITY",
@@ -1228,7 +1340,7 @@ fun SettingsScreen(
             }
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "JARVIS • v2.0.3",
+                text = "JARVIS • v2.0.4",
                 style = MaterialTheme.typography.labelMedium.copy(
                     letterSpacing = 1.2.sp
                 ),
