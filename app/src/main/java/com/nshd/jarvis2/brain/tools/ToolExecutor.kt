@@ -995,7 +995,8 @@ class ToolExecutor(
             is ContactResolution.Found -> {
                 val name = resolution.contact.displayName
                 intents.whatsappShareLatestPhoto(
-                    resolution.contact.phone
+                    phone = resolution.contact.phone,
+                    expectedContactName = resolution.contact.displayName
                 ) {
                     SendAsk.ask(
                         "$name (${resolution.contact.phone})",
