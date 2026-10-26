@@ -641,7 +641,11 @@ class GeminiLiveClient(
                     // It used to land in onError (a transient notice),
                     // which is why every Live failure surfaced as a
                     // reason-less "unavailable".
-                    AppLog.e("Live", "server error before setupComplete: $message")
+                    AppLog.e(
+                        "Live",
+                        "server rejected setup (code=${error.optInt("code", 0)}, " +
+                            "status=${error.optString("status").take(40)}); raw message omitted"
+                    )
                     cancelSetupTimeout()
                     listener.onFailure(withGatewayHint("Live setup rejected: $message"))
                     return
@@ -782,7 +786,7 @@ class GeminiLiveClient(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            CrashLogger.logNonFatal("live", t)
+            CrashLogger.stage("live", "WebSocket failure (${t.javaClass.simpleName})")
             try {
                 if (closedByUser || stale) return
                 cancelSetupTimeout()
@@ -792,8 +796,7 @@ class GeminiLiveClient(
                 val detail = t.message ?: httpStatus ?: "unknown error"
                 AppLog.e(
                     "Live",
-                    "WS failure: ${t.javaClass.simpleName}: " +
-                        "${t.message ?: "(no message)"}" +
+                    "WebSocket failure (${t.javaClass.simpleName})" +
                         if (httpStatus != null) " [$httpStatus]" else ""
                 )
                 // Some revisions deliver the language rejection as a socket
@@ -824,7 +827,7 @@ class GeminiLiveClient(
                 cancelSetupTimeout()
                 AppLog.w(
                     "Live",
-                    "WS closed code=$code reason=${reason.ifBlank { "(none)" }}"
+                    "WebSocket closed code=$code (reason present=${reason.isNotBlank()})"
                 )
                 if (!setupComplete && isLanguageError(reason) &&
                     currentLanguageCode != null && !languageRetried
