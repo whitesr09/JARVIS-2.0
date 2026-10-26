@@ -13,6 +13,7 @@ import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.core.BrainStore
 import com.nshd.jarvis2.core.MacroRecorder
 import com.nshd.jarvis2.core.ScheduledAlarms
+import com.nshd.jarvis2.hands.ActionOutcome
 import com.nshd.jarvis2.hands.ContactsResolver
 import com.nshd.jarvis2.hands.DeepIntents
 import com.nshd.jarvis2.hands.LocationHelper
@@ -659,6 +660,19 @@ object AgentPipeline {
             lines += (if (result.success) "✅ " else "❌ ") +
                 ToolEvent.prettyTool(step.tool) + " — " +
                 result.message.lineSequence().firstOrNull().orEmpty().take(90)
+            if (result.outcome in setOf(
+                    ActionOutcome.STAGED_FOR_USER,
+                    ActionOutcome.SUBMITTED_UNVERIFIED,
+                    ActionOutcome.OUTCOME_UNKNOWN
+                )
+            ) {
+                lines += "Stopped remaining steps: this external action needs user review before any retry."
+                AppLog.w(
+                    "Agent",
+                    "macro stopped after " + step.tool + " outcome=" + result.outcome
+                )
+                break
+            }
         }
         return buildString {
             append("Ran your \"${macro.trigger}\" command — ")
