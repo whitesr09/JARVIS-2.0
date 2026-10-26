@@ -122,10 +122,10 @@ object AppLog {
             if (depth == 0) {
                 out.append(current.javaClass.name)
             } else {
-                out.append("\\nCaused by: ").append(current.javaClass.name)
+                out.append("\nCaused by: ").append(current.javaClass.name)
             }
             current.stackTrace.take(20).forEach { frame ->
-                out.append("\\n    at ").append(frame.toString())
+                out.append("\n    at ").append(frame.toString())
             }
             current = current.cause
             depth++
