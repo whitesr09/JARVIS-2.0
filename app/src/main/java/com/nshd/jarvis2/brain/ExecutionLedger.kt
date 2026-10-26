@@ -1,6 +1,7 @@
 package com.nshd.jarvis2.brain
 
 import com.nshd.jarvis2.brain.tools.ToolResult
+import com.nshd.jarvis2.hands.ActionOutcome
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -31,6 +32,10 @@ class ExecutionLedger {
         var attempts: Int = 0
         var success: ToolResult? = null
         var lastFailure: ToolResult? = null
+        // These outcomes are not ordinary failures: an external side effect
+        // may already have happened, or a draft is intentionally left staged.
+        // Retrying could duplicate a message or reopen/re-submit the action.
+        var terminalOutcome: ToolResult? = null
     }
 
     private val entries = mutableMapOf<String, Entry>()
@@ -46,13 +51,19 @@ class ExecutionLedger {
     @Synchronized
     fun gate(toolName: String, args: JSONObject): ToolResult? {
         val entry = entries.getOrPut(keyFor(toolName, args)) { Entry() }
+        entry.terminalOutcome?.let { terminal ->
+            return terminal.copy(
+                success = false,
+                message = NO_REPEAT_PREFIX + terminal.message
+            )
+        }
         entry.success?.let { cached ->
-            return ToolResult(true, ALREADY_DONE_PREFIX + cached.message)
+            return cached.copy(message = ALREADY_DONE_PREFIX + cached.message)
         }
         if (entry.attempts >= MAX_ATTEMPTS) {
             val failure = entry.lastFailure
             return if (failure != null) {
-                ToolResult(false, ALREADY_DONE_PREFIX + failure.message)
+                failure.copy(message = ALREADY_DONE_PREFIX + failure.message)
             } else {
                 ToolResult(false, ALREADY_DONE_PREFIX + "Attempt limit reached for $toolName.")
             }
@@ -65,7 +76,10 @@ class ExecutionLedger {
     @Synchronized
     fun record(toolName: String, args: JSONObject, result: ToolResult) {
         val entry = entries.getOrPut(keyFor(toolName, args)) { Entry() }
-        if (result.success) {
+        if (result.outcome in TERMINAL_OUTCOMES) {
+            entry.terminalOutcome = result
+            entry.lastFailure = null
+        } else if (result.success) {
             entry.success = result
         } else {
             entry.lastFailure = result
@@ -75,6 +89,13 @@ class ExecutionLedger {
     companion object {
         const val MAX_ATTEMPTS = 2
         const val ALREADY_DONE_PREFIX = "Already done this turn — do not repeat. "
+        private const val NO_REPEAT_PREFIX =
+            "This action's outcome is staged or uncertain. Do not retry until the user checks it. "
+        private val TERMINAL_OUTCOMES = setOf(
+            ActionOutcome.STAGED_FOR_USER,
+            ActionOutcome.SUBMITTED_UNVERIFIED,
+            ActionOutcome.OUTCOME_UNKNOWN
+        )
 
         /** Canonical string form of a JSON value: sorted object keys. */
         private fun normalize(value: Any?): String = when (value) {
