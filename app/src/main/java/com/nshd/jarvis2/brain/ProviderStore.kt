@@ -127,6 +127,19 @@ class ProviderStore(context: Context) {
 
     fun loadConfig(id: String): ProviderConfig {
         val preset = ProviderPresets.byId(id)
+        // byId deliberately falls back to Gemini for unknown IDs; do not then
+        // read the unknown ID's private preference namespace by accident.
+        if (preset.id != id) {
+            storageError = "Unknown provider configuration. No settings were read."
+            return ProviderConfig(
+                id = preset.id,
+                label = preset.label,
+                baseUrl = preset.baseUrl,
+                apiKey = "",
+                chatModel = preset.chatModel,
+                reasoningModel = preset.reasoningModel
+            )
+        }
         val storage = prefs ?: return ProviderConfig(
             id = preset.id,
             label = preset.label,
