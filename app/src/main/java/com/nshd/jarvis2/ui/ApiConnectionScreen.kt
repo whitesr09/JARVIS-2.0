@@ -231,8 +231,7 @@ fun ApiConnectionScreen(
                     // route it to AppLog and show the friendly reason.
                     com.nshd.jarvis2.core.AppLog.e(
                         "API",
-                        "fetch models failed: ${error.message ?: "unknown"}",
-                        error
+                        "fetch models failed (${error.javaClass.simpleName})"
                     )
                     modelsError = "Couldn't fetch models — check the key " +
                         "and connection. (" +
