@@ -18,6 +18,31 @@ import com.nshd.jarvis2.service.JarvisAccessibilityService
 import kotlinx.coroutines.delay
 
 /**
+ * Pure recipient guard for photo-send UI flows. The caller must match the
+ * contact selected before consent and re-check it after the consent prompt.
+ */
+internal object WhatsAppRecipientGuard {
+    fun normalizedChatKey(value: String): String =
+        value.lowercase().filter { it.isLetterOrDigit() }
+
+    fun matchesApprovedChat(
+        visibleTitle: String,
+        approvedName: String,
+        approvedDigits: String
+    ): Boolean {
+        val titleKey = normalizedChatKey(visibleTitle)
+        val nameKey = normalizedChatKey(approvedName)
+        if (titleKey.isNotBlank() && titleKey == nameKey) return true
+        val visibleDigits = ContactsResolver.normalizePhone(visibleTitle)
+        return visibleDigits.length >= 7 &&
+            approvedDigits.length >= 7 &&
+            (visibleDigits == approvedDigits ||
+                visibleDigits.endsWith(approvedDigits.takeLast(7)) ||
+                approvedDigits.endsWith(visibleDigits.takeLast(7)))
+    }
+}
+
+/**
  * Deep Android intents and hardware controls.
  *
  * Intents are always preferred over simulated taps. Accessibility is used
@@ -1205,7 +1230,7 @@ class DeepIntents(context: Context) {
         val visibleRecipient = currentChatTitle(pkg)
         if (
             visibleRecipient == null ||
-            !matchesApprovedChat(visibleRecipient, expectedContactName, digits)
+            !WhatsAppRecipientGuard.matchesApprovedChat(visibleRecipient, expectedContactName, digits)
         ) {
             AppLog.w("Send", "photo share aborted: approved recipient could not be verified")
             return ActionResult(
@@ -1237,8 +1262,8 @@ class DeepIntents(context: Context) {
         val confirmedRecipient = currentChatTitle(pkg)
         if (
             confirmedRecipient == null ||
-            !matchesApprovedChat(confirmedRecipient, expectedContactName, digits) ||
-            normalizedChatKey(confirmedRecipient) != normalizedChatKey(visibleRecipient)
+            !WhatsAppRecipientGuard.matchesApprovedChat(confirmedRecipient, expectedContactName, digits) ||
+            WhatsAppRecipientGuard.normalizedChatKey(confirmedRecipient) != WhatsAppRecipientGuard.normalizedChatKey(visibleRecipient)
         ) {
             AppLog.w("Send", "photo share aborted: recipient changed or no longer verifies")
             return ActionResult(
@@ -1298,29 +1323,6 @@ class DeepIntents(context: Context) {
     } catch (e: Exception) {
         AppLog.w("Hands", "latest photo lookup failed (${e.javaClass.simpleName})")
         null
-    }
-
-    private fun normalizedChatKey(value: String): String =
-        value.lowercase().filter { it.isLetterOrDigit() }
-
-    /**
-     * Fail closed unless the visible chat title matches the approved
-     * contact exactly, or matches its phone number (for unsaved contacts).
-     */
-    private fun matchesApprovedChat(
-        visibleTitle: String,
-        approvedName: String,
-        approvedDigits: String
-    ): Boolean {
-        val titleKey = normalizedChatKey(visibleTitle)
-        val nameKey = normalizedChatKey(approvedName)
-        if (titleKey.isNotBlank() && titleKey == nameKey) return true
-        val visibleDigits = ContactsResolver.normalizePhone(visibleTitle)
-        return visibleDigits.length >= 7 &&
-            approvedDigits.length >= 7 &&
-            (visibleDigits == approvedDigits ||
-                visibleDigits.endsWith(approvedDigits.takeLast(7)) ||
-                approvedDigits.endsWith(visibleDigits.takeLast(7)))
     }
 
     /**
