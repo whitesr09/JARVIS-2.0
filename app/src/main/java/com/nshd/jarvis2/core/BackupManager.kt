@@ -273,6 +273,7 @@ object BackupManager {
         val allowedProviderKeys = setOf(
             "id", "label", "baseUrl", "chatModel", "reasoningModel", "keyIncluded"
         )
+        val providerIds = mutableSetOf<String>()
         for (i in 0 until providers.length()) {
             val provider = providers.optJSONObject(i)
                 ?: throw IllegalArgumentException("Provider entry " + (i + 1) + " is invalid.")
@@ -283,6 +284,34 @@ object BackupManager {
                     "Unsupported field in provider entry " + (i + 1) + "."
                 }
             }
+            val id = provider.opt("id")
+            val label = provider.opt("label")
+            val baseUrl = provider.opt("baseUrl")
+            val chatModel = provider.opt("chatModel")
+            val reasoningModel = provider.opt("reasoningModel")
+            require(id is String && id.isNotBlank() && id.length <= 128) {
+                "Provider entry " + (i + 1) + " has an invalid identifier."
+            }
+            require(providerIds.add(id)) {
+                "Backup contains duplicate provider identifiers."
+            }
+            require(label is String && label.isNotBlank() && label.length <= 256) {
+                "Provider entry " + (i + 1) + " has an invalid label."
+            }
+            require(baseUrl is String && baseUrl.length <= 2_048 &&
+                (baseUrl.isEmpty() || runCatching {
+                    val uri = android.net.Uri.parse(baseUrl)
+                    uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()
+                }.getOrDefault(false))
+            ) {
+                "Provider entry " + (i + 1) + " has an invalid base URL."
+            }
+            require(chatModel is String && chatModel.length <= 256) {
+                "Provider entry " + (i + 1) + " has an invalid chat model."
+            }
+            require(reasoningModel is String && reasoningModel.length <= 256) {
+                "Provider entry " + (i + 1) + " has an invalid reasoning model."
+            }
             val keyIncluded = provider.opt("keyIncluded")
             require(keyIncluded == null || (keyIncluded is Boolean && !keyIncluded)) {
                 "Provider API keys must not be included in a backup."
@@ -291,6 +320,9 @@ object BackupManager {
         val activeProviderId = root.opt("activeProviderId")
         require(activeProviderId is String && activeProviderId.length <= 128) {
             "Backup active-provider identifier is missing or invalid."
+        }
+        require(activeProviderId.isEmpty() || activeProviderId in providerIds) {
+            "Backup active-provider identifier does not match a listed provider."
         }
         val appVersion = root.opt("appVersion")
         require(appVersion == null || (appVersion is String && appVersion.length <= 128)) {
