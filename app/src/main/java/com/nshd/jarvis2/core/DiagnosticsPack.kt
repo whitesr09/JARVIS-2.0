@@ -24,6 +24,42 @@ import java.util.Locale
  */
 object DiagnosticsPack {
 
+    private val SAFE_LOG_TAGS = setOf("App", "Voice", "Live", "Wake", "Overlay")
+    private val EMAIL_REGEX = Regex("(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b")
+    private val PHONE_REGEX = Regex("(?<!\\w)(?:\\+\\d{1,3}[ .-]?)?\\d{10,13}(?!\\w)")
+
+    /** Build only selected low-risk diagnostic lines, redacting common contact patterns. */
+    internal fun safeLogText(entries: List<AppLog.Entry>): String {
+        val selected = entries.filter {
+            it.tag in SAFE_LOG_TAGS && it.stack.isNullOrBlank()
+        }
+        return AppLog.formatAll(selected.map { entry ->
+            val masked = PHONE_REGEX.replace(
+                EMAIL_REGEX.replace(entry.message, "[email redacted]"),
+                "[phone redacted]"
+            )
+            entry.copy(message = masked, stack = null)
+        })
+    }
+
+    /** Keep crash time/version/type, but never export the exception message or stack by default. */
+    internal fun summarizeCrashReport(report: String): String {
+        if (report.isBlank() || report.contains("No crash report file was found")) return "(none)"
+        val lines = report.lineSequence().takeWhile { it != "---" }.toList()
+        val time = lines.firstOrNull { it.startsWith("Time: ") }?.removePrefix("Time: ")
+        val version = lines.firstOrNull { it.startsWith("App version: ") }?.removePrefix("App version: ")
+        val exception = lines.firstOrNull { it.startsWith("Exception: ") }
+            ?.removePrefix("Exception: ")
+            ?.substringBefore(":")
+            ?.trim()
+        return buildString {
+            appendLine("Crash metadata only; exception message and stack trace omitted.")
+            if (time != null) appendLine("Time: $time")
+            if (version != null) appendLine("App version: $version")
+            if (!exception.isNullOrBlank()) appendLine("Exception type: $exception")
+        }.trim()
+    }
+
     /** Build the pack text. File/metadata reads only — call off Main. */
     fun buildText(context: Context): String {
         val appContext = context.applicationContext
@@ -42,8 +78,9 @@ object DiagnosticsPack {
             "yyyy-MM-dd HH:mm:ss", Locale.US
         ).format(Date())
         return buildString {
-            appendLine("JARVIS diagnostics pack")
+            appendLine("JARVIS diagnostics pack (redacted)")
             appendLine("Generated: $stamp")
+            appendLine("Privacy: raw action, clipboard, memory, API-response, and crash-stack logs are omitted; common phone/email patterns are masked. Review before sharing.")
             appendLine("App version: $version")
             appendLine(
                 "Device: ${Build.MANUFACTURER} ${Build.MODEL} " +
@@ -56,16 +93,16 @@ object DiagnosticsPack {
             appendLine("== Providers (no keys) ==")
             appendLine(providersSummary(appContext))
             appendLine()
-            appendLine("== Last crash report ==")
+            appendLine("== Last crash metadata ==")
             val crashFile = File(appContext.filesDir, "last_crash.txt")
             if (crashFile.exists()) {
-                appendLine(CrashLogger.readCrashReport(appContext))
+                appendLine(summarizeCrashReport(CrashLogger.readCrashReport(appContext)))
             } else {
                 appendLine("(none)")
             }
             appendLine()
-            appendLine("== App log (last 500 lines) ==")
-            append(AppLog.formatAll(AppLog.entries.value.takeLast(500)))
+            appendLine("== Selected redacted diagnostic events (last 500 entries scanned) ==")
+            append(safeLogText(AppLog.entries.value.takeLast(500)))
         }.let { AppLog.sanitize(it) }
     }
 
@@ -141,11 +178,11 @@ object DiagnosticsPack {
             )
             AppLog.i(
                 "App",
-                "diagnostics pack shared (${text.lines().size} lines, no keys)"
+                "redacted diagnostics pack created (${text.lines().size} lines)"
             )
             true
         }.getOrElse { error ->
-            AppLog.e("App", "diagnostics pack share failed: ${error.message}")
+            AppLog.e("App", "diagnostics pack share failed (${error.javaClass.simpleName})")
             false
         }
     }
