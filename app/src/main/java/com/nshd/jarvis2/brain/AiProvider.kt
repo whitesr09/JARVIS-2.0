@@ -142,6 +142,15 @@ class OpenAiCompatibleProvider(
         else -> "The provider returned an HTTP error."
     }
 
+    /** Map transport errors to safe, actionable text without exposing a custom URL. */
+    private fun networkFailureSummary(error: Throwable): String = when (error) {
+        is java.net.SocketTimeoutException -> "Request timed out."
+        is java.net.UnknownHostException -> "Provider host could not be resolved."
+        is java.net.ConnectException -> "Could not connect to the provider."
+        is javax.net.ssl.SSLException -> "Secure connection to the provider failed."
+        else -> "Network connection failed."
+    }
+
     private fun authed(builder: Request.Builder): Request.Builder =
         builder.header("Authorization", "Bearer $apiKey")
             .header("Content-Type", "application/json")
@@ -180,9 +189,9 @@ class OpenAiCompatibleProvider(
             AppLog.e(
                 "API",
                 "$id model=$model POST ${logTarget("/chat/completions")} " +
-                    "network error: ${e.message ?: "unreachable"}"
+                    "network error: ${networkFailureSummary(e)}"
             )
-            throw AiException("Network error: ${e.message ?: "unreachable"}")
+            throw AiException("Network error: ${networkFailureSummary(e)}")
         }
         response.use {
             val bodyText = readLimitedBody(it.body, MAX_RESPONSE_BYTES)
@@ -288,9 +297,9 @@ class OpenAiCompatibleProvider(
         } catch (e: IOException) {
             AppLog.e(
                 "API",
-                "$id model=$model stream network error: ${e.message ?: "unreachable"}"
+                "$id model=$model stream network error: ${networkFailureSummary(e)}"
             )
-            throw AiException("Network error: ${e.message ?: "unreachable"}")
+            throw AiException("Network error: ${networkFailureSummary(e)}")
         }
 
         response.use {
@@ -401,9 +410,9 @@ class OpenAiCompatibleProvider(
                 AppLog.e(
                     "API",
                     "$id model=$model stream died before any delta: " +
-                        (e.message ?: "interrupted")
+                        networkFailureSummary(e)
                 )
-                throw AiException("Network error: ${e.message ?: "stream interrupted"}")
+                throw AiException("Network error: ${networkFailureSummary(e)}")
             }
             if (!sawDone && !emittedAny && toolBuilders.isEmpty()) {
                 throw AiException("Empty reply from model")
@@ -568,9 +577,9 @@ class OpenAiCompatibleProvider(
                 }
             }
         } catch (e: IOException) {
-            TestResult(false, elapsed(), "Network error: ${e.message ?: "unreachable"}")
+            TestResult(false, elapsed(), "Network error: ${networkFailureSummary(e)}")
         } catch (e: Exception) {
-            TestResult(false, elapsed(), e.message?.take(120) ?: "Probe failed")
+            TestResult(false, elapsed(), "Probe failed (${e.javaClass.simpleName})")
         }
     }
 
@@ -585,7 +594,7 @@ class OpenAiCompatibleProvider(
         val modelsResp = try {
             client.newCall(modelsReq).execute()
         } catch (e: IOException) {
-            return@withContext TestResult(false, elapsed(), "Network error: ${e.message ?: "unreachable"}")
+            return@withContext TestResult(false, elapsed(), "Network error: ${networkFailureSummary(e)}")
         }
         val modelsCode = modelsResp.code
         modelsResp.close()
@@ -627,7 +636,7 @@ class OpenAiCompatibleProvider(
                     }
                 }
             } catch (e: IOException) {
-                TestResult(false, elapsed(), "Network error: ${e.message ?: "unreachable"}")
+                TestResult(false, elapsed(), "Network error: ${networkFailureSummary(e)}")
             }
         }
         TestResult(false, elapsed(), "HTTP $modelsCode from /models")
