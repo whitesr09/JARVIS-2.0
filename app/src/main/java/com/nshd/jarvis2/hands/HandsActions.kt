@@ -29,7 +29,24 @@ import java.util.ArrayDeque
 import kotlin.coroutines.resume
 import kotlin.math.abs
 
-data class ActionResult(val success: Boolean, val message: String)
+enum class ActionOutcome {
+    /** The requested action was completed to the level stated in its result. */
+    COMPLETED,
+    /** The relevant composer/draft is open, but Jarvis did not submit it. */
+    STAGED_FOR_USER,
+    /** A send was submitted and visible UI evidence appeared; delivery is not confirmed. */
+    SUBMITTED_UNVERIFIED,
+    /** The action may have happened, but the app cannot prove its final state. */
+    OUTCOME_UNKNOWN,
+    /** The action did not complete and there is no evidence it was submitted. */
+    FAILED
+}
+
+data class ActionResult(
+    val success: Boolean,
+    val message: String,
+    val outcome: ActionOutcome = if (success) ActionOutcome.COMPLETED else ActionOutcome.FAILED
+)
 
 /** Resolved editable target + everything the edit/insert paths need (F6). */
 private class EditableTarget(
