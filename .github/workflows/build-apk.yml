@@ -7,16 +7,19 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+# Supersede stale runs of the same event/branch or PR, but keep push and
+# pull_request runs separate because only trusted push/manual builds may sign.
+concurrency:
+  group: jarvis-apk-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    env:
-      JARVIS_KEYSTORE_PASSWORD: ${{ secrets.JARVIS_KEYSTORE_PASSWORD }}
-      JARVIS_KEY_ALIAS: ${{ secrets.JARVIS_KEY_ALIAS }}
-      JARVIS_KEY_PASSWORD: ${{ secrets.JARVIS_KEY_PASSWORD }}
+    timeout-minutes: 35
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -43,55 +46,126 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
-      - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
+      - name: Run unit tests and compile debug APK
+        run: ./gradlew testDebugUnitTest assembleDebug --stacktrace
 
-      - name: Decode permanent signing keystore
+      # Do not inject signing secrets into pull_request jobs. PR validation
+      # builds and verifies a debug artifact; trusted pushes/manual dispatch
+      # may produce the permanent-signed release artifact.
+      - name: Decode and validate permanent signing keystore
+        if: github.event_name != 'pull_request'
         env:
           KS_B64: ${{ secrets.JARVIS_KEYSTORE_BASE64 }}
+          JARVIS_KEYSTORE_PASSWORD: ${{ secrets.JARVIS_KEYSTORE_PASSWORD }}
+          JARVIS_KEY_ALIAS: ${{ secrets.JARVIS_KEY_ALIAS }}
+          JARVIS_KEY_PASSWORD: ${{ secrets.JARVIS_KEY_PASSWORD }}
         shell: bash
         run: |
-          if [ -n "$KS_B64" ]; then
-            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/jarvis2-release.jks"
+          set -euo pipefail
+          if [ -n "${KS_B64:-}" ]; then
+            : "${JARVIS_KEYSTORE_PASSWORD:?Missing JARVIS_KEYSTORE_PASSWORD secret}"
+            : "${JARVIS_KEY_ALIAS:?Missing JARVIS_KEY_ALIAS secret}"
+            : "${JARVIS_KEY_PASSWORD:?Missing JARVIS_KEY_PASSWORD secret}"
+            printf '%s' "$KS_B64" | base64 --decode > "$RUNNER_TEMP/jarvis2-release.jks"
             test -s "$RUNNER_TEMP/jarvis2-release.jks"
+            keytool -list -keystore "$RUNNER_TEMP/jarvis2-release.jks" \
+              -storepass "$JARVIS_KEYSTORE_PASSWORD" -alias "$JARVIS_KEY_ALIAS" >/dev/null
             echo "JARVIS_KEYSTORE_PATH=$RUNNER_TEMP/jarvis2-release.jks" >> "$GITHUB_ENV"
             echo "HAS_KEYSTORE=true" >> "$GITHUB_ENV"
           else
-            echo "No keystore secret configured; producing a debug APK for testing only."
+            echo "No keystore configured; this run will produce a debug APK only."
             echo "HAS_KEYSTORE=false" >> "$GITHUB_ENV"
           fi
 
       - name: Build release APK (permanent signing)
-        if: env.HAS_KEYSTORE == 'true'
+        if: github.event_name != 'pull_request' && env.HAS_KEYSTORE == 'true'
+        env:
+          JARVIS_KEYSTORE_PASSWORD: ${{ secrets.JARVIS_KEYSTORE_PASSWORD }}
+          JARVIS_KEY_ALIAS: ${{ secrets.JARVIS_KEY_ALIAS }}
+          JARVIS_KEY_PASSWORD: ${{ secrets.JARVIS_KEY_PASSWORD }}
         run: ./gradlew assembleRelease --stacktrace
 
       - name: Build debug APK (testing only)
-        if: env.HAS_KEYSTORE != 'true'
+        if: github.event_name == 'pull_request' || env.HAS_KEYSTORE != 'true'
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Verify APK exists
+      - name: Verify signed release APK, certificate and SHA-256
+        if: github.event_name != 'pull_request' && env.HAS_KEYSTORE == 'true'
+        env:
+          JARVIS_KEYSTORE_PASSWORD: ${{ secrets.JARVIS_KEYSTORE_PASSWORD }}
+          JARVIS_KEY_ALIAS: ${{ secrets.JARVIS_KEY_ALIAS }}
         shell: bash
         run: |
-          if [ "$HAS_KEYSTORE" = "true" ]; then
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          test -s "$APK"
+          "$APKSIGNER" verify --verbose "$APK"
+          ACTUAL_CERT_SHA256="$("$APKSIGNER" verify --print-certs "$APK" | \
+            awk -F ': ' '/Signer #1 certificate SHA-256 digest:/ {print tolower($2); exit}')"
+          EXPECTED_CERT_SHA256="$(keytool -exportcert \
+            -keystore "$JARVIS_KEYSTORE_PATH" \
+            -storepass "$JARVIS_KEYSTORE_PASSWORD" \
+            -alias "$JARVIS_KEY_ALIAS" | sha256sum | awk '{print $1}')"
+          test -n "$ACTUAL_CERT_SHA256"
+          test "$ACTUAL_CERT_SHA256" = "$EXPECTED_CERT_SHA256"
+          sha256sum "$APK" | tee "$RUNNER_TEMP/jarvis-release.sha256"
+          cp "$RUNNER_TEMP/jarvis-release.sha256" "$APK.sha256"
+          {
+            echo "### Release APK verification"
+            echo "- APK signature: verified"
+            echo "- Signing certificate SHA-256: `$ACTUAL_CERT_SHA256`"
+            echo "- APK checksum: `$(sha256sum "$APK" | awk '{print $1}')`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify debug APK signature and SHA-256
+        if: github.event_name == 'pull_request' || env.HAS_KEYSTORE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          test -s "$APK"
+          "$APKSIGNER" verify --verbose "$APK"
+          sha256sum "$APK" | tee "$RUNNER_TEMP/jarvis-debug.sha256"
+          cp "$RUNNER_TEMP/jarvis-debug.sha256" "$APK.sha256"
+          {
+            echo "### Debug APK verification"
+            echo "- APK signature: verified"
+            echo "- APK checksum: `$(sha256sum "$APK" | awk '{print $1}')`"
+            echo "- Artifact is debug-signed and intended for testing, not as a release upgrade."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify expected APK exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${HAS_KEYSTORE:-false}" = "true" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
             test -s app/build/outputs/apk/release/app-release.apk
+            test -s app/build/outputs/apk/release/app-release.apk.sha256
           else
             test -s app/build/outputs/apk/debug/app-debug.apk
+            test -s app/build/outputs/apk/debug/app-debug.apk.sha256
           fi
 
       - name: Upload Jarvis APK (release)
-        if: env.HAS_KEYSTORE == 'true'
+        if: github.event_name != 'pull_request' && env.HAS_KEYSTORE == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: jarvis-2.0-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          path: |
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/apk/release/app-release.apk.sha256
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload Jarvis APK (debug)
-        if: env.HAS_KEYSTORE != 'true'
+        if: github.event_name == 'pull_request' || env.HAS_KEYSTORE != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: jarvis-2.0-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/debug/app-debug.apk.sha256
           if-no-files-found: error
           retention-days: 7
