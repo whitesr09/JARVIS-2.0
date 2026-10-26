@@ -108,11 +108,13 @@ fun ApiConnectionScreen(
         val warning = store.storageError ?: store.migrationWarning
         storageWarning = warning
         if (!saved) {
-            snackbar.showSnackbar(
-                warning ?: "Provider settings could not be saved securely. No API key was stored."
-            )
+            scope.launch {
+                snackbar.showSnackbar(
+                    warning ?: "Provider settings could not be saved securely. No API key was stored."
+                )
+            }
         } else if (warning != null) {
-            snackbar.showSnackbar(warning)
+            scope.launch { snackbar.showSnackbar(warning) }
         }
         return saved
     }
