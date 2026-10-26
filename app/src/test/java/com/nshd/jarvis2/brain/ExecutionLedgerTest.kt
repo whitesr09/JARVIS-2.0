@@ -63,7 +63,11 @@ class ExecutionLedgerTest {
             assertNull(ledger.gate("sms_send", args))
             ledger.record(
                 "sms_send", args,
-                ToolResult(false, "Check the conversation before retrying.", outcome)
+                ToolResult(
+                    success = false,
+                    message = "Check the conversation before retrying.",
+                    outcome = outcome
+                )
             )
 
             val cached = ledger.gate("sms_send", args)
