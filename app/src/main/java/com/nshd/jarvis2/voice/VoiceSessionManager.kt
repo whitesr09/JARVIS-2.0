@@ -1311,7 +1311,13 @@ object VoiceSessionManager {
                     )
                 }
             }
+            val captureContext = appContext
+            if (captureContext == null) {
+                fail("App context is unavailable; microphone capture cannot start.")
+                return
+            }
             val captureDevice = AudioCapture(
+                context = captureContext,
                 onChunk = { chunk ->
                     if (!_uiState.value.micMuted) client?.sendAudioChunk(chunk)
                 },
