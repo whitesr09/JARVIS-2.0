@@ -1,9 +1,12 @@
 package com.nshd.jarvis2.voice
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import androidx.core.content.ContextCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -63,6 +66,12 @@ object BiometricsRecorder {
     suspend fun recordSample(context: Context, index: Int): Boolean =
         withContext(Dispatchers.IO) {
             if (index !in 1..TOTAL_SAMPLES) return@withContext false
+            // Check before deleting the old slot: a permission revoke should
+            // not destroy a previously valid sample without a new recording.
+            if (ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.RECORD_AUDIO
+                ) != PackageManager.PERMISSION_GRANTED
+            ) return@withContext false
             val file = sampleFile(context, index)
             // A failed re-record must not leave an older sample looking current.
             runCatching { file.delete() }
@@ -84,6 +93,8 @@ object BiometricsRecorder {
                     AudioFormat.ENCODING_PCM_16BIT,
                     maxOf(minBuffer * 2, 16_000)
                 )
+            } catch (e: SecurityException) {
+                return@withContext false
             } catch (e: Exception) {
                 return@withContext false
             }
@@ -104,6 +115,8 @@ object BiometricsRecorder {
                 }
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: SecurityException) {
+                return@withContext false
             } catch (e: Exception) {
                 return@withContext false
             } finally {
