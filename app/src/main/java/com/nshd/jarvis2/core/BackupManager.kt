@@ -33,6 +33,15 @@ object BackupManager {
     private const val MAX_FACTS = 10_000
     private const val MAX_PROVIDERS = 32
 
+    // These flags refer to WAV samples stored under this device's private
+    // filesDir/biometrics folder. The audio samples are intentionally not
+    // exported, so a portable backup must not imply the destination has them.
+    private val DEVICE_LOCAL_SETTING_KEYS = setOf(
+        "biometrics_enrolled",
+        "biometrics_sample_count",
+        "biometrics_enrolled_date"
+    )
+
     private enum class SettingKind { STRING, BOOLEAN, INTEGER, FLOAT }
 
     // Keep in sync with MainActivity.saveSettings / JarvisSettings. Strict
@@ -88,23 +97,15 @@ object BackupManager {
             "note",
             "Provider API keys are NOT included (they stay encrypted " +
                 "on-device). After restoring on a new phone, paste each " +
-                "provider key again in Settings → API & Model."
+                "provider key again in Settings → API & Model. Voice-biometric " +
+                "enrollment samples are device-local and are not backed up; " +
+                "enroll again on the destination device."
         )
 
-        val settingsObj = JSONObject()
         val all = appContext
             .getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
             .all
-        for ((key, value) in all) {
-            when (value) {
-                is String -> settingsObj.put(key, value)
-                is Boolean -> settingsObj.put(key, value)
-                is Int -> settingsObj.put(key, value)
-                is Long -> settingsObj.put(key, value)
-                is Float -> settingsObj.put(key, value.toDouble())
-                else -> Unit // sets are not used by JarvisSettings
-            }
-        }
+        val settingsObj = portableSettings(all)
         root.put("settings", settingsObj)
 
         val db = MemoryDb(appContext)
@@ -135,10 +136,28 @@ object BackupManager {
         root.put("activeProviderId", store.activeProviderId())
         AppLog.i(
             "App",
-            "Backup exported: ${all.size} settings, ${factsArr.length()} facts, " +
+            "Backup exported: ${settingsObj.length()} settings, ${factsArr.length()} facts, " +
                 "${providersArr.length()} providers (keys excluded)"
         )
         return root.toString(2)
+    }
+
+    /** Build an exportable settings object, excluding device-local enrollment state. */
+    internal fun portableSettings(values: Map<String, *>): JSONObject {
+        val result = JSONObject()
+        for ((key, value) in values) {
+            if (key in DEVICE_LOCAL_SETTING_KEYS) continue
+            when (value) {
+                is String -> result.put(key, value)
+                is Boolean -> result.put(key, value)
+                is Int -> result.put(key, value)
+                is Long -> result.put(key, value)
+                is Float -> if (value.isFinite()) result.put(key, value.toDouble())
+                is Double -> if (value.isFinite()) result.put(key, value)
+                else -> Unit // sets and unsupported preference types are not part of JarvisSettings
+            }
+        }
+        return result
     }
 
     /**
@@ -295,6 +314,10 @@ object BackupManager {
         val keys = settingsObj.keys()
         while (keys.hasNext()) {
             val key = keys.next()
+            // Legacy backups may contain these flags, but the corresponding
+            // WAV samples are not portable. Never restore a stale enrolled
+            // flag on another device; leave local enrollment state untouched.
+            if (key in DEVICE_LOCAL_SETTING_KEYS) continue
             when (val value = settingsObj.get(key)) {
                 is String -> editor.putString(key, value)
                 is Boolean -> editor.putBoolean(key, value)
