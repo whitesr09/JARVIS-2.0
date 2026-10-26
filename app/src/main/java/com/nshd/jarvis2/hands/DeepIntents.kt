@@ -1278,7 +1278,7 @@ class DeepIntents(context: Context) {
     suspend fun typeAndSendInOpenChat(
         packageName: String,
         message: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
@@ -1290,8 +1290,8 @@ class DeepIntents(context: Context) {
             return ActionResult(false, "The chat is no longer open in the foreground.")
         }
         var snapshot = reader.snapshot()
-        val entry = snapshot.firstOrNull { it.editable }
-            ?: return ActionResult(false, "No message field was found in the open chat.")
+        val entry = snapshot.firstOrNull { it.editable && it.enabled }
+            ?: return ActionResult(false, "No enabled message field was found in the open chat.")
         val tapped = HandsActions.clickElement(entry.index)
         if (!tapped.success) {
             return ActionResult(false, "The message field could not be focused: ${tapped.message}")
@@ -1302,38 +1302,107 @@ class DeepIntents(context: Context) {
         }
         TaskState.throwIfStopRequested()
         HandsActions.waitForSettle(600)
-        // v2.0.2 JIT ask: text typed, send NOT yet tapped. A decline
-        // leaves the typed text in the open chat, untouched.
-        if (askBeforeSend != null && !askBeforeSend()) {
+
+        // Just-in-time approval is mandatory for every send path.
+        if (!askBeforeSend()) {
             return ActionResult(false, "Not sent.")
         }
+        TaskState.throwIfStopRequested()
+
+        // The user may have switched apps or changed the draft while answering.
         snapshot = reader.snapshot()
+        if (reader.currentPackage() != packageName ||
+            JarvisAccessibilityService.lastPackageName?.let { it != packageName } == true
+        ) {
+            HandsActions.revokeSendPermit(packageName)
+            return ActionResult(
+                false,
+                "The active app changed after confirmation. Nothing was sent."
+            )
+        }
+        if (snapshot.none { it.editable && it.text == message }) {
+            HandsActions.revokeSendPermit(packageName)
+            return ActionResult(
+                false,
+                "The message draft changed after confirmation. Nothing was sent."
+            )
+        }
+
+        // Existing chat history with identical text is not evidence of a new send.
+        fun bubbleSignature(element: UiElement): String =
+            "${element.viewId}\u0001${element.className}\u0001" +
+                "${element.text.trim()}\u0001${element.desc.trim()}"
+        fun bubbleCounts(elements: List<UiElement>): Map<String, Int> =
+            elements.filter { element ->
+                !element.editable && message.isNotEmpty() &&
+                    (element.text.contains(message) || element.label.contains(message))
+            }.groupingBy(::bubbleSignature).eachCount()
+        val previousBubbleCounts = bubbleCounts(snapshot)
+
         val send = Playbooks.find(snapshot, packageName, Playbooks.ROLE_SEND_BUTTON)
             ?: reader.findByText("Send", snapshot)
-                ?.takeIf { it.clickable || it.desc.contains("send", true) }
-            ?: return ActionResult(
-                true,
-                "The message was typed into the chat — tap Send to send it " +
-                    "(the Send button was not found automatically)."
+                ?.takeIf { it.enabled && (it.clickable || it.desc.contains("send", true)) }
+            ?: run {
+                HandsActions.revokeSendPermit(packageName)
+                return ActionResult(
+                    false,
+                    "The message is typed, but the Send button could not be verified. The draft remains open; nothing was sent.",
+                    ActionOutcome.STAGED_FOR_USER
+                )
+            }
+
+        // Final guard immediately before consuming the one-shot permit.
+        TaskState.throwIfStopRequested()
+        if (reader.currentPackage() != packageName) {
+            HandsActions.revokeSendPermit(packageName)
+            return ActionResult(
+                false,
+                "The active app changed before Send. Nothing was sent."
             )
-        val click = HandsActions.clickElement(send.index)
+        }
+
+        val click = try {
+            HandsActions.clickElement(send.index)
+        } finally {
+            HandsActions.revokeSendPermit(packageName)
+        }
         if (!click.success) {
-            return ActionResult(false, "Send could not be pressed: ${click.message}")
+            return ActionResult(
+                false,
+                "The Send action could not be confirmed; check the chat before retrying because the outcome may be uncertain.",
+                ActionOutcome.OUTCOME_UNKNOWN
+            )
         }
-        // Verify like whatsapp_message: the entry must clear.
+
+        // Composer clear + a newly appearing matching non-editable message
+        // are useful submission signals, but neither proves delivery/read status.
+        var composerCleared = false
+        var newMessageObserved = false
         val deadline = System.currentTimeMillis() + 2_000
-        var cleared = false
-        while (System.currentTimeMillis() < deadline && !cleared) {
+        while (System.currentTimeMillis() < deadline &&
+            !(composerCleared && newMessageObserved)
+        ) {
+            TaskState.throwIfStopRequested()
             delay(200)
-            val current = reader.snapshot().firstOrNull { it.editable }
-            if (current == null || current.text.isBlank()) cleared = true
+            snapshot = reader.snapshot()
+            val currentEntry = snapshot.firstOrNull { it.editable }
+            if (currentEntry == null || currentEntry.text.isBlank()) composerCleared = true
+            val nextCounts = bubbleCounts(snapshot)
+            newMessageObserved = nextCounts.any { (signature, count) ->
+                count > previousBubbleCounts.getOrDefault(signature, 0)
+            }
         }
-        return if (cleared) {
-            ActionResult(true, "Message sent and verified.")
+        return if (composerCleared && newMessageObserved) {
+            ActionResult(
+                false,
+                "A new matching chat message appeared and the composer cleared. Submission looks successful, but delivery is unverified. Check the chat before retrying to avoid a duplicate.",
+                ActionOutcome.SUBMITTED_UNVERIFIED
+            )
         } else {
             ActionResult(
                 false,
-                "Send was pressed, but the message field did not clear, so sending is unverified."
+                "Send was tapped, but Jarvis could not confirm both a cleared composer and a newly appearing message. The outcome is uncertain; check the chat before retrying.",
+                ActionOutcome.OUTCOME_UNKNOWN
             )
         }
     }
@@ -1347,7 +1416,7 @@ class DeepIntents(context: Context) {
     suspend fun whatsappGroupMessage(
         groupName: String,
         message: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val pkg = "com.whatsapp"
         if (!isPackageInstalled(pkg)) {
@@ -1401,7 +1470,7 @@ class DeepIntents(context: Context) {
     suspend fun instagramDm(
         contactQuery: String,
         message: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val pkg = Playbooks.INSTAGRAM_PACKAGE
         if (!isPackageInstalled(pkg)) {
@@ -1450,7 +1519,7 @@ class DeepIntents(context: Context) {
     suspend fun telegramMessage(
         contactQuery: String,
         message: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val pkg = "org.telegram.messenger"
         if (!isPackageInstalled(pkg)) {
