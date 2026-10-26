@@ -339,16 +339,16 @@ object BackupManager {
         }
 
         val db = MemoryDb(appContext)
-        val existing = db.allFacts(null, null)
-            .map { it.category + "\u0001" + it.text.trim().lowercase() }
-            .toHashSet()
         var factsAdded = 0
         var factsSkipped = 0
 
-        // All new facts are one SQLite transaction. Commit settings only after
-        // all fact writes succeed, so a bad database write cannot leave the
-        // settings half of the restore applied with no memory imported.
+        // Read the dedupe set inside the same transaction as the inserts.
+        // A concurrent memory write cannot slip between the snapshot and import.
+        // Commit settings only after all fact writes succeed.
         db.withTransaction {
+            val existing = db.allFacts(null, null)
+                .map { it.category + "\u0001" + it.text.trim().lowercase() }
+                .toHashSet()
             for (i in 0 until factsArr.length()) {
                 val obj = factsArr.getJSONObject(i)
                 val text = obj.getString("text").trim()
