@@ -88,12 +88,13 @@ class FailoverRouter(
                 failures += config.label to (e.message ?: "unexpected error")
             }
         }
-        // F5 error hygiene: raw provider text goes to AppLog ONLY; the
-        // returned summary is FriendlyErrors-shortened per provider.
+        // Provider/network error strings may contain private endpoint URLs
+        // or request fragments. The user gets friendly per-provider reasons;
+        // persistent logs retain only which providers failed.
         AppLog.e(
             "API",
-            "chat: all providers failed — " +
-                failures.joinToString(" • ") { (label, raw) -> "$label: $raw" }
+            "chat: all providers failed; providers tried=" +
+                failures.map { it.first }.distinct().joinToString(", ")
         )
         return ChatOutcome.AllFailed(
             failures.joinToString("  •  ") { (label, raw) ->
@@ -502,7 +503,7 @@ class FailoverRouter(
                 val backoffMs = if (retriesUsed == 1) 800L else 2_000L
                 AppLog.w(
                     "Agent",
-                    "transient model failure on $providerLabel: $detail — " +
+                    "transient model failure on $providerLabel — " +
                         "retry $retriesUsed/$maxRetries on the SAME provider " +
                         "in ${backoffMs}ms (toolsExecuted=${toolsExecuted()})"
                 )
