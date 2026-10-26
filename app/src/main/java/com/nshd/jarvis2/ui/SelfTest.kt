@@ -123,8 +123,21 @@ object SelfTest {
             }
         )
 
-        // 6) Provider configured + last probe latency (cached only).
+        // 6) Provider key storage must be encrypted; no plaintext fallback is allowed.
         val store = ProviderStore(appContext)
+        val secureStorageOk = store.secureStorageAvailable && store.migrationWarning == null
+        results += SelfTestResult(
+            name = "Provider key storage",
+            passed = secureStorageOk,
+            detail = when {
+                !store.secureStorageAvailable ->
+                    store.storageError ?: "Encrypted provider storage is unavailable."
+                store.migrationWarning != null -> store.migrationWarning!!
+                else -> "Encrypted provider storage is available."
+            }
+        )
+
+        // 7) Provider configured + last probe latency (cached only).
         val configured = store.orderedConfigs().filter { it.isConfigured }
         val providerResult = if (configured.isEmpty()) {
             SelfTestResult(
@@ -152,7 +165,7 @@ object SelfTest {
         }
         results += providerResult
 
-        // 7) Vosk wake model state (also the offline-commands model).
+        // 8) Vosk wake model state (also the offline-commands model).
         val voskReady = VoskModelManager.status(appContext) ==
             VoskModelManager.ModelStatus.READY
         results += SelfTestResult(
@@ -165,7 +178,7 @@ object SelfTest {
             }
         )
 
-        // 8) Storage writable (logs dir probe).
+        // 9) Storage writable (logs dir probe).
         val storageOk = runCatching {
             val dir = File(appContext.filesDir, "logs").apply { mkdirs() }
             val probe = File(dir, ".selftest-probe")
