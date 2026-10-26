@@ -207,13 +207,16 @@ class ProviderStore(context: Context) {
      */
     fun cachedModelIds(id: String): List<String> {
         if (ProviderPresets.ALL.none { it.id == id }) return emptyList()
-        val raw = prefs?.getString(key(id, "models"), null) ?: return emptyList()
+        val storage = prefs ?: return emptyList()
         return try {
+            val raw = storage.getString(key(id, "models"), null) ?: return emptyList()
             val array = org.json.JSONArray(raw)
-            (0 until array.length()).mapNotNull { i ->
-                array.optString(i).takeIf { it.isNotBlank() }
+            (0 until minOf(array.length(), MAX_CACHED_MODELS)).mapNotNull { i ->
+                array.optString(i).takeIf { it.isNotBlank() && it.length <= MAX_MODEL_ID_CHARS }
             }
         } catch (e: Exception) {
+            storageError = "Encrypted model cache could not be read; cached model discovery was cleared."
+            Log.e(TAG, "Encrypted model-cache read failed (${e.javaClass.simpleName})")
             emptyList()
         }
     }
@@ -224,12 +227,17 @@ class ProviderStore(context: Context) {
             return false
         }
         val array = org.json.JSONArray()
-        ids.forEach { array.put(it) }
+        ids.asSequence()
+            .filter { it.isNotBlank() && it.length <= MAX_MODEL_ID_CHARS }
+            .distinct()
+            .take(MAX_CACHED_MODELS)
+            .forEach { array.put(it) }
         val storage = prefs ?: return false
         return try {
             storage.edit().putString(key(id, "models"), array.toString()).apply()
             true
         } catch (e: Exception) {
+            storageError = "Encrypted model cache could not be saved."
             Log.e(TAG, "Encrypted model-cache write failed (${e.javaClass.simpleName})")
             false
         }
@@ -242,13 +250,15 @@ class ProviderStore(context: Context) {
      */
     fun cachedProbeResults(id: String): List<ModelProbeResult> {
         if (ProviderPresets.ALL.none { it.id == id }) return emptyList()
-        val raw = prefs?.getString(key(id, "probes"), null) ?: return emptyList()
+        val storage = prefs ?: return emptyList()
         return try {
+            val raw = storage.getString(key(id, "probes"), null) ?: return emptyList()
             val array = org.json.JSONArray(raw)
             val out = mutableListOf<ModelProbeResult>()
-            for (i in 0 until array.length()) {
+            for (i in 0 until minOf(array.length(), MAX_CACHED_MODELS)) {
                 val obj = array.optJSONObject(i) ?: continue
-                val modelId = obj.optString("model").takeIf { it.isNotBlank() } ?: continue
+                val modelId = obj.optString("model")
+                    .takeIf { it.isNotBlank() && it.length <= MAX_MODEL_ID_CHARS } ?: continue
                 val status = try {
                     ProbeStatus.valueOf(obj.optString("status"))
                 } catch (e: IllegalArgumentException) {
@@ -257,13 +267,15 @@ class ProviderStore(context: Context) {
                 out += ModelProbeResult(
                     modelId = modelId,
                     status = status,
-                    latencyMs = obj.optLong("latency", 0L),
-                    error = obj.optString("error", ""),
-                    timestamp = obj.optLong("ts", 0L)
+                    latencyMs = obj.optLong("latency", 0L).coerceAtLeast(0L),
+                    error = obj.optString("error", "").take(MAX_PROBE_ERROR_CHARS),
+                    timestamp = obj.optLong("ts", 0L).coerceAtLeast(0L)
                 )
             }
             out
         } catch (e: Exception) {
+            storageError = "Encrypted model-probe cache could not be read."
+            Log.e(TAG, "Encrypted probe-cache read failed (${e.javaClass.simpleName})")
             emptyList()
         }
     }
@@ -274,21 +286,26 @@ class ProviderStore(context: Context) {
             return false
         }
         val array = org.json.JSONArray()
-        results.forEach { r ->
-            array.put(
-                org.json.JSONObject()
-                    .put("model", r.modelId)
-                    .put("status", r.status.name)
-                    .put("latency", r.latencyMs)
-                    .put("error", r.error)
-                    .put("ts", r.timestamp)
-            )
-        }
+        results.asSequence()
+            .filter { it.modelId.isNotBlank() && it.modelId.length <= MAX_MODEL_ID_CHARS }
+            .distinctBy { it.modelId }
+            .take(MAX_CACHED_MODELS)
+            .forEach { result ->
+                array.put(
+                    org.json.JSONObject()
+                        .put("model", result.modelId)
+                        .put("status", result.status.name)
+                        .put("latency", result.latencyMs.coerceAtLeast(0L))
+                        .put("error", result.error.take(MAX_PROBE_ERROR_CHARS))
+                        .put("ts", result.timestamp.coerceAtLeast(0L))
+                )
+            }
         val storage = prefs ?: return false
         return try {
             storage.edit().putString(key(id, "probes"), array.toString()).apply()
             true
         } catch (e: Exception) {
+            storageError = "Encrypted model-probe cache could not be saved."
             Log.e(TAG, "Encrypted probe-cache write failed (${e.javaClass.simpleName})")
             false
         }
@@ -330,6 +347,9 @@ class ProviderStore(context: Context) {
     private fun key(id: String, field: String) = "prov_${id}_$field"
 
     companion object {
+        private const val MAX_CACHED_MODELS = 500
+        private const val MAX_MODEL_ID_CHARS = 256
+        private const val MAX_PROBE_ERROR_CHARS = 512
         private const val TAG = "ProviderStore"
         private const val FILE_NAME = "jarvis_providers_enc"
         private const val FALLBACK_FILE_NAME = "jarvis_providers_plain"
