@@ -4,6 +4,7 @@ import android.content.Context
 import com.nshd.jarvis2.brain.ProviderStore
 import com.nshd.jarvis2.memory.MemoryCategories
 import com.nshd.jarvis2.memory.MemoryDb
+import java.net.URI
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -146,6 +147,15 @@ object BackupManager {
         )
         return output
     }
+
+    /** Pure URL validation so import can be exercised by local JVM tests. */
+    internal fun isValidProviderBaseUrl(value: String): Boolean = runCatching {
+        val uri = URI(value)
+        uri.scheme?.lowercase() in setOf("http", "https") &&
+            !uri.host.isNullOrBlank() &&
+            uri.userInfo == null &&
+            uri.fragment == null
+    }.getOrDefault(false)
 
     /** Build an exportable settings object, excluding device-local enrollment state. */
     internal fun portableSettings(values: Map<String, *>): JSONObject {
@@ -299,10 +309,7 @@ object BackupManager {
                 "Provider entry " + (i + 1) + " has an invalid label."
             }
             require(baseUrl is String && baseUrl.length <= 2_048 &&
-                (baseUrl.isEmpty() || runCatching {
-                    val uri = android.net.Uri.parse(baseUrl)
-                    uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()
-                }.getOrDefault(false))
+                (baseUrl.isEmpty() || isValidProviderBaseUrl(baseUrl))
             ) {
                 "Provider entry " + (i + 1) + " has an invalid base URL."
             }
