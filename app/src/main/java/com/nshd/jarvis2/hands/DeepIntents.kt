@@ -1155,7 +1155,7 @@ class DeepIntents(context: Context) {
      */
     suspend fun whatsappShareLatestPhoto(
         phone: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val digits = ContactsResolver.normalizePhone(phone)
         if (digits.length < 10) {
@@ -1195,32 +1195,62 @@ class DeepIntents(context: Context) {
         TaskState.throwIfStopRequested()
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
-                true,
-                "WhatsApp opened with the photo ready — tap Send to send it."
+                false,
+                "WhatsApp opened with the photo ready, but Jarvis did not send it. Tap Send yourself; do not treat this as sent.",
+                ActionOutcome.STAGED_FOR_USER
             )
         val reader = service.screenReader()
-        val snapshot = reader.snapshot()
+        var snapshot = reader.snapshot()
         val send = Playbooks.find(snapshot, pkg, Playbooks.ROLE_SEND_BUTTON)
             ?: reader.findByText("Send", snapshot)
-                ?.takeIf { it.clickable || it.desc.contains("send", true) }
+                ?.takeIf { it.enabled && (it.clickable || it.desc.contains("send", true)) }
             ?: return ActionResult(
-                true,
-                "WhatsApp opened with the photo attached — tap Send to send it " +
-                    "(the Send button was not found automatically)."
+                false,
+                "WhatsApp opened with the photo attached, but the Send control could not be verified. The draft remains open; nothing was sent.",
+                ActionOutcome.STAGED_FOR_USER
             )
-        // v2.0.2 JIT ask: photo attached + Send button found, send
-        // NOT yet tapped. A decline leaves the share screen untouched.
-        if (askBeforeSend != null && !askBeforeSend()) {
-            return ActionResult(false, "Not sent.")
+        // Photo attached + Send target identified; approval must be given now.
+        if (!askBeforeSend()) return ActionResult(false, "Not sent.")
+        TaskState.throwIfStopRequested()
+        snapshot = reader.snapshot()
+        if (reader.currentPackage() != pkg ||
+            JarvisAccessibilityService.lastPackageName?.let { it != pkg } == true
+        ) {
+            return ActionResult(
+                false,
+                "The active app changed after confirmation. The photo was not sent."
+            )
         }
-        val click = HandsActions.clickElement(send.index)
+        val refreshedSend = Playbooks.find(snapshot, pkg, Playbooks.ROLE_SEND_BUTTON)
+            ?: reader.findByText("Send", snapshot)
+                ?.takeIf { it.enabled && (it.clickable || it.desc.contains("send", true)) }
+            ?: return ActionResult(
+                false,
+                "The Send control disappeared after confirmation. The photo remains staged and was not sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+
+        // Exact package-scoped permit is issued only for the final fresh target.
+        TaskState.throwIfStopRequested()
+        HandsActions.grantSendPermit(pkg, ttlMs = 5_000L)
+        val click = try {
+            HandsActions.clickElement(refreshedSend.index)
+        } finally {
+            HandsActions.revokeSendPermit(pkg)
+        }
         if (!click.success) {
             return ActionResult(
-                false, "The photo share opened, but Send could not be pressed: ${click.message}"
+                false,
+                "The photo Send action could not be confirmed; check the chat before retrying because the outcome may be uncertain.",
+                ActionOutcome.OUTCOME_UNKNOWN
             )
         }
         AppLog.i("Send", "stage: WhatsApp photo send control tapped")
-        return ActionResult(true, "Photo sent to the WhatsApp chat.")
+        return ActionResult(
+            false,
+            "The photo Send control was tapped, but delivery is not verified. Check the chat before retrying to avoid a duplicate.",
+            ActionOutcome.SUBMITTED_UNVERIFIED
+        )
     }
 
     /** The newest image in the device gallery, or null. */
