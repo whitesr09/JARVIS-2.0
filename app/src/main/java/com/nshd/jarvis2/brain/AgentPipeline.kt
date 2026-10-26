@@ -188,8 +188,7 @@ object AgentPipeline {
             TaskQueue.finishRunning(success)
             AppLog.i(
                 "Queue",
-                "turn '${turnTitle.take(40)}' finished in " +
-                    "${System.currentTimeMillis() - turnStartedAt}ms " +
+                "turn finished in ${System.currentTimeMillis() - turnStartedAt}ms " +
                     "(ok=$success)"
             )
             TaskState.finish(
@@ -430,7 +429,7 @@ object AgentPipeline {
                 memoryDb.addPendingFact(category, fact)
                 AppLog.i(
                     "Agent",
-                    "route=auto-extract → review queue: '${fact.take(50)}'"
+                    "route=auto-extract → review queue (${fact.length} chars)"
                 )
             }
         }
@@ -512,7 +511,7 @@ object AgentPipeline {
             val phrase = teachMatch.groupValues[1].trim()
             val target = teachMatch.groupValues[2].trim()
             if (phrase.length >= 2 && target.isNotBlank()) {
-                AppLog.i("Agent", "route=custom-teach '$phrase'")
+                AppLog.i("Agent", "route=custom-teach saved")
                 BrainStore.saveCustomCommand(
                     context, BrainStore.CustomCommand(phrase, target)
                 )
@@ -541,7 +540,7 @@ object AgentPipeline {
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
             if (name.isNotBlank() && steps.isNotEmpty()) {
-                AppLog.i("Agent", "route=routine-create '$name' (${steps.size} steps)")
+                AppLog.i("Agent", "route=routine-create (${steps.size} steps)")
                 BrainStore.saveRoutine(
                     context,
                     BrainStore.Routine(
@@ -576,7 +575,7 @@ object AgentPipeline {
                         known.joinToString(", ") { it.name } + "."
                 }
             }
-            AppLog.i("Agent", "route=routine-run '${routine.name}'")
+            AppLog.i("Agent", "route=routine-run requested")
             suppressMacroNote = true
             return runRoutineSteps(
                 context, routine, settings, memoryDb, providerStore,
@@ -590,7 +589,7 @@ object AgentPipeline {
                 ?.let { macro ->
                     AppLog.i(
                         "Agent",
-                        "route=macro-replay '${macro.trigger}' (${macro.steps.size} steps)"
+                        "route=macro-replay (${macro.steps.size} steps)"
                     )
                     suppressMacroNote = true
                     return runMacro(context, macro, memoryDb, hudEvent)
@@ -602,7 +601,7 @@ object AgentPipeline {
             )?.let { command ->
                 AppLog.i(
                     "Agent",
-                    "route=custom-command '${command.phrase}' → '${command.target}'"
+                    "route=custom-command dispatched"
                 )
                 suppressMacroNote = true
                 return dispatch(
@@ -724,9 +723,7 @@ object AgentPipeline {
                 } catch (e: Exception) {
                     AppLog.e(
                         "Brain",
-                        "routine step '$stepText' crashed: " +
-                            (e.message ?: "error"),
-                        e
+                        "routine step failed (${e.javaClass.simpleName})"
                     )
                     "Failed: " +
                         com.nshd.jarvis2.ui.FriendlyErrors.shortReason(e.message)
@@ -1126,8 +1123,7 @@ object AgentPipeline {
                 // Raw text → AppLog; the queue summary line is friendly.
                 AppLog.e(
                     "Agent",
-                    "sub-task '${item.title.take(40)}' crashed: " +
-                        (e.message ?: "unexpected error"),
+                    "sub-task failed (${e.javaClass.simpleName})",
                     e
                 )
                 "Failed: " + com.nshd.jarvis2.ui.FriendlyErrors.shortReason(e.message)
@@ -1137,7 +1133,7 @@ object AgentPipeline {
             val ok = !isFailureResult(result)
             AppLog.d(
                 "Agent",
-                "task ${index + 1}/${items.size} '${item.title.take(40)}' → " +
+                "task ${index + 1}/${items.size} → " +
                     if (ok) "done" else "failed"
             )
             if (ok) {
