@@ -997,15 +997,10 @@ class ToolExecutor(
                 intents.whatsappShareLatestPhoto(
                     resolution.contact.phone
                 ) {
-                    val approved = SendAsk.ask(
+                    SendAsk.ask(
                         "$name (${resolution.contact.phone})",
                         "Your most recent gallery photo"
                     )
-                    if (approved) {
-                        HandsActions.grantSendPermit("com.whatsapp")
-                        HandsActions.grantSendPermit("com.whatsapp.w4b")
-                    }
-                    approved
                 }.toToolResult()
             }
             is ContactResolution.Ambiguous -> ToolResult(
