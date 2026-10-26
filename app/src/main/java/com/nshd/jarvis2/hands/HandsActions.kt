@@ -67,6 +67,8 @@ private class EditableTarget(
  * gesture is used only when no clickable node accepts the action.
  */
 object HandsActions {
+    private const val MAX_SEND_PERMIT_TTL_MS = 5_000L
+
     private val mutex = Mutex()
 
     // F6 speed pass constants: settle polling cadence and the short
@@ -116,8 +118,8 @@ object HandsActions {
     // sending messages"). The fix: after the tool's gate approves,
     // ToolExecutor issues ONE permit; the guard consumes it for
     // exactly one SEND-class tap in the permitted package. Permits
-    // never cover SOCIAL/DESTRUCTIVE phrases, expire in ~30 s, and a
-    // second send tap gates again as usual.
+    // never cover SOCIAL/DESTRUCTIVE phrases, expire within 5 seconds,
+    // and a second send tap gates again as usual.
 
     /** Exactly one confirmed package may consume the next send permit. */
     private var sendPermitPackage: String? = null
@@ -133,11 +135,14 @@ object HandsActions {
             sendPermitExpiresAtMs = 0L
             return
         }
+        // Callers may request less time, but never extend a sensitive
+        // one-shot consent beyond the five-second upper bound.
+        val boundedTtlMs = ttlMs.coerceAtMost(MAX_SEND_PERMIT_TTL_MS)
         sendPermitPackage = packageName
-        sendPermitExpiresAtMs = System.currentTimeMillis() + ttlMs
+        sendPermitExpiresAtMs = System.currentTimeMillis() + boundedTtlMs
         com.nshd.jarvis2.core.AppLog.i(
             "Send",
-            "one-shot permit granted (5s max, package-scoped)"
+            "one-shot permit granted (${boundedTtlMs}ms, package-scoped)"
         )
     }
 
