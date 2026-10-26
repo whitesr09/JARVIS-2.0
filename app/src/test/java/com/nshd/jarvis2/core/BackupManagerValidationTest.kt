@@ -57,6 +57,25 @@ class BackupManagerValidationTest {
     }
 
     @Test
+    fun portableBackupExcludesDeviceLocalBiometricEnrollmentFlags() {
+        val settings = BackupManager.portableSettings(
+            mapOf(
+                "theme" to "DARK",
+                "wake_always_on" to false,
+                "biometrics_enrolled" to true,
+                "biometrics_sample_count" to 3,
+                "biometrics_enrolled_date" to "2026-10-26"
+            )
+        )
+
+        assertEquals("DARK", settings.getString("theme"))
+        assertEquals(false, settings.getBoolean("wake_always_on"))
+        assertEquals(false, settings.has("biometrics_enrolled"))
+        assertEquals(false, settings.has("biometrics_sample_count"))
+        assertEquals(false, settings.has("biometrics_enrolled_date"))
+    }
+
+    @Test
     fun rejectsUnsupportedFormatVersion() {
         val error = assertThrows(IllegalArgumentException::class.java) {
             BackupManager.validateBackupJson(backup(version = 2))
