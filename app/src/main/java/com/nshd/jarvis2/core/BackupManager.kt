@@ -348,8 +348,7 @@ object BackupManager {
         // All new facts are one SQLite transaction. Commit settings only after
         // all fact writes succeed, so a bad database write cannot leave the
         // settings half of the restore applied with no memory imported.
-        db.beginTransaction()
-        try {
+        db.withTransaction {
             for (i in 0 until factsArr.length()) {
                 val obj = factsArr.getJSONObject(i)
                 val text = obj.getString("text").trim()
@@ -371,9 +370,6 @@ object BackupManager {
             require(editor.commit()) {
                 "Settings could not be saved; restore was not completed."
             }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
         }
 
         val providersListed = providersArr.length()
