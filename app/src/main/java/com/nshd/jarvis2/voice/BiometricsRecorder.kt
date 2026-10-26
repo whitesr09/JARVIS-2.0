@@ -65,6 +65,10 @@ object BiometricsRecorder {
      */
     suspend fun recordSample(context: Context, index: Int): Boolean =
         withContext(Dispatchers.IO) {
+            if (ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.RECORD_AUDIO
+                ) != PackageManager.PERMISSION_GRANTED
+            ) return@withContext false
             if (index !in 1..TOTAL_SAMPLES) return@withContext false
             // Check before deleting the old slot: a permission revoke should
             // not destroy a previously valid sample without a new recording.
