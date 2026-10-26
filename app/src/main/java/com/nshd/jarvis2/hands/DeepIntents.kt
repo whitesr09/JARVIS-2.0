@@ -1360,6 +1360,9 @@ class DeepIntents(context: Context) {
             )
         }
 
+        // Grant only after all post-confirmation checks, immediately before
+        // the single Send tap; revoke even if the tap suspends or is cancelled.
+        HandsActions.grantSendPermit(packageName, ttlMs = 5_000L)
         val click = try {
             HandsActions.clickElement(send.index)
         } finally {
