@@ -49,6 +49,23 @@ jobs:
       - name: Run unit tests and compile debug APK
         run: ./gradlew testDebugUnitTest assembleDebug --stacktrace
 
+      # Collect a baseline first. Existing findings are reviewed before the
+      # project promotes Lint to a blocking gate.
+      - name: Run Android Lint baseline
+        continue-on-error: true
+        run: ./gradlew lintDebug --stacktrace
+
+      - name: Upload Android Lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-2.0-lint-report
+          path: |
+            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-debug.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
       # Do not inject signing secrets into pull_request jobs. PR validation
       # builds and verifies a debug artifact; trusted pushes/manual dispatch
       # may produce the permanent-signed release artifact.
