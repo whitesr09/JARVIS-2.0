@@ -17,13 +17,15 @@ import com.nshd.jarvis2.voice.UniversalVoice
 import com.nshd.jarvis2.voice.VoskModelManager
 import java.io.File
 
-/** One self-test line: PASS/FAIL + a one-line detail + an optional Fix deep link. */
+/** One self-test line with a real pass, failure, or explicitly untested state. */
 data class SelfTestResult(
     val name: String,
     val passed: Boolean,
     val detail: String,
     val fixLabel: String? = null,
-    val fixIntent: Intent? = null
+    val fixIntent: Intent? = null,
+    /** True when this row cannot be verified by a configuration-only self-test. */
+    val notTested: Boolean = false
 )
 
 /**
@@ -71,16 +73,15 @@ object SelfTest {
             }
         )
 
-        // 3) v2.0.3: Live voice replies speak again (Gemini Live
-        // audio, not a session TTS engine); the only system TTS use
-        // is the manual chat-bubble "Speak" action. No session TTS
-        // engine exists to check (check numbering kept stable for
-        // the diagnostics log).
+        // 3) This offline self-test does not open a Live session or
+        // validate received/played audio. Never report a real voice
+        // round-trip as passing without an actual audio exchange.
         results += SelfTestResult(
             name = "Voice replies",
-            passed = true,
-            detail = "Live audio replies restored in v2.0.3; manual " +
-                "chat Speak is the only system-TTS use"
+            passed = false,
+            notTested = true,
+            detail = "Not verified by this self-test. Start a Live voice session " +
+                "and confirm that an assistant audio response is received and played."
         )
 
         // 4) Accessibility service alive.
@@ -184,11 +185,12 @@ object SelfTest {
         )
 
         results.forEach { result ->
-            AppLog.i(
-                "App",
-                "selftest ${result.name}: " +
-                    "${if (result.passed) "PASS" else "FAIL"} — ${result.detail}"
-            )
+            val verdict = when {
+                result.passed -> "PASS"
+                result.notTested -> "NOT TESTED"
+                else -> "FAIL"
+            }
+            AppLog.i("App", "selftest ${result.name}: $verdict — ${result.detail}")
         }
         val passedCount = results.count { it.passed }
         AppLog.i("App", "selftest complete: $passedCount/${results.size} passed")
