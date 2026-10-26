@@ -591,7 +591,7 @@ class GeminiLiveClient(
         }
         try {
             handleParsedMessage(root)
-        } catch (e: Throwable) {
+        } catch (e: Exception) {
             CrashLogger.logNonFatal("live", e)
         }
     }
@@ -756,7 +756,7 @@ class GeminiLiveClient(
                         "language=${currentLanguageCode ?: "auto"}"
                 )
                 webSocket.send(buildSetupJson())
-            } catch (e: Throwable) {
+            } catch (e: Exception) {
                 CrashLogger.logNonFatal("live", e)
                 if (!closedByUser && !stale) {
                     runCatching {
@@ -770,7 +770,7 @@ class GeminiLiveClient(
             try {
                 if (stale) return
                 handleMessage(text)
-            } catch (e: Throwable) {
+            } catch (e: Exception) {
                 CrashLogger.logNonFatal("live", e)
             }
         }
@@ -780,7 +780,7 @@ class GeminiLiveClient(
                 if (stale) return
                 // The Live API speaks JSON text frames; tolerate binary-wrapped JSON too.
                 handleMessage(bytes.utf8())
-            } catch (e: Throwable) {
+            } catch (e: Exception) {
                 CrashLogger.logNonFatal("live", e)
             }
         }
@@ -808,7 +808,7 @@ class GeminiLiveClient(
                     return
                 }
                 listener.onFailure(withGatewayHint("Live connection failed: $detail"))
-            } catch (e: Throwable) {
+            } catch (e: Exception) {
                 CrashLogger.logNonFatal("live", e)
             }
         }
@@ -816,7 +816,7 @@ class GeminiLiveClient(
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             try {
                 webSocket.close(1000, null)
-            } catch (e: Throwable) {
+            } catch (e: Exception) {
                 CrashLogger.logNonFatal("live", e)
             }
         }
@@ -845,7 +845,7 @@ class GeminiLiveClient(
                 listener.onClosed(
                     withGatewayHint(reason.ifBlank { "Session closed (code $code)" })
                 )
-            } catch (e: Throwable) {
+            } catch (e: Exception) {
                 CrashLogger.logNonFatal("live", e)
             }
         }
