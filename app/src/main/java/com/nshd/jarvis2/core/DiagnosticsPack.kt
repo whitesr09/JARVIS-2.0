@@ -29,18 +29,64 @@ object DiagnosticsPack {
     private val EMAIL_REGEX = Regex("(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b")
     private val PHONE_REGEX = Regex("(?<!\\w)(?:\\+\\d{1,3}[ .-]?)?\\d{10,13}(?!\\w)")
 
-    /** Build only selected low-risk diagnostic lines, redacting common contact patterns. */
-    internal fun safeLogText(entries: List<AppLog.Entry>): String {
-        val selected = entries.filter {
-            it.tag in SAFE_LOG_TAGS && it.stack.isNullOrBlank()
+    /** Normalize only known low-risk event messages; discard raw errors and arbitrary text. */
+    internal fun safeDiagnosticEvent(tag: String, message: String): String? = when (tag) {
+        "App" -> when {
+            message.startsWith("Cold start setup took ") -> "Cold-start setup completed"
+            else -> null
         }
-        return AppLog.formatAll(selected.map { entry ->
-            val masked = PHONE_REGEX.replace(
-                EMAIL_REGEX.replace(entry.message, "[email redacted]"),
-                "[phone redacted]"
-            )
-            entry.copy(message = masked, stack = null)
-        })
+        "Voice" -> when {
+            message.startsWith("session start engine=") -> "Voice session started"
+            message.startsWith("engine decision:") -> "Voice engine selection started"
+            message.startsWith("stop reading requested") -> "Stop-reading requested"
+            message.startsWith("call auto-resume unavailable") -> "Phone-call monitoring unavailable"
+            message == "call auto-resume watch registered" -> "Phone-call monitoring registered"
+            message.startsWith("phone call active") -> "Voice paused for phone call"
+            message.startsWith("call ended — resuming session") -> "Voice resumed after phone call"
+            else -> null
+        }
+        "Live" -> when {
+            message.startsWith("setup timeout after ") -> "Live setup timed out"
+            message.startsWith("WS open — setup sent") -> "Live WebSocket opened"
+            message.startsWith("first audio frame") -> "Live audio frame received"
+            message.startsWith("tool call: ") -> {
+                val tool = message.substringAfter("tool call: ").trim()
+                if (tool.matches(Regex("[A-Za-z0-9_]{1,64}"))) "Live tool call: $tool"
+                else "Live tool call observed"
+            }
+            message.startsWith("model fallback chain exhausted") -> "Live model fallback exhausted"
+            message.startsWith("setup took ") -> "Live setup completed"
+            else -> null
+        }
+        "Wake" -> when {
+            message == "wake phrase detected" -> "Wake phrase detected"
+            message.startsWith("wake phrase below sensitivity threshold") -> "Wake phrase below sensitivity threshold"
+            message.startsWith("paused — battery at ") -> "Wake-word paused for low battery"
+            message.startsWith("battery pause lifted ") -> "Wake-word resumed after battery pause"
+            else -> null
+        }
+        "Overlay" -> when {
+            message.startsWith("task panel shown ") -> "Task panel shown"
+            message == "tap — toggle voice session" -> "Voice toggle tapped"
+            else -> null
+        }
+        else -> null
+    }
+
+    internal fun redactCommonContactPatterns(text: String): String =
+        PHONE_REGEX.replace(
+            EMAIL_REGEX.replace(text, "[email redacted]"),
+            "[phone redacted]"
+        )
+
+    /** Build only allowlisted and normalized diagnostic events. */
+    internal fun safeLogText(entries: List<AppLog.Entry>): String {
+        val selected = entries.mapNotNull { entry ->
+            if (entry.tag !in SAFE_LOG_TAGS || !entry.stack.isNullOrBlank()) return@mapNotNull null
+            val normalized = safeDiagnosticEvent(entry.tag, entry.message) ?: return@mapNotNull null
+            entry.copy(message = redactCommonContactPatterns(normalized), stack = null)
+        }
+        return AppLog.formatAll(selected)
     }
 
     /** Keep crash time/version/type, but never export the exception message or stack by default. */
