@@ -85,6 +85,8 @@ object BiometricsRecorder {
                 AudioRecord.getMinBufferSize(
                     SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
                 )
+            } catch (e: SecurityException) {
+                return@withContext false
             } catch (e: Exception) {
                 return@withContext false
             }
