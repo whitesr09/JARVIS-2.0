@@ -1404,7 +1404,11 @@ class ToolExecutor(
             if (answer) {
                 @Suppress("DEPRECATION")
                 telecom.acceptRingingCall()
-                ToolResult(true, "Call answered.")
+                ToolResult(
+                    success = false,
+                    message = "The answer command was issued, but Jarvis cannot verify the call is connected. Check the phone screen before retrying.",
+                    outcome = ActionOutcome.SUBMITTED_UNVERIFIED
+                )
             } else {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
                     return ToolResult(
