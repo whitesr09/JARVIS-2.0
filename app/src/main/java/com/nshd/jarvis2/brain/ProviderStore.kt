@@ -135,30 +135,50 @@ class ProviderStore(context: Context) {
             chatModel = preset.chatModel,
             reasoningModel = preset.reasoningModel
         )
-        return ProviderConfig(
-            id = preset.id,
-            label = preset.label,
-            baseUrl = storage.getString(key(id, "base"), preset.baseUrl) ?: preset.baseUrl,
-            apiKey = storage.getString(key(id, "key"), "") ?: "",
-            chatModel = storage.getString(key(id, "chat_model"), preset.chatModel)
-                ?: preset.chatModel,
-            reasoningModel = storage.getString(key(id, "reasoning_model"), preset.reasoningModel)
-                ?: preset.reasoningModel
-        )
+        return try {
+            ProviderConfig(
+                id = preset.id,
+                label = preset.label,
+                baseUrl = storage.getString(key(id, "base"), preset.baseUrl) ?: preset.baseUrl,
+                apiKey = storage.getString(key(id, "key"), "") ?: "",
+                chatModel = storage.getString(key(id, "chat_model"), preset.chatModel)
+                    ?: preset.chatModel,
+                reasoningModel = storage.getString(key(id, "reasoning_model"), preset.reasoningModel)
+                    ?: preset.reasoningModel
+            )
+        } catch (e: Exception) {
+            storageError = "Secure provider settings could not be read. Re-enter the provider key and save it again."
+            Log.e(TAG, "Encrypted provider settings read failed (" + e.javaClass.simpleName + ")")
+            ProviderConfig(
+                id = preset.id,
+                label = preset.label,
+                baseUrl = preset.baseUrl,
+                apiKey = "",
+                chatModel = preset.chatModel,
+                reasoningModel = preset.reasoningModel
+            )
+        }
     }
 
     /** Returns false rather than persisting a key if encrypted storage is unavailable. */
     fun saveConfig(config: ProviderConfig): Boolean {
         val storage = prefs ?: return false
         return try {
-            storage.edit()
+            val committed = storage.edit()
                 .putString(key(config.id, "base"), config.baseUrl.trim())
                 .putString(key(config.id, "key"), config.apiKey.trim())
                 .putString(key(config.id, "chat_model"), config.chatModel.trim())
                 .putString(key(config.id, "reasoning_model"), config.reasoningModel.trim())
                 .commit()
+            if (!committed) {
+                storageError = "Secure provider settings could not be saved. Check device storage and try again."
+            } else if (storageError?.startsWith("Secure provider settings could not be saved") == true) {
+                storageError = null
+            }
+            committed
         } catch (e: Exception) {
-            Log.e(TAG, "Encrypted provider settings write failed (${e.javaClass.simpleName})")
+            storageError = "Secure provider settings could not be saved. Re-enter the key and try again."
+            Log.e(TAG, "Encrypted provider settings write failed (" + e.javaClass.simpleName + ")")
             false
         }
     }
@@ -247,12 +267,29 @@ class ProviderStore(context: Context) {
         }
     }
 
-    fun activeProviderId(): String =
-        prefs?.getString(KEY_ACTIVE, ProviderPresets.GEMINI.id) ?: ProviderPresets.GEMINI.id
+    fun activeProviderId(): String {
+        val storage = prefs ?: return ProviderPresets.GEMINI.id
+        return try {
+            storage.getString(KEY_ACTIVE, ProviderPresets.GEMINI.id) ?: ProviderPresets.GEMINI.id
+        } catch (e: Exception) {
+            storageError = "Secure provider settings could not be read. The default provider is selected until storage is repaired."
+            Log.e(TAG, "Encrypted active-provider read failed (" + e.javaClass.simpleName + ")")
+            ProviderPresets.GEMINI.id
+        }
+    }
 
     fun setActiveProviderId(id: String): Boolean {
         val storage = prefs ?: return false
-        return storage.edit().putString(KEY_ACTIVE, id).commit()
+        if (ProviderPresets.ALL.none { it.id == id }) return false
+        return try {
+            val committed = storage.edit().putString(KEY_ACTIVE, id).commit()
+            if (!committed) storageError = "Active provider could not be saved securely. Try again."
+            committed
+        } catch (e: Exception) {
+            storageError = "Active provider could not be saved securely. Try again."
+            Log.e(TAG, "Encrypted active-provider write failed (" + e.javaClass.simpleName + ")")
+            false
+        }
     }
 
     /** All configs in preset (failover) order, active provider first. */
