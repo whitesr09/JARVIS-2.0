@@ -18,6 +18,7 @@ import com.nshd.jarvis2.hands.ContactsResolver
 import com.nshd.jarvis2.hands.DeepIntents
 import com.nshd.jarvis2.hands.GroundingResult
 import com.nshd.jarvis2.hands.HandsActions
+import com.nshd.jarvis2.hands.TaskStoppedException
 import com.nshd.jarvis2.hands.VisionGrounder
 import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.service.JarvisAccessibilityService
