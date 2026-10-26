@@ -381,6 +381,8 @@ object VoiceSessionManager {
     ) {
         try {
             startSession(context, settings, providerStore, memoryDb)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             runCatching { fail(startFailureMessage(e)) }
         }
@@ -502,6 +504,8 @@ object VoiceSessionManager {
                 providerStore = ProviderStore(appCtx),
                 memoryDb = MemoryDb(appCtx)
             )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             runCatching { fail(startFailureMessage(e)) }
         }
@@ -1528,10 +1532,12 @@ object VoiceSessionManager {
                     // Per-turn ledger: identical repeat calls inside this
                     // Live turn return the cached result (F3).
                     ToolExecutor(ctx, db, liveLedger).execute(name, args)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     ToolResult(
                         false,
-                        "Tool $name failed safely: ${e.message ?: "unexpected error"}"
+                        "Tool $name failed safely (${e.javaClass.simpleName})."
                     )
                 } finally {
                     // The ask sink lives only for this tool call's
