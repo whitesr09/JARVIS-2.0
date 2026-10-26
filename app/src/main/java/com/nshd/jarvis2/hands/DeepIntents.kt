@@ -1805,8 +1805,9 @@ class DeepIntents(context: Context) {
         }
         return if (launch(intent)) {
             ActionResult(
-                true,
-                "Calendar opened with the event draft \"$title\" — review it and tap Save there."
+                false,
+                "Calendar opened with the event draft \"$title\" — review it and tap Save there.",
+                ActionOutcome.STAGED_FOR_USER
             )
         } else {
             ActionResult(false, "No calendar app could be opened.")
@@ -1855,7 +1856,11 @@ class DeepIntents(context: Context) {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         return if (launch(chooser)) {
-            ActionResult(true, "Share sheet opened with the screenshot — pick where to send it.")
+            ActionResult(
+                false,
+                "Share sheet opened with the screenshot — choose a destination to complete sharing.",
+                ActionOutcome.STAGED_FOR_USER
+            )
         } else {
             ActionResult(false, "The share sheet could not be opened.")
         }
