@@ -59,7 +59,7 @@ object ActionRiskPolicy {
 
     /** True for known actions whose exceptions may hide a partial side effect. */
     fun mayHaveSideEffect(toolName: String): Boolean =
-        classify(toolName) !in setOf(ActionRisk.READ_ONLY, ActionRisk.UNKNOWN)
+        classify(toolName) != ActionRisk.READ_ONLY
 
     /** Fail closed when a tool is not explicitly classified as read-only. */
     fun shouldTreatFailureAsOutcomeUnknown(toolName: String): Boolean =
