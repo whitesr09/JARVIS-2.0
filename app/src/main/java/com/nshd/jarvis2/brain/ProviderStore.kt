@@ -163,6 +163,10 @@ class ProviderStore(context: Context) {
     /** Returns false rather than persisting a key if encrypted storage is unavailable. */
     fun saveConfig(config: ProviderConfig): Boolean {
         val storage = prefs ?: return false
+        if (ProviderPresets.ALL.none { it.id == config.id }) {
+            storageError = "Unknown provider configuration. Nothing was saved."
+            return false
+        }
         return try {
             val committed = storage.edit()
                 .putString(key(config.id, "base"), config.baseUrl.trim())
