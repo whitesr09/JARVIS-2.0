@@ -32,4 +32,21 @@ class ActionRiskPolicyTest {
         assertTrue(ActionRiskPolicy.mayHaveSideEffect("set_alarm"))
         assertTrue(ActionRiskPolicy.shouldTreatFailureAsOutcomeUnknown("whatsapp_group_message"))
     }
+
+    @Test
+    fun everyRegisteredToolHasAnExplicitRiskClassification() {
+        val unclassified = ToolRegistry.specs
+            .map { it.name }
+            .filter { ActionRiskPolicy.classify(it) == ActionRisk.UNKNOWN }
+
+        assertTrue("Unclassified tools: $unclassified", unclassified.isEmpty())
+    }
+
+    @Test
+    fun screenObservationIsReadOnlyButScreenshotAndVisualTapAreNot() {
+        assertEquals(ActionRisk.READ_ONLY, ActionRiskPolicy.classify("inspect_screen"))
+        assertEquals(ActionRisk.READ_ONLY, ActionRiskPolicy.classify("read_page"))
+        assertEquals(ActionRisk.EXTERNAL_SIDE_EFFECT, ActionRiskPolicy.classify("take_screenshot"))
+        assertEquals(ActionRisk.REVERSIBLE_MUTATION, ActionRiskPolicy.classify("vision_tap"))
+    }
 }
