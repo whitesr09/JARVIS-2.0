@@ -184,7 +184,13 @@ class ProviderStore(context: Context) {
         val array = org.json.JSONArray()
         ids.forEach { array.put(it) }
         val storage = prefs ?: return false
-        return storage.edit().putString(key(id, "models"), array.toString()).commit()
+        return try {
+            storage.edit().putString(key(id, "models"), array.toString()).apply()
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Encrypted model-cache write failed (${e.javaClass.simpleName})")
+            false
+        }
     }
 
     /**
@@ -232,7 +238,13 @@ class ProviderStore(context: Context) {
             )
         }
         val storage = prefs ?: return false
-        return storage.edit().putString(key(id, "probes"), array.toString()).commit()
+        return try {
+            storage.edit().putString(key(id, "probes"), array.toString()).apply()
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Encrypted probe-cache write failed (${e.javaClass.simpleName})")
+            false
+        }
     }
 
     fun activeProviderId(): String =
