@@ -197,16 +197,28 @@ fun SettingsScreen(
     // ── Plan #101: full backup / restore ───────────────────────────────
     fun exportBackup() {
         settingsScope.launch {
-            val json = withContext(Dispatchers.IO) {
-                com.nshd.jarvis2.core.BackupManager.exportJson(context)
+            val result = withContext(Dispatchers.IO) {
+                runCatching { com.nshd.jarvis2.core.BackupManager.exportJson(context) }
             }
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/json"
-                putExtra(Intent.EXTRA_SUBJECT, "Jarvis full backup")
-                putExtra(Intent.EXTRA_TEXT, json)
-            }
-            runCatching {
-                context.startActivity(Intent.createChooser(intent, "Export Jarvis backup"))
+            result.onSuccess { json ->
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "application/json"
+                    putExtra(Intent.EXTRA_SUBJECT, "Jarvis full backup")
+                    putExtra(Intent.EXTRA_TEXT, json)
+                }
+                runCatching {
+                    context.startActivity(Intent.createChooser(intent, "Export Jarvis backup"))
+                }.onFailure { error ->
+                    info = InfoDialog(
+                        "Backup export failed",
+                        error.message ?: "The system share sheet could not be opened."
+                    )
+                }
+            }.onFailure { error ->
+                info = InfoDialog(
+                    "Backup export failed",
+                    error.message ?: "The backup could not be validated or created."
+                )
             }
         }
     }
