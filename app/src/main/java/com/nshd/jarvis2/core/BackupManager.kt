@@ -134,19 +134,27 @@ object BackupManager {
         }
         root.put("providers", providersArr)
         root.put("activeProviderId", store.activeProviderId())
+        // Run the same checks on our own export so it can always be
+        // imported by this version; do not generate a backup that silently
+        // fails its own size/schema constraints.
+        val output = root.toString(2)
+        validateBackupJson(output)
         AppLog.i(
             "App",
             "Backup exported: ${settingsObj.length()} settings, ${factsArr.length()} facts, " +
                 "${providersArr.length()} providers (keys excluded)"
         )
-        return root.toString(2)
+        return output
     }
 
     /** Build an exportable settings object, excluding device-local enrollment state. */
     internal fun portableSettings(values: Map<String, *>): JSONObject {
         val result = JSONObject()
         for ((key, value) in values) {
-            if (key in DEVICE_LOCAL_SETTING_KEYS) continue
+            // Export only the current schema. Unknown legacy preference keys
+            // are intentionally dropped rather than making the resulting file
+            // fail the import allowlist or revive retired settings.
+            if (key in DEVICE_LOCAL_SETTING_KEYS || key !in settingKinds) continue
             when (value) {
                 is String -> result.put(key, value)
                 is Boolean -> result.put(key, value)
