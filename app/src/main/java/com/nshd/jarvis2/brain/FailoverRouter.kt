@@ -395,8 +395,8 @@ class FailoverRouter(
                     // internal mechanics (providers / replay).
                     AppLog.e(
                         "Agent",
-                        "agent loop died mid-task on ${config.id} after tool " +
-                            "execution (no replay): $detail"
+                        "agent loop stopped mid-task on ${config.id} after tool " +
+                            "execution (${e.javaClass.simpleName}); raw error details omitted"
                     )
                     val outcome = lastToolOutcome
                         ?: "I had already taken a step on the phone"
@@ -407,8 +407,8 @@ class FailoverRouter(
                             "(${FriendlyErrors.shortReason(detail)})"
                     }
                     return "I couldn't finish that — $outcome, $cause. " +
-                        "I didn't repeat the phone action on my own; " +
-                        "say the command again and I'll retry it."
+                        "Before retrying, check the relevant app to confirm whether the action already happened. " +
+                        "I won't automatically repeat an action whose final state is uncertain."
                 }
                 failures += config.label to detail
             }
