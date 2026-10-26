@@ -626,13 +626,13 @@ fun SettingsScreen(
                     Button(
                         onClick = {
                             recordBioSample(
-                                (bioCount + 1).coerceAtMost(BiometricsRecorder.TOTAL_SAMPLES)
+                                BiometricsRecorder.nextMissingSampleIndex(context)
                             )
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            "Record sample ${(bioCount + 1).coerceAtMost(BiometricsRecorder.TOTAL_SAMPLES)} " +
+                            "Record sample ${BiometricsRecorder.nextMissingSampleIndex(context)} " +
                                 "of ${BiometricsRecorder.TOTAL_SAMPLES}"
                         )
                     }
