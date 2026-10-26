@@ -333,8 +333,7 @@ object TaskQueue {
         val elapsed = running.startedAt?.let { System.currentTimeMillis() - it } ?: -1L
         AppLog.i(
             "Queue",
-            "task #${running.id} '${running.title.take(40)}' finished " +
-                (if (success) "DONE" else "FAILED") +
+            "task #${running.id} finished ${if (success) "DONE" else "FAILED"}" +
                 if (elapsed >= 0) " in ${elapsed}ms" else ""
         )
     }
