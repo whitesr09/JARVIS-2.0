@@ -57,6 +57,10 @@ class AudioCapture(
                 // Generous internal buffer so the reader never starves.
                 maxOf(minBuffer * 4, 32_000)
             )
+        } catch (e: SecurityException) {
+            CrashLogger.logNonFatal("audio", e)
+            onError("Microphone permission is missing or was revoked")
+            return false
         } catch (e: Exception) {
             CrashLogger.logNonFatal("audio", e)
             onError("Microphone could not be opened: ${e.message ?: "unknown error"}")
