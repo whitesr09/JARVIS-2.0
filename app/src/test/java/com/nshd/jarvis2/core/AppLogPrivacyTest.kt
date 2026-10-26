@@ -17,6 +17,8 @@ class AppLogPrivacyTest {
         assertTrue(formatted.contains("java.lang.IllegalStateException"))
         assertTrue(formatted.contains("com.example.Voice.start"))
         assertTrue(formatted.contains("Caused by: java.lang.IllegalArgumentException"))
+        assertTrue(formatted.contains("\n    at com.example.Provider.chat"))
+        assertFalse(formatted.contains("\\n    at"))
         assertTrue(formatted.contains("com.example.Provider.chat"))
         assertFalse(formatted.contains("private query"))
         assertFalse(formatted.contains("+919876543210"))
