@@ -56,9 +56,9 @@ class DeepIntents(context: Context) {
 
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
-                true,
-                "Opened WhatsApp with the message typed — tap Send to send it. " +
-                    "(Enable Accessibility to let Jarvis press Send and verify it.)"
+                false,
+                "WhatsApp is open with a draft ready, but Jarvis did not send it. Enable Accessibility or tap Send yourself before treating this as sent.",
+                ActionOutcome.STAGED_FOR_USER
             )
 
         HandsActions.waitForSettle(2_500)
@@ -129,6 +129,19 @@ class DeepIntents(context: Context) {
             )
         }
 
+        // Snapshot matching non-editable text before the tap. Existing chat
+        // history containing the same text must not count as proof of a new send.
+        val messageNeedle = text.trim()
+        fun bubbleSignature(element: UiElement): String =
+            "${element.viewId}\u0001${element.className}\u0001" +
+                "${element.text.trim()}\u0001${element.desc.trim()}"
+        fun matchingBubbleCounts(elements: List<UiElement>): Map<String, Int> =
+            elements.filter { element ->
+                !element.editable && messageNeedle.isNotEmpty() &&
+                    (element.text.contains(messageNeedle) || element.label.contains(messageNeedle))
+            }.groupingBy(::bubbleSignature).eachCount()
+        val existingBubbleCounts = matchingBubbleCounts(snapshot)
+
         TaskState.throwIfStopRequested() // #61: before final tap
         // Permit exactly the package containing this confirmed composer.
         // It expires quickly and is revoked after the tap even on failure.
@@ -144,12 +157,10 @@ class DeepIntents(context: Context) {
         }
         AppLog.i("Send", "stage: send tapped")
 
-        // F7 verification (Part A3): BOTH proofs required — the
-        // entry cleared AND an outgoing bubble carrying the message
-        // text appeared. (Entry-clear alone was the old rule; the
-        // bubble check ignores the editable entry itself, which of
-        // course still contains the text until the send lands.)
-        val needle = text.trim().take(30)
+        // Require both a cleared composer and a matching non-editable message
+        // element that was NOT in the pre-tap snapshot. Old history with the
+        // same text must not count as proof that this send happened. A delivery
+        // or read receipt remains outside what the accessibility tree can prove.
         var entryCleared = false
         var bubbleFound = false
         val deadline = System.currentTimeMillis() + 2_000
@@ -167,12 +178,9 @@ class DeepIntents(context: Context) {
             if (currentEntry == null && snapshot.none { it.viewId.endsWith("/entry") }) {
                 entryCleared = true
             }
-            if (needle.isNotEmpty() && snapshot.any { element ->
-                    !element.editable &&
-                        (element.text.contains(needle) || element.label.contains(needle))
-                }
-            ) {
-                bubbleFound = true
+            val currentBubbleCounts = matchingBubbleCounts(snapshot)
+            bubbleFound = currentBubbleCounts.any { (signature, count) ->
+                count > existingBubbleCounts.getOrDefault(signature, 0)
             }
         }
         AppLog.i(
@@ -181,17 +189,14 @@ class DeepIntents(context: Context) {
         )
         return when {
             entryCleared && bubbleFound -> ActionResult(
-                true, "Message sent and verified."
-            )
-            entryCleared -> ActionResult(
                 false,
-                "Send was pressed and the message field cleared, but the sent " +
-                    "message bubble was not found, so sending is unverified."
+                "A new matching chat message appeared after Send and the composer cleared. The submission looks successful, but WhatsApp delivery/read status is not verified. Do not retry unless you check the chat first.",
+                ActionOutcome.SUBMITTED_UNVERIFIED
             )
             else -> ActionResult(
                 false,
-                "Send was pressed, but the message field did not clear within " +
-                    "2 seconds, so sending is unverified."
+                "Send was tapped, but Jarvis could not prove that a new matching chat message appeared and the composer cleared. The result is uncertain; check the conversation before retrying to avoid a duplicate.",
+                ActionOutcome.OUTCOME_UNKNOWN
             )
         }
     }
@@ -1494,7 +1499,7 @@ class DeepIntents(context: Context) {
     suspend fun smsSend(
         phone: String,
         message: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val digits = ContactsResolver.normalizePhone(phone)
         if (digits.length < 7) {
@@ -1510,24 +1515,63 @@ class DeepIntents(context: Context) {
         HandsActions.waitForSettle(1_500)
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
-                true,
-                "The SMS composer is open with the message ready — tap Send there."
+                false,
+                "The SMS composer is open with the message ready, but Jarvis did not send it. Tap Send yourself; do not treat this as sent.",
+                ActionOutcome.STAGED_FOR_USER
             )
-        // v2.0.2 JIT ask: composer filled, Send NOT yet tapped. A
-        // decline leaves the composer open with the text untouched.
-        if (askBeforeSend != null && !askBeforeSend()) {
-            return ActionResult(false, "Not sent.")
+        // Just-in-time confirmation occurs before the final Send tap.
+        if (!askBeforeSend()) return ActionResult(false, "Not sent.")
+        val reader = service.screenReader()
+        val pkg = reader.currentPackage()
+            ?: return ActionResult(false, "The SMS app could not be identified; nothing was sent.")
+        if (JarvisAccessibilityService.lastPackageName != null &&
+            JarvisAccessibilityService.lastPackageName != pkg
+        ) {
+            return ActionResult(false, "The active app changed before Send; nothing was sent.")
         }
-        val pkg = service.screenReader().currentPackage()
-        if (pkg != null) HandsActions.grantSendPermit(pkg)
-        val tapped = HandsActions.clickText("Send")
+        var snapshot = reader.snapshot()
+        if (snapshot.none { it.editable && it.text == message }) {
+            return ActionResult(
+                false,
+                "The SMS draft could not be verified exactly. Nothing was sent."
+            )
+        }
+        // Approval can take time. Re-check package and draft before tapping.
+        TaskState.throwIfStopRequested()
+        snapshot = reader.snapshot()
+        if (reader.currentPackage() != pkg ||
+            snapshot.none { it.editable && it.text == message }
+        ) {
+            return ActionResult(
+                false,
+                "The SMS app or draft changed after confirmation. Nothing was sent."
+            )
+        }
+        val send = reader.findByText("Send", snapshot)
+            ?.takeIf { it.enabled && (it.clickable || it.desc.contains("send", true)) }
+            ?: return ActionResult(
+                false,
+                "The SMS Send control could not be verified. The draft remains open and was not sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        TaskState.throwIfStopRequested()
+        HandsActions.grantSendPermit(pkg)
+        val tapped = try {
+            HandsActions.clickElement(send.index)
+        } finally {
+            HandsActions.revokeSendPermit(pkg)
+        }
         return if (tapped.success) {
-            ActionResult(true, "SMS sent via the default SMS app.")
+            ActionResult(
+                false,
+                "The SMS Send control was tapped, but delivery is not verified. Check the conversation before retrying to avoid a duplicate.",
+                ActionOutcome.OUTCOME_UNKNOWN
+            )
         } else {
             ActionResult(
-                true,
-                "The SMS composer is open with the message typed — tap Send " +
-                    "in the SMS app to send it."
+                false,
+                "The SMS send action could not be confirmed. Check the SMS app before retrying because the outcome may be uncertain.",
+                ActionOutcome.OUTCOME_UNKNOWN
             )
         }
     }
@@ -1541,7 +1585,7 @@ class DeepIntents(context: Context) {
         to: String,
         subject: String,
         body: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val pkg = Playbooks.GMAIL_PACKAGE
         if (!isPackageInstalled(pkg)) {
@@ -1559,20 +1603,72 @@ class DeepIntents(context: Context) {
         }
         HandsActions.waitForPackage(pkg, 3_000)
         HandsActions.waitForSettle(1_500)
-        // v2.0.2 JIT ask: compose filled, Send NOT yet tapped. A
-        // decline leaves the compose screen open with text untouched.
-        if (askBeforeSend != null && !askBeforeSend()) {
-            return ActionResult(false, "Not sent.")
+        if (!askBeforeSend()) return ActionResult(false, "Not sent.")
+        val service = JarvisAccessibilityService.instance
+            ?: return ActionResult(
+                false,
+                "Gmail compose is open, but Jarvis did not send the email. Tap Send yourself; do not treat this as sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        val reader = service.screenReader()
+        var snapshot = reader.snapshot()
+        if (reader.currentPackage() != pkg) {
+            return ActionResult(false, "Gmail is not the active app; nothing was sent.")
         }
+        // Gmail may hide individual compose fields from accessibility. Fail
+        // closed rather than tapping Send unless recipient and body match.
+        val editableTexts = snapshot.filter { it.editable }.map { it.text }
+        if (editableTexts.none { it.contains(to, ignoreCase = true) } ||
+            editableTexts.none { it.contains(body) }
+        ) {
+            return ActionResult(
+                false,
+                "Gmail's recipient/body could not be verified in the compose screen. The draft remains open and was not sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        }
+        TaskState.throwIfStopRequested()
+        snapshot = reader.snapshot()
+        if (reader.currentPackage() != pkg) {
+            return ActionResult(
+                false,
+                "The active app changed after confirmation. The email was not sent."
+            )
+        }
+        val refreshedTexts = snapshot.filter { it.editable }.map { it.text }
+        if (refreshedTexts.none { it.contains(to, ignoreCase = true) } ||
+            refreshedTexts.none { it.contains(body) }
+        ) {
+            return ActionResult(
+                false,
+                "The Gmail draft changed after confirmation. The email was not sent."
+            )
+        }
+        val send = reader.findByText("Send", snapshot)
+            ?.takeIf { it.enabled && (it.clickable || it.desc.contains("send", true)) }
+            ?: return ActionResult(
+                false,
+                "The Gmail Send control could not be verified. The draft remains open and was not sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        TaskState.throwIfStopRequested()
         HandsActions.grantSendPermit(pkg)
-        val tapped = HandsActions.clickText("Send")
+        val tapped = try {
+            HandsActions.clickElement(send.index)
+        } finally {
+            HandsActions.revokeSendPermit(pkg)
+        }
         return if (tapped.success) {
-            ActionResult(true, "Email sent via Gmail.")
+            ActionResult(
+                false,
+                "Gmail's Send control was tapped, but delivery is not verified. Check Gmail's Sent folder before retrying to avoid a duplicate.",
+                ActionOutcome.OUTCOME_UNKNOWN
+            )
         } else {
             ActionResult(
-                true,
-                "Gmail compose is open with the email filled in — tap Send " +
-                    "in Gmail to send it."
+                false,
+                "The Gmail send action could not be confirmed. Check the draft/Sent folder before retrying because the outcome may be uncertain.",
+                ActionOutcome.OUTCOME_UNKNOWN
             )
         }
     }
