@@ -917,7 +917,9 @@ class ToolExecutor(
                     )
                 }
                 val result = intents.whatsappMessage(
-                    resolution.contact.phone, message
+                    phone = resolution.contact.phone,
+                    expectedContactName = resolution.contact.displayName,
+                    text = message
                 ) {
                     val approved = SendAsk.ask(
                         "$name (${resolution.contact.phone})", message
