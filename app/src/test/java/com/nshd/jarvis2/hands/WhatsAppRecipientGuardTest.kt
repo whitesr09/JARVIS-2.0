@@ -54,7 +54,7 @@ class WhatsAppRecipientGuardTest {
     }
 
     @Test
-    fun rejectsSameLastSevenDigitsWithDifferentPrefix() {
+    fun rejectsSameTrailingTenDigitsWithDifferentInternationalPrefix() {
         assertFalse(
             WhatsAppRecipientGuard.matchesApprovedChat(
                 visibleTitle = "+44 1234 9876543210",
@@ -66,6 +66,17 @@ class WhatsAppRecipientGuardTest {
             WhatsAppRecipientGuard.matchesApprovedChat(
                 visibleTitle = "76543210",
                 approvedName = "Ahammed Nishad",
+                approvedDigits = "919876543210"
+            )
+        )
+    }
+
+    @Test
+    fun acceptsLocalTenDigitTitleForInternationalApprovedNumber() {
+        assertTrue(
+            WhatsAppRecipientGuard.matchesApprovedChat(
+                visibleTitle = "9876543210",
+                approvedName = "Saved contact name",
                 approvedDigits = "919876543210"
             )
         )
