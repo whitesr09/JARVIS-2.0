@@ -223,6 +223,18 @@ object BrainStore {
         return count
     }
 
+    /**
+     * Remove candidate data written by old builds in plaintext and migrate
+     * repetition-count keys to hashes. Called on an agent turn's IO dispatcher.
+     */
+    fun purgeLegacyMacroData(context: Context) {
+        val counts = readSanitizedGoalCounts(context)
+        prefs(context).edit()
+            .putString(KEY_GOAL_COUNTS, counts.toString())
+            .remove(KEY_LAST_CANDIDATE)
+            .apply()
+    }
+
     /** SHA-256 key for goal repetition counts; the raw user command is not persisted. */
     internal fun goalCountStorageKey(goal: String): String {
         val bytes = MessageDigest.getInstance("SHA-256")
