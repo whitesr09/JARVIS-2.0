@@ -316,7 +316,7 @@ object AgentPipeline {
         // so future calls/messages resolve the corrected name.
         extractContactCorrection(clean)?.let { (wrong, right) ->
             saveContactAlias(memoryDb, wrong, right)
-            AppLog.i("Agent", "route=contact-correction '$wrong' -> '$right'")
+            AppLog.i("Agent", "route=contact-correction alias matched")
             return@withContext "Got it — $wrong means $right. Saved."
         }
 
