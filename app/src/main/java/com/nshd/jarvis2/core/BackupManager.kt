@@ -317,7 +317,6 @@ object BackupManager {
                     existing += dedupeKey
                     factsAdded++
                 }
-            }
         }
 
         val providersListed = providersArr.length()
