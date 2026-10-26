@@ -2,7 +2,7 @@
 
 Audit date: 2026-10-26  
 Working branch: improvement/phase-1-release-hardening  
-Status: The PR and trusted push workflows passed for code commit `55f0c0c85a9e33238d4050f2d2a45b6bb50f75e5`. Further audit-driven changes since then address Android Lint findings, backup/export failure handling, overlay touch accessibility, provider-screen disk I/O, and coroutine cancellation in device actions. The latest source commit `3e105a28e743cdd2aa8c4ae0a4ff4a2f2155a04a` is pending CI at the time of this edit; do not treat these newest changes as verified until the workflow passes. Legacy storage migration, action outcome semantics, broad log-call review, and device smoke testing remain open. This document is not a release sign-off.
+Status: trusted push run `40372515431` passed for commit `d02699e67e1d08ce0042a2786861702b32cfb178`. Subsequent commits now classify all 45 registered tools in the central action-risk policy and add a regression test that fails if any registered tool is unclassified. Those newest changes are under CI in runs `40380946728` and `40380965081`; do not mark them verified until both finish. The PR remains open and unmerged. Legacy storage migration, cross-store atomic backup restore, provider/voice race tests, broad log-call review, and real-device smoke tests remain open. This document is not a release sign-off.
 
 ## Scope and method
 
@@ -26,7 +26,7 @@ Severity: P0 = security/release blocker; P1 = important privacy/reliability risk
 | A-02 | P1 | The Voice replies self-test hard-coded PASS without attempting a real audio exchange. | Fix committed: reports NOT TESTED and adds an encrypted-provider-storage check. CI passed on the current code commit; live audio remains explicitly untested by this self-test. |
 | A-03 | P1 | Diagnostics packs previously included a full crash report and raw recent logs after credential sanitization, which could expose action context or exception messages. | Fix committed, latest CI pending: default pack filters to selected lower-risk tags, omits raw action/clipboard/memory/API-response logs and stack traces, masks common phone/email patterns, and includes crash metadata rather than exception message/stack. Full log-call audit and user-review workflow remain open. |
 | A-04 | P1 | Backup restore could accept malformed settings/types and had no complete version/size/schema validation. Restore writes settings before memory insertion, so a database error can still leave a partial restore. | Fix partially committed, latest CI pending: strict format/version/root/settings/type/range/fact/provider validation, 5 MiB cap, and regression tests added. Cross-store transactional rollback remains open. |
-| A-05 | P1 | Some communication paths use a Boolean success result for a staged composer or dispatched tap, which is not the same as verified message delivery. | Open: add explicit VERIFIED / STAGED_FOR_USER / FAILED / OUTCOME_UNKNOWN action outcomes. |
+| A-05 | P1 | Some communication paths use a Boolean success result for a staged composer or dispatched tap, which is not the same as verified message delivery. | Partially addressed: `ActionOutcome` now distinguishes staged, submitted-unverified, and outcome-unknown results; terminal outcomes cannot be promoted to success or recorded as successful macros. Still open: audit each communication path for correct status assignment and test ambiguous post-send behavior on device. |
 | A-06 | P1 | VoiceSessionManager combines session ownership, reconnects, audio, WebSocket callbacks, screen sharing, and phone-call pauses. Recent job-cancellation fixes help, but pause-during-setup and error-teardown races still need tests. | Partially addressed; finish lifecycle race tests and device matrix. |
 | A-07 | P1 | Automated tests are concentrated in three files despite extensive provider, agent, accessibility, backup, and voice functionality. | Open: add deterministic fake-provider tests and pure-logic coverage before refactoring. |
 | A-08 | P1 | AgentPipeline, SettingsScreen, FloatingOverlayService, DeepIntents, VoiceSessionManager, ToolExecutor, and HandsActions are very large classes, roughly 1,500–2,500 lines each in the snapshot. | Open: behavior-preserving decomposition after characterization tests. |
@@ -54,7 +54,7 @@ Severity: P0 = security/release blocker; P1 = important privacy/reliability risk
 - Update metadata reads are capped at 1 MiB and workflow SHA parsing has a pure unit-test seam.
 - Default diagnostics packs omit high-risk raw action/API/clipboard/memory logs and crash stack/message, redact common contact patterns, and include selected diagnostic event tags only.
 
-The confirmation/range test suite passed in CI for commit 452b0ccfe3484dc8695ea1913442e3939da5db22. That success does not cover later commits; the current secure-storage, self-test, and workflow changes remain unverified until their own CI run completes.
+The central action-risk policy and its initial tests passed in CI for commit `d02699e67e1d08ce0042a2786861702b32cfb178`. The exhaustive registry-classification test and its policy updates are newer and await CI; prior CI success does not validate those later commits.
 
 ## Prioritized plan
 
@@ -77,7 +77,7 @@ The confirmation/range test suite passed in CI for commit 452b0ccfe3484dc8695ea1
 14. Bind send permits to an action ID as well as package/expiry and revoke on cancellation, app switch, or failed verification.
 15. Reject late spoken answers that began before the currently pending confirmation.
 16. Prevent a stale accessibility index from pointing at a different target after a snapshot refresh.
-17. Centralize risk classification for send/delete/call/purchase/settings/generic-tap and macro paths.
+17. Centralize risk classification for send/delete/call/purchase/settings/generic-tap and macro paths. Implemented in `ActionRiskPolicy`; a new exhaustive test checks every registered `ToolRegistry.specs` name is classified. Latest change awaits CI.
 18. Add confirmation tests for timeout, cancellation, stale IDs, concurrent asks, replay, and duplicate answers.
 19. Add fake-provider tests for timeout, malformed JSON, partial stream, HTTP/network failure, cancellation, failover, oversize body, and tool-call stream failure.
 20. Define provider capabilities for text, image input, tools, and native audio; reject unsupported modality combinations early.
