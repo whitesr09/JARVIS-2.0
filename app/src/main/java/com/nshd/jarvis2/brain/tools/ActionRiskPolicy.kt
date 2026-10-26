@@ -28,21 +28,24 @@ object ActionRiskPolicy {
         "fill_form", "calendar_event", "download_url"
     )
 
-    private val externalSideEffects = setOf(
-        "set_alarm", "set_timer", "set_volume", "set_brightness",
-        "toggle_torch", "set_silent", "media_control"
-    )
-
     private val reversibleMutations = setOf(
         "open_app", "click_element", "click_text", "type_text", "scroll",
         "press_key", "tap_percent", "edit_text", "insert_code",
         "long_press", "double_tap", "drag", "pinch_zoom", "set_slider",
-        "copy_selection", "youtube_play", "spotify_play"
+        "copy_selection", "youtube_play", "spotify_play", "vision_tap",
+        "save_note"
+    )
+
+    private val externalSideEffects = setOf(
+        "set_alarm", "set_timer", "set_volume", "set_brightness",
+        "toggle_torch", "set_silent", "media_control", "take_screenshot"
     )
 
     private val knownReadOnly = setOf(
-        "get_screen", "read_screen", "get_clipboard", "get_current_app",
-        "get_time", "get_date", "search_contacts", "get_memory"
+        "inspect_screen", "see_screen", "read_page", "clipboard_get",
+        "wait_for_text", "get_screen", "read_screen", "get_clipboard",
+        "get_current_app", "get_time", "get_date", "search_contacts",
+        "get_memory"
     )
 
     fun classify(toolName: String): ActionRisk = when (toolName) {
