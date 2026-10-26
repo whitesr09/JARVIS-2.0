@@ -11,6 +11,7 @@ import android.telecom.TelecomManager
 import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.brain.ExecutionLedger
 import com.nshd.jarvis2.core.MacroRecorder
+import com.nshd.jarvis2.hands.ActionOutcome
 import com.nshd.jarvis2.hands.ActionResult
 import com.nshd.jarvis2.hands.ContactResolution
 import com.nshd.jarvis2.hands.ContactsResolver
@@ -28,7 +29,8 @@ data class ToolResult(
     val success: Boolean,
     val message: String,
     /** Optional Base64 JPEG the agent loop forwards to the model as vision input. */
-    val imageBase64: String? = null
+    val imageBase64: String? = null,
+    val outcome: ActionOutcome = if (success) ActionOutcome.COMPLETED else ActionOutcome.FAILED
 )
 
 /**
@@ -1499,7 +1501,24 @@ class ToolExecutor(
     private fun missing(name: String): ToolResult =
         ToolResult(false, "Missing required argument: $name")
 
-    private fun ActionResult.toToolResult(): ToolResult = ToolResult(success, message)
+    private fun ActionResult.toToolResult(): ToolResult {
+        val statusPrefix = when (outcome) {
+            ActionOutcome.STAGED_FOR_USER -> "STAGED_FOR_USER"
+            ActionOutcome.SUBMITTED_UNVERIFIED -> "SUBMITTED_UNVERIFIED"
+            ActionOutcome.OUTCOME_UNKNOWN -> "OUTCOME_UNKNOWN"
+            else -> null
+        }
+        val resultMessage = if (statusPrefix != null) {
+            "$statusPrefix — $message"
+        } else {
+            message
+        }
+        return ToolResult(
+            success = success,
+            message = resultMessage,
+            outcome = outcome
+        )
+    }
 
     private fun isPaymentLike(text: String): Boolean =
         PAYMENT_REGEX.containsMatchIn(text.lowercase())
