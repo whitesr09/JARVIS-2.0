@@ -171,6 +171,16 @@ class BackupManagerValidationTest {
     }
 
     @Test
+    fun acceptsValidHttpAndHttpsProviderBaseUrls() {
+        assertTrue(BackupManager.isValidProviderBaseUrl("https://api.example.com/v1"))
+        assertTrue(BackupManager.isValidProviderBaseUrl("http://localhost:8080/v1"))
+        assertTrue(BackupManager.isValidProviderBaseUrl("https://api.example.com/v1/"))
+        assertEquals(false, BackupManager.isValidProviderBaseUrl("file:///private"))
+        assertEquals(false, BackupManager.isValidProviderBaseUrl("https://user:pass@example.com"))
+        assertEquals(false, BackupManager.isValidProviderBaseUrl("https://api.example.com/#fragment"))
+    }
+
+    @Test
     fun rejectsMalformedProviderBaseUrl() {
         val invalid = JSONArray().put(
             JSONObject()
