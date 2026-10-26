@@ -1155,6 +1155,7 @@ class DeepIntents(context: Context) {
      */
     suspend fun whatsappShareLatestPhoto(
         phone: String,
+        expectedContactName: String,
         askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val digits = ContactsResolver.normalizePhone(phone)
@@ -1201,6 +1202,18 @@ class DeepIntents(context: Context) {
             )
         val reader = service.screenReader()
         var snapshot = reader.snapshot()
+        val visibleRecipient = currentChatTitle(pkg)
+        if (
+            visibleRecipient == null ||
+            !matchesApprovedChat(visibleRecipient, expectedContactName, digits)
+        ) {
+            AppLog.w("Send", "photo share aborted: approved recipient could not be verified")
+            return ActionResult(
+                false,
+                "Aborted: the visible WhatsApp recipient could not be verified against the approved contact. The photo was not sent; close this share flow and select the correct chat.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        }
         val send = Playbooks.find(snapshot, pkg, Playbooks.ROLE_SEND_BUTTON)
             ?: reader.findByText("Send", snapshot)
                 ?.takeIf { it.enabled && (it.clickable || it.desc.contains("send", true)) }
@@ -1219,6 +1232,19 @@ class DeepIntents(context: Context) {
             return ActionResult(
                 false,
                 "The active app changed after confirmation. The photo was not sent."
+            )
+        }
+        val confirmedRecipient = currentChatTitle(pkg)
+        if (
+            confirmedRecipient == null ||
+            !matchesApprovedChat(confirmedRecipient, expectedContactName, digits) ||
+            normalizedChatKey(confirmedRecipient) != normalizedChatKey(visibleRecipient)
+        ) {
+            AppLog.w("Send", "photo share aborted: recipient changed or no longer verifies")
+            return ActionResult(
+                false,
+                "Aborted: the WhatsApp recipient changed or could not be re-verified after confirmation. The photo was not sent.",
+                ActionOutcome.STAGED_FOR_USER
             )
         }
         val refreshedSend = Playbooks.find(snapshot, pkg, Playbooks.ROLE_SEND_BUTTON)
@@ -1272,6 +1298,29 @@ class DeepIntents(context: Context) {
     } catch (e: Exception) {
         AppLog.w("Hands", "latest photo lookup failed (${e.javaClass.simpleName})")
         null
+    }
+
+    private fun normalizedChatKey(value: String): String =
+        value.lowercase().filter { it.isLetterOrDigit() }
+
+    /**
+     * Fail closed unless the visible chat title matches the approved
+     * contact exactly, or matches its phone number (for unsaved contacts).
+     */
+    private fun matchesApprovedChat(
+        visibleTitle: String,
+        approvedName: String,
+        approvedDigits: String
+    ): Boolean {
+        val titleKey = normalizedChatKey(visibleTitle)
+        val nameKey = normalizedChatKey(approvedName)
+        if (titleKey.isNotBlank() && titleKey == nameKey) return true
+        val visibleDigits = ContactsResolver.normalizePhone(visibleTitle)
+        return visibleDigits.length >= 7 &&
+            approvedDigits.length >= 7 &&
+            (visibleDigits == approvedDigits ||
+                visibleDigits.endsWith(approvedDigits.takeLast(7)) ||
+                approvedDigits.endsWith(visibleDigits.takeLast(7)))
     }
 
     /**
