@@ -234,6 +234,10 @@ object AgentPipeline {
     ): String = withContext(Dispatchers.IO) {
         val clean = text.trim()
         if (clean.isBlank()) return@withContext "I didn't catch that — please try again."
+        // Scrub old builds' serialized macro candidates and clear-text goal
+        // count keys before handling this turn. New candidates stay in memory
+        // until an explicit save-as-command request.
+        BrainStore.purgeLegacyMacroData(context)
         AppLog.d("Agent", "turn received (${clean.length} chars)")
         // v2.0.0 (#16): arm the macro recorder for this turn (a
         // custom-command re-dispatch shares the OUTER turn's record).
