@@ -144,6 +144,49 @@ class BackupManagerValidationTest {
     }
 
     @Test
+    fun rejectsIncompleteAndDuplicateProviderEntries() {
+        val incomplete = JSONArray().put(
+            JSONObject()
+                .put("id", "custom")
+                .put("keyIncluded", false)
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            BackupManager.validateBackupJson(backup(providers = incomplete))
+        }
+
+        fun validProvider(id: String) = JSONObject()
+            .put("id", id)
+            .put("label", "Custom")
+            .put("baseUrl", "https://example.invalid/v1")
+            .put("chatModel", "model-a")
+            .put("reasoningModel", "")
+            .put("keyIncluded", false)
+
+        val duplicate = JSONArray()
+            .put(validProvider("custom"))
+            .put(validProvider("custom"))
+        assertThrows(IllegalArgumentException::class.java) {
+            BackupManager.validateBackupJson(backup(providers = duplicate))
+        }
+    }
+
+    @Test
+    fun rejectsMalformedProviderBaseUrl() {
+        val invalid = JSONArray().put(
+            JSONObject()
+                .put("id", "custom")
+                .put("label", "Custom")
+                .put("baseUrl", "file:///private")
+                .put("chatModel", "model-a")
+                .put("reasoningModel", "")
+                .put("keyIncluded", false)
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            BackupManager.validateBackupJson(backup(providers = invalid))
+        }
+    }
+
+    @Test
     fun rejectsMalformedFactsAndOversizedBackup() {
         assertThrows(IllegalArgumentException::class.java) {
             BackupManager.validateBackupJson(
