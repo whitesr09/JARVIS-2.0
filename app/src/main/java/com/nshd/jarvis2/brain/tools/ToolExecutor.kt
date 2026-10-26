@@ -133,7 +133,9 @@ class ToolExecutor(
             // turn it into a normal tool failure and continue the agent loop.
             throw e
         } catch (e: Exception) {
-            ToolResult(false, "Tool $name failed safely: ${e.message ?: "unexpected error"}")
+            // Avoid forwarding exception text that may embed private request,
+            // URL, contact, or provider response details.
+            ToolResult(false, "Tool $name failed safely (${e.javaClass.simpleName}).")
         }
         // v2.0.0 (#16): feed the turn recorder — successful executions
         // only, so a saved macro replays a sequence that worked. The
@@ -233,7 +235,7 @@ class ToolExecutor(
             val summary = screenSummaryForStep(service)
             withUndoHint(
                 name,
-                ToolResult(raw.success, raw.message + "\nScreen now:\n" + summary)
+                raw.copy(message = raw.message + "\nScreen now:\n" + summary)
             )
         } catch (e: Exception) {
             withUndoHint(name, raw)
