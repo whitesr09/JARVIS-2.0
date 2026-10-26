@@ -228,11 +228,9 @@ object ModelDiscovery {
         return output.toString(Charsets.UTF_8.name())
     }
 
-    private companion object {
-        const val MAX_MODEL_LIST_BYTES = 1_048_576
-        const val MAX_DISCOVERED_MODELS = 500
-        const val MAX_MODEL_ID_CHARS = 256
-    }
+    private const val MAX_MODEL_LIST_BYTES = 1_048_576
+    private const val MAX_DISCOVERED_MODELS = 500
+    private const val MAX_MODEL_ID_CHARS = 256
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
