@@ -91,6 +91,24 @@ fun ApiConnectionScreen(
     val store = remember { ProviderStore(context) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    var storageWarning by remember {
+        mutableStateOf(store.storageError ?: store.migrationWarning)
+    }
+
+    fun persistConfig(): Boolean {
+        val saved = store.saveConfig(config)
+        storageWarning = store.storageError ?: store.migrationWarning
+        if (!saved) {
+            scope.launch {
+                snackbar.showSnackbar(
+                    storageWarning ?: "Provider settings could not be saved securely. No API key was stored."
+                )
+            }
+        } else if (store.migrationWarning != null) {
+            scope.launch { snackbar.showSnackbar(store.migrationWarning!!) }
+        }
+        return saved
+    }
 
     var activeId by remember { mutableStateOf(store.activeProviderId()) }
     var editId by remember { mutableStateOf(store.activeProviderId()) }
@@ -109,7 +127,10 @@ fun ApiConnectionScreen(
 
     fun runConnectionTestV2() {
         if (probing) return
-        store.saveConfig(config)
+        if (!persistConfig()) {
+            probeStageError = storageWarning ?: "Secure provider storage is unavailable."
+            return
+        }
         config = store.loadConfig(editId)
         refreshTick++
         probing = true
@@ -144,7 +165,7 @@ fun ApiConnectionScreen(
 
     fun useAlternative(modelId: String) {
         config = config.copy(chatModel = modelId)
-        store.saveConfig(config)
+        if (!persistConfig()) return
         config = store.loadConfig(editId)
         refreshTick++
         showProbeDialog = false
@@ -452,10 +473,11 @@ fun ApiConnectionScreen(
                     Row {
                         Button(
                             onClick = {
-                                store.saveConfig(config)
-                                config = store.loadConfig(editId)
-                                refreshTick++
-                                scope.launch { snackbar.showSnackbar("Saved") }
+                                if (persistConfig()) {
+                                    config = store.loadConfig(editId)
+                                    refreshTick++
+                                    scope.launch { snackbar.showSnackbar("Saved securely") }
+                                }
                             },
                             modifier = Modifier.weight(1f)
                         ) { Text("Save") }
