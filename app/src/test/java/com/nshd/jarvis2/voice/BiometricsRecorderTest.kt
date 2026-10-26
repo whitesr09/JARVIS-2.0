@@ -2,11 +2,19 @@ package com.nshd.jarvis2.voice
 
 import java.io.File
 import java.io.RandomAccessFile
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BiometricsRecorderTest {
+
+    @Test
+    fun enrollmentTargetsFirstMissingSlotInsteadOfUsingValidSampleCount() {
+        assertEquals(1, BiometricsRecorder.nextMissingSampleIndex(setOf(2, 3)))
+        assertEquals(2, BiometricsRecorder.nextMissingSampleIndex(setOf(1, 3)))
+        assertEquals(3, BiometricsRecorder.nextMissingSampleIndex(setOf(1, 2)))
+    }
 
     @Test
     fun acceptsExactlyThreeSecondPcm16MonoWaveFile() {
