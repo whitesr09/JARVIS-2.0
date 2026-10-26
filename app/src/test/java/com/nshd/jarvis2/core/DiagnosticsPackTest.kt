@@ -7,26 +7,37 @@ import org.junit.Test
 class DiagnosticsPackTest {
 
     @Test
-    fun safeLogTextOmitsActionLogsStacksAndMasksContactPatterns() {
+    fun safeLogTextOnlyExportsNormalizedAllowlistedEvents() {
         val entries = listOf(
-            AppLog.Entry(1L, AppLog.Level.I, "Voice", "session connected to +919876543210"),
+            AppLog.Entry(1L, AppLog.Level.I, "Voice", "session start engine=NATIVE persona=PrivateName language=Auto"),
             AppLog.Entry(2L, AppLog.Level.I, "Voice", "provider contact is user@example.com"),
             AppLog.Entry(3L, AppLog.Level.I, "Hands", "screen content from a private chat"),
             AppLog.Entry(4L, AppLog.Level.I, "Agent", "contact alias A -> B"),
             AppLog.Entry(5L, AppLog.Level.E, "Voice", "failed", "stack with private details"),
-            AppLog.Entry(6L, AppLog.Level.I, "Live", "setup complete")
+            AppLog.Entry(6L, AppLog.Level.I, "Live", "setup took 1200ms (model=private-model)")
         )
 
         val safe = DiagnosticsPack.safeLogText(entries)
 
-        assertTrue(safe.contains("[phone redacted]"))
-        assertTrue(safe.contains("[email redacted]"))
-        assertTrue(safe.contains("setup complete"))
-        assertFalse(safe.contains("+919876543210"))
+        assertTrue(safe.contains("Voice session started"))
+        assertTrue(safe.contains("Live setup completed"))
+        assertFalse(safe.contains("PrivateName"))
+        assertFalse(safe.contains("private-model"))
         assertFalse(safe.contains("user@example.com"))
         assertFalse(safe.contains("private chat"))
         assertFalse(safe.contains("alias A"))
         assertFalse(safe.contains("stack with private details"))
+    }
+
+    @Test
+    fun commonContactRedactorMasksPhoneAndEmailPatterns() {
+        val redacted = DiagnosticsPack.redactCommonContactPatterns(
+            "Call +919876543210 or email user@example.com"
+        )
+        assertTrue(redacted.contains("[phone redacted]"))
+        assertTrue(redacted.contains("[email redacted]"))
+        assertFalse(redacted.contains("+919876543210"))
+        assertFalse(redacted.contains("user@example.com"))
     }
 
     @Test
