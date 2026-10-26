@@ -132,7 +132,7 @@ class BackupManagerValidationTest {
             )
         }
         assertThrows(IllegalArgumentException::class.java) {
-            BackupManager.validateBackupJson(" ".repeat(5 * 1024 * 1024 + 1))
+            BackupManager.validateBackupJson("x".repeat(5 * 1024 * 1024 + 1))
         }
     }
 }
