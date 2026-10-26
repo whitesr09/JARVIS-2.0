@@ -961,14 +961,19 @@ class DeepIntents(context: Context) {
             Uri.parse("tel:$digits")
         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val launched = launch(intent)
-        return ActionResult(
-            launched,
-            when {
-                !launched -> "The phone app could not be opened for $displayName."
-                hasCallPermission -> "Calling $displayName."
-                else -> "Opened the dialer for $displayName — grant Phone Calls permission to place calls directly."
-            }
-        )
+        return when {
+            !launched -> ActionResult(false, "The phone app could not be opened.")
+            hasCallPermission -> ActionResult(
+                false,
+                "The call request was issued for the approved contact, but Jarvis cannot verify that the call connected. Check the phone screen before retrying.",
+                ActionOutcome.SUBMITTED_UNVERIFIED
+            )
+            else -> ActionResult(
+                false,
+                "The dialer is open for the approved contact. Jarvis did not place the call; review the number and tap Call yourself.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        }
     }
 
     // ── Hardware ───────────────────────────────────────────────────────
@@ -1844,7 +1849,11 @@ class DeepIntents(context: Context) {
                 hour > 12 -> hour - 12
                 else -> hour
             }
-            ActionResult(true, "Alarm set for $h12:${minute.toString().padStart(2, '0')} $ampm.")
+            ActionResult(
+                false,
+                "The Clock app accepted the request for $h12:${minute.toString().padStart(2, '0')} $ampm, but Jarvis cannot verify the alarm exists. Check the alarm list before retrying to avoid a duplicate.",
+                ActionOutcome.SUBMITTED_UNVERIFIED
+            )
         } else {
             ActionResult(false, "No clock app accepted the alarm.")
         }
@@ -1860,7 +1869,11 @@ class DeepIntents(context: Context) {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         return if (launch(intent)) {
-            ActionResult(true, "Timer started for ${formatDuration(seconds)}.")
+            ActionResult(
+                false,
+                "The Clock app accepted the timer request for ${formatDuration(seconds)}, but Jarvis cannot verify the countdown is active. Check the Clock app before retrying.",
+                ActionOutcome.SUBMITTED_UNVERIFIED
+            )
         } else {
             ActionResult(false, "No clock app accepted the timer.")
         }
