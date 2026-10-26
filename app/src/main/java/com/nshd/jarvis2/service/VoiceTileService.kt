@@ -1,5 +1,6 @@
 package com.nshd.jarvis2.service
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Intent
 import android.os.Build
@@ -24,6 +25,9 @@ class VoiceTileService : TileService() {
         refreshTile()
     }
 
+    // Android 14+ requires the PendingIntent overload. The deprecated
+    // Intent overload remains necessary for Android 13 and earlier.
+    @SuppressLint("StartActivityAndCollapseDeprecated")
     override fun onClick() {
         super.onClick()
         val active = VoiceSessionManager.uiState.value.status != VoiceStatus.IDLE
