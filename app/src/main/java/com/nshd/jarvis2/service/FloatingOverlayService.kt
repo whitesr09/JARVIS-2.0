@@ -306,7 +306,15 @@ class FloatingOverlayService : Service() {
         bubbleView = bubble
         hudPanel = hud
         rootView = root
-        bubble.setOnTouchListener { _, event -> handleBubbleTouch(event) }
+        bubble.isClickable = true
+        bubble.setOnClickListener { handleTap() }
+        bubble.setOnTouchListener { view, event ->
+            val shouldClick = event.actionMasked == MotionEvent.ACTION_UP &&
+                !dragging && System.currentTimeMillis() - downAtMs < TAP_MAX_MS
+            val handled = handleBubbleTouch(event)
+            if (shouldClick) view.performClick()
+            handled
+        }
         try {
             wm.addView(root, lp)
         } catch (e: Exception) {
@@ -460,7 +468,15 @@ class FloatingOverlayService : Service() {
         grip.layoutParams = LinearLayout.LayoutParams(dp(14), dp(20))
         headerRow.addView(header)
         headerRow.addView(grip)
-        headerRow.setOnTouchListener { _, event -> handlePanelTouch(event) }
+        headerRow.isClickable = true
+        headerRow.setOnClickListener { hidePanel() }
+        headerRow.setOnTouchListener { view, event ->
+            val shouldClick = event.actionMasked == MotionEvent.ACTION_UP &&
+                !dragging && System.currentTimeMillis() - downAtMs < TAP_MAX_MS
+            val handled = handlePanelTouch(event)
+            if (shouldClick) view.performClick()
+            handled
+        }
         panel.addView(headerRow)
         panelHeaderRow = headerRow
         panelGripView = grip
@@ -1817,12 +1833,11 @@ class FloatingOverlayService : Service() {
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (dragging) {
-                    dragging = false
-                    snapToEdge()
-                } else if (System.currentTimeMillis() - downAtMs < TAP_MAX_MS) {
-                    handleTap()
-                }
+                val wasDragging = dragging
+                dragging = false
+                if (wasDragging) snapToEdge()
+                // The actual ACTION_UP click is dispatched by the listener
+                // through performClick(); ACTION_CANCEL never becomes a tap.
                 return true
             }
         }
@@ -1926,12 +1941,11 @@ class FloatingOverlayService : Service() {
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (dragging) {
-                    dragging = false
-                    snapToEdge()
-                } else if (System.currentTimeMillis() - downAtMs < TAP_MAX_MS) {
-                    hidePanel()
-                }
+                val wasDragging = dragging
+                dragging = false
+                if (wasDragging) snapToEdge()
+                // A clean tap is delivered by the listener's performClick();
+                // cancellation or drag completion never collapses the panel.
                 return true
             }
         }
