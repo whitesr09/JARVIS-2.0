@@ -3,6 +3,7 @@ package com.nshd.jarvis2.brain
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
+import com.nshd.jarvis2.hands.ActionOutcome
 import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.ui.FriendlyErrors
 import kotlinx.coroutines.CancellationException
@@ -301,6 +302,23 @@ class FailoverRouter(
                             terminalReply = result.message.lineSequence()
                                 .firstOrNull()?.trim().orEmpty()
                                 .ifBlank { "Done." }
+                            break
+                        }
+                        // A staged or uncertain consequential action ends this
+                        // turn. Never ask the model to retry a send/click when it
+                        // may already have reached the external app; duplicate
+                        // submissions can be irreversible. User must inspect state.
+                        if (result.outcome in setOf(
+                                ActionOutcome.STAGED_FOR_USER,
+                                ActionOutcome.SUBMITTED_UNVERIFIED,
+                                ActionOutcome.OUTCOME_UNKNOWN
+                            )
+                        ) {
+                            terminalReply = result.message
+                            AppLog.w(
+                                "Agent",
+                                "turn stopped after " + call.name + " outcome=" + result.outcome
+                            )
                             break
                         }
                         // Vision tools (see_screen) attach a screenshot:
