@@ -13,14 +13,15 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * F8 (#97): one-tap diagnostics pack — a single .txt a user can share
- * when something breaks: app + device identity, the last crash report
- * (when one exists), the last 500 AppLog lines, provider ids + model
- * names + probe latencies, and a settings summary.
+ * F8 (#97): one-tap, privacy-reduced diagnostics pack. It contains
+ * app/device metadata, a limited settings/provider summary, crash metadata
+ * (not exception messages or stacks), and selected low-risk log events.
  *
- * NO SECRETS, by construction: API keys are never read here (only
- * provider ids, model names and probe metadata), and the whole text
- * still passes through [AppLog.sanitize] before it leaves.
+ * API keys are never read here. High-risk action/provider/clipboard/memory
+ * logs and stack traces are excluded by default; common email/phone patterns
+ * are masked and [AppLog.sanitize] is applied to the final text. This is
+ * risk reduction, not a guarantee that every possible personal value is
+ * detected, so the UI asks users to review the pack before sharing.
  */
 object DiagnosticsPack {
 
