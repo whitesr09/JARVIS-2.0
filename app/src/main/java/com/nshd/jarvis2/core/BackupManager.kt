@@ -147,6 +147,9 @@ object BackupManager {
      * without requiring an Android Context or database.
      */
     internal fun validateBackupJson(json: String): JSONObject {
+        require(json.length <= MAX_BACKUP_BYTES) {
+            "Backup file is too large (maximum 5 MiB)."
+        }
         require(json.isNotBlank()) { "Backup file is empty." }
         require(json.toByteArray(Charsets.UTF_8).size <= MAX_BACKUP_BYTES) {
             "Backup file is too large (maximum 5 MiB)."
