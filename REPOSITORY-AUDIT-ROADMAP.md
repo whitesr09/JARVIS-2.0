@@ -2,7 +2,7 @@
 
 Audit date: 2026-10-26  
 Working branch: improvement/phase-1-release-hardening  
-Status: The PR and trusted push workflows passed for code commit `d3ac8160a9d092a07e2f5df173d551af516c2ba1`. Unit tests and debug APK assembly passed; the signed release APK passed signature/certificate verification and SHA-256 checksum generation, and release/debug artifacts were uploaded. Legacy storage migration and device smoke testing remain open. This document is not a release sign-off.
+Status: The PR and trusted push workflows passed for code commit `d3ac8160a9d092a07e2f5df173d551af516c2ba1`, including signed release verification. Newer audit-driven changes now harden backup restore, diagnostics redaction, update metadata parsing, and voice-biometric samples. The latest source commit `c3cc924a82e8ced33f39d0df4b199af7f95fd11f` is pending CI at the time of this edit; do not treat the newer fixes as verified until its workflow passes. Legacy storage migration and device smoke testing remain open. This document is not a release sign-off.
 
 ## Scope and method
 
@@ -24,17 +24,20 @@ Severity: P0 = security/release blocker; P1 = important privacy/reliability risk
 |---|---|---|---|
 | A-01 | P0 | ProviderStore previously fell back to plaintext SharedPreferences when encrypted preferences failed, risking API-key exposure at rest. | Fix committed: fail closed, attempt migration into encrypted storage, and remove the legacy plaintext file only after a successful encrypted commit. Current PR and trusted push CI passed; legacy migration failure paths still need targeted device/emulator validation. |
 | A-02 | P1 | The Voice replies self-test hard-coded PASS without attempting a real audio exchange. | Fix committed: reports NOT TESTED and adds an encrypted-provider-storage check. CI passed on the current code commit; live audio remains explicitly untested by this self-test. |
-| A-03 | P1 | DiagnosticsPack exports crash/log history after credential-pattern sanitization. Sanitizing API-key patterns does not remove all personal information. Recent commits redact corrected names and recipient digits in the identified contact-correction/photo-sharing logs, but a full log-call audit remains necessary. | Open: redact personal values at call sites; review/preview exported diagnostics before sharing. |
-| A-04 | P1 | BackupManager import checks a format marker but does not fully validate formatVersion, a settings-key allowlist, payload size, and value constraints. | Open: strict version/schema/key/type/size validation and transactional restore tests. |
+| A-03 | P1 | Diagnostics packs previously included a full crash report and raw recent logs after credential sanitization, which could expose action context or exception messages. | Fix committed, latest CI pending: default pack filters to selected lower-risk tags, omits raw action/clipboard/memory/API-response logs and stack traces, masks common phone/email patterns, and includes crash metadata rather than exception message/stack. Full log-call audit and user-review workflow remain open. |
+| A-04 | P1 | Backup restore could accept malformed settings/types and had no complete version/size/schema validation. Restore writes settings before memory insertion, so a database error can still leave a partial restore. | Fix partially committed, latest CI pending: strict format/version/root/settings/type/range/fact/provider validation, 5 MiB cap, and regression tests added. Cross-store transactional rollback remains open. |
 | A-05 | P1 | Some communication paths use a Boolean success result for a staged composer or dispatched tap, which is not the same as verified message delivery. | Open: add explicit VERIFIED / STAGED_FOR_USER / FAILED / OUTCOME_UNKNOWN action outcomes. |
 | A-06 | P1 | VoiceSessionManager combines session ownership, reconnects, audio, WebSocket callbacks, screen sharing, and phone-call pauses. Recent job-cancellation fixes help, but pause-during-setup and error-teardown races still need tests. | Partially addressed; finish lifecycle race tests and device matrix. |
 | A-07 | P1 | Automated tests are concentrated in three files despite extensive provider, agent, accessibility, backup, and voice functionality. | Open: add deterministic fake-provider tests and pure-logic coverage before refactoring. |
 | A-08 | P1 | AgentPipeline, SettingsScreen, FloatingOverlayService, DeepIntents, VoiceSessionManager, ToolExecutor, and HandsActions are very large classes, roughly 1,500–2,500 lines each in the snapshot. | Open: behavior-preserving decomposition after characterization tests. |
 | A-09 | P1 | The project has only gradle-wrapper.properties, not checked-in wrapper scripts/JAR; CI regenerates the wrapper. | Open: commit a verified wrapper and distribution checksum for reproducible builds. |
 | A-10 | P1 | The old workflow injected signing secrets at job scope and could enter signed-release steps on PR events. | Fix committed: PR jobs are debug-only; trusted push/manual signing validates the key, verifies APK/certificate, and emits SHA-256. New workflow still needs a green run and artifact inspection. |
-| A-11 | P2 | UpdateChecker reads response JSON without an explicit size cap. Its GitHub query is constrained, but defensive body limits and parsing tests are still appropriate. | Open. |
+| A-11 | P2 | UpdateChecker parsed the GitHub workflow-runs body without a response-size cap and had no pure parser tests. | Fix committed, latest CI pending: body capped at 1 MiB and newest-successful-workflow SHA parsing extracted with JVM tests. |
 | A-12 | P2 | Several non-null assertions and broad exception handlers remain. Some are guarded, but each must be reviewed; broad Throwable catches can conceal broken callback state or fatal errors. | Open: replace assertions with explicit states and audit catches individually. |
 | A-13 | P2 | Tool arguments now have name/type/enum/size checks plus selected numeric bounds, but every tool schema still needs to be checked against its actual dispatch contract. | Partially addressed; add table-driven schema/dispatch validation. |
+| A-14 | P1 | Voice-biometric enrollment previously counted any WAV-looking file longer than 44 bytes and accepted captures as short as half the requested duration. | Fix committed, latest CI pending: validate RIFF/WAVE PCM16 mono header and exact three-second payload; propagate cancellation, delete stale samples before re-record, and add WAV validation tests. Physical microphone testing remains open. |
+| A-15 | P1 | Portable backups did not contain voice-biometric WAV samples but could restore flags claiming enrollment was present. | Fix committed, latest CI pending: portable exports omit device-local enrollment flags and older imports leave local enrollment state untouched; backup note explains re-enrollment on a new device. |
+| A-16 | P2 | Choosing the next sample by valid sample count could repeatedly target the wrong slot when an earlier WAV was corrupt and later slots were valid. A failed re-record could leave persisted enrollment marked active. | Fix committed, latest CI pending: next slot is the first invalid sample index; UI keeps enrollment state aligned with valid sample files. |
 
 ## Work already present on the branch
 
@@ -44,7 +47,12 @@ Severity: P0 = security/release blocker; P1 = important privacy/reliability risk
 - Confirmation-gate cancellation/concurrency and stale IDs are covered by tests.
 - WhatsApp send approval is tied to the same foreground package; its draft and Send control are refreshed after approval, and a short-lived one-shot permit is scoped to the package/tap.
 - Voice startup and delayed reconnect jobs are tracked and cancelled on stop.
-- The CI workflow is being hardened for PR secret separation, signed APK verification, certificate identity, checksums, and stale-run cancellation.
+- The CI workflow separates PR debug builds from trusted signing, verifies release signature/certificate identity and SHA-256 checksums, and cancels stale event/branch runs.
+- Backup import now validates format version, byte size, root/settings/fact/provider schemas, setting types and selected ranges before writes.
+- Portable backups omit device-local voice-biometric enrollment flags; import does not imply missing WAV samples were restored.
+- Voice-biometric sample counts now require a valid full three-second PCM16 mono WAV; cancellation is propagated and missing/corrupt slots can be re-recorded.
+- Update metadata reads are capped at 1 MiB and workflow SHA parsing has a pure unit-test seam.
+- Default diagnostics packs omit high-risk raw action/API/clipboard/memory logs and crash stack/message, redact common contact patterns, and include selected diagnostic event tags only.
 
 The confirmation/range test suite passed in CI for commit 452b0ccfe3484dc8695ea1913442e3939da5db22. That success does not cover later commits; the current secure-storage, self-test, and workflow changes remain unverified until their own CI run completes.
 
