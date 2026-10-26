@@ -110,7 +110,7 @@ fun ApiConnectionScreen(
                 )
             }
         } else if (warning != null) {
-            scope.launch { snackbar.showSnackbar(warning)
+            scope.launch { snackbar.showSnackbar(warning) }
         }
         return saved
     }
