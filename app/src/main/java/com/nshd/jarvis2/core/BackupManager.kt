@@ -240,10 +240,21 @@ object BackupManager {
         require(providers.length() <= MAX_PROVIDERS) {
             "Backup contains too many provider entries."
         }
+        val allowedProviderKeys = setOf(
+            "id", "label", "baseUrl", "chatModel", "reasoningModel", "keyIncluded"
+        )
         for (i in 0 until providers.length()) {
             val provider = providers.optJSONObject(i)
                 ?: throw IllegalArgumentException("Provider entry " + (i + 1) + " is invalid.")
-            require(!provider.has("apiKey") && !provider.has("key")) {
+            val providerKeys = provider.keys()
+            while (providerKeys.hasNext()) {
+                val key = providerKeys.next()
+                require(key in allowedProviderKeys) {
+                    "Unsupported field in provider entry " + (i + 1) + "."
+                }
+            }
+            val keyIncluded = provider.opt("keyIncluded")
+            require(keyIncluded == null || (keyIncluded is Boolean && !keyIncluded)) {
                 "Provider API keys must not be included in a backup."
             }
         }
