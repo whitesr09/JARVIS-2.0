@@ -375,8 +375,7 @@ fun ChatScreen(
                 // the chat bubble is the friendly headline only.
                 com.nshd.jarvis2.core.AppLog.e(
                     "Agent",
-                    "chat send failed: ${e.message ?: "unexpected error"}",
-                    e
+                    "chat send failed (${e.javaClass.simpleName})"
                 )
                 appendAssistant(
                     "I couldn't reach the model (" +
