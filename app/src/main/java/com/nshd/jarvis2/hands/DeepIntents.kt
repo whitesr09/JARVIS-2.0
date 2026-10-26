@@ -37,11 +37,13 @@ internal object WhatsAppRecipientGuard {
         // Seven trailing digits are not enough to distinguish nearby contacts.
         // Accept either a full international match or a local-number display
         // that matches the approved number's final ten digits.
-        return visibleDigits.length >= 10 &&
-            approvedDigits.length >= 10 &&
-            (visibleDigits == approvedDigits ||
-                visibleDigits.endsWith(approvedDigits.takeLast(10)) ||
-                approvedDigits.endsWith(visibleDigits.takeLast(10)))
+        return visibleDigits == approvedDigits ||
+            (visibleDigits.length == 10 &&
+                approvedDigits.length > 10 &&
+                approvedDigits.endsWith(visibleDigits)) ||
+            (approvedDigits.length == 10 &&
+                visibleDigits.length > 10 &&
+                visibleDigits.endsWith(approvedDigits))
     }
 }
 
