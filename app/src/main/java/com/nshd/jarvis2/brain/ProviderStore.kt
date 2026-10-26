@@ -73,7 +73,15 @@ class ProviderStore(context: Context) {
             migrateLegacyPlaintextPrefs(appContext, encrypted)
             encrypted
         } catch (e: Exception) {
-            storageError = "Secure provider storage is unavailable. API keys were not saved."
+            val legacyPlaintextMayRemain = runCatching {
+                appContext.getSharedPreferences(FALLBACK_FILE_NAME, Context.MODE_PRIVATE)
+                    .all.isNotEmpty()
+            }.getOrDefault(false)
+            storageError = if (legacyPlaintextMayRemain) {
+                "Secure provider storage is unavailable. Jarvis did not read or write the legacy unencrypted settings, but an older plaintext copy may remain on this device."
+            } else {
+                "Secure provider storage is unavailable. API keys were not saved."
+            }
             // Log only the exception type. Never log messages that could contain data.
             Log.e(TAG, "Encrypted provider storage unavailable; refusing plaintext fallback (${e.javaClass.simpleName})")
             null
