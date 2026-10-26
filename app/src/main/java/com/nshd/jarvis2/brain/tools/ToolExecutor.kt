@@ -129,13 +129,28 @@ class ToolExecutor(
         val raw = try {
             dispatch(name, args)
         } catch (e: CancellationException) {
-            // Task cancellation must stop device actions immediately; never
-            // turn it into a normal tool failure and continue the agent loop.
+            // Coroutine cancellation must stop device actions immediately.
+            throw e
+        } catch (e: TaskStoppedException) {
+            // The explicit user stop control is not an ordinary tool failure.
             throw e
         } catch (e: Exception) {
-            // Avoid forwarding exception text that may embed private request,
-            // URL, contact, or provider response details.
-            ToolResult(false, "Tool $name failed safely (${e.javaClass.simpleName}).")
+            // An exception can happen after a tap or send has already reached
+            // the target app. Conservatively make mutations terminal for this
+            // turn, so neither the ledger nor the model retries an uncertain
+            // side effect. Read-only failures remain ordinary retryable errors.
+            if (name in UI_MUTATION_TOOLS || name in EXTERNAL_SIDE_EFFECT_TOOLS) {
+                ToolResult(
+                    success = false,
+                    message = "OUTCOME_UNKNOWN — Tool $name stopped unexpectedly " +
+                        "(${e.javaClass.simpleName}). Check the app/device before retrying.",
+                    outcome = ActionOutcome.OUTCOME_UNKNOWN
+                )
+            } else {
+                // Never forward exception messages; they can contain private
+                // URLs, contact details, request fragments, or provider data.
+                ToolResult(false, "Tool $name failed safely (${e.javaClass.simpleName}).")
+            }
         }
         // v2.0.0 (#16): feed the turn recorder — successful executions
         // only, so a saved macro replays a sequence that worked. The
@@ -1566,6 +1581,14 @@ class ToolExecutor(
          * ledgered — the anti-replay protection the ledger exists for.
          */
         private val REPEATABLE_TOOLS = setOf("edit_text", "type_text")
+        // External side effects not already covered by UI_MUTATION_TOOLS.
+        // Exceptions from these actions must not enable same-turn replay.
+        private val EXTERNAL_SIDE_EFFECT_TOOLS = setOf(
+            "call_contact", "answer_call", "reject_call", "set_alarm", "set_timer",
+            "set_volume", "set_brightness", "toggle_torch", "set_silent",
+            "media_control", "download_url", "calendar_event"
+        )
+
         private val UI_MUTATION_TOOLS = setOf(
             "open_app", "click_element", "click_text", "type_text", "scroll",
             "press_key", "tap_percent", "whatsapp_message", "youtube_play",
