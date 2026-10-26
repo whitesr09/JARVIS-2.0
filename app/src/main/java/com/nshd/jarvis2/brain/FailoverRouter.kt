@@ -415,8 +415,8 @@ class FailoverRouter(
         }
         AppLog.e(
             "Agent",
-            "agent loop: all providers failed — " +
-                failures.joinToString(" • ") { (label, raw) -> "$label: $raw" }
+            "agent loop exhausted configured providers (attempts=${failures.size}); " +
+                "raw provider error details omitted"
         )
         // F5.1 (E3): same human tone — no "provider"/"agent loop"
         // machinery words in the user-facing text.
