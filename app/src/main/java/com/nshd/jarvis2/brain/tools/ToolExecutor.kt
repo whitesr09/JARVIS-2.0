@@ -127,7 +127,7 @@ class ToolExecutor(
         } else {
             null
         }
-        val raw = try {
+        val dispatched = try {
             dispatch(name, args)
         } catch (e: CancellationException) {
             // Coroutine cancellation must stop device actions immediately.
@@ -153,6 +153,21 @@ class ToolExecutor(
                 ToolResult(false, "Tool $name failed safely (${e.javaClass.simpleName}).")
             }
         }
+        // Keep action status authoritative for every caller, including
+        // direct ToolResult paths that don't pass through ActionResult mapper.
+        // Staged/uncertain outcomes must never enter the success macro recorder,
+        // undo stack, or success-cached ledger.
+        val terminalOutcome = dispatched.outcome in setOf(
+            ActionOutcome.STAGED_FOR_USER,
+            ActionOutcome.SUBMITTED_UNVERIFIED,
+            ActionOutcome.OUTCOME_UNKNOWN
+        )
+        val raw = if (terminalOutcome && dispatched.success) {
+            dispatched.copy(success = false)
+        } else {
+            dispatched
+        }
+
         // v2.0.0 (#16): feed the turn recorder — successful executions
         // only, so a saved macro replays a sequence that worked. The
         // recorder is armed solely by AgentPipeline for its own turns;
