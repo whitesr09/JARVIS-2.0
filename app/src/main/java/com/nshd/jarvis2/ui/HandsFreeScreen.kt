@@ -729,10 +729,10 @@ fun HandsFreeScreen(
                                     Icons.Filled.Warning
                                 },
                                 contentDescription = null,
-                                tint = if (result.passed) {
-                                    JarvisSemanticColors.success
-                                } else {
-                                    MaterialTheme.colorScheme.error
+                                tint = when {
+                                    result.passed -> JarvisSemanticColors.success
+                                    result.notTested -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    else -> MaterialTheme.colorScheme.error
                                 },
                                 modifier = Modifier.size(20.dp)
                             )
