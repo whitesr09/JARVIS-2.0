@@ -4,7 +4,7 @@ Baseline: v2.0.3 (e2ee360fa35120b0cb94266b62694837cdf3a8a9)
 Working branch: improvement/phase-1-release-hardening
 Target: keep main stable; deliver each phase as a reviewable change set and require CI plus device smoke tests where applicable.
 
-## Phase 1 — Release hardening and truthful diagnostics (partially implemented; verification pending)
+## Phase 1 — Release hardening and truthful diagnostics (code verified; device migration checks open)
 
 Implemented on the working branch:
 - Build identity uses the source commit SHA; update checks do not claim a comparison when the embedded SHA is unknown, and transient errors remain retryable.
@@ -13,9 +13,9 @@ Implemented on the working branch:
 - Provider settings UI now reports a secure-save failure instead of claiming settings were saved.
 - The voice self-test no longer hard-codes a PASS: it reports that the audio round-trip is NOT TESTED and separately checks encrypted provider-storage availability.
 - Phase 5 workflow changes now withhold signing secrets from PR jobs and add release signature/certificate/checksum verification.
+- PR and trusted push workflows passed for code commit `d3ac8160a9d092a07e2f5df173d551af516c2ba1`. Unit tests and debug APK assembly passed; the release APK signature was verified against the configured keystore certificate, a SHA-256 checksum was generated, and the signed release artifact was uploaded.
 
 Still required before Phase 1 acceptance:
-- CI verification of the current secure-storage and self-test commits.
 - Targeted verification of legacy-file migration, migration failure, keystore failure, and UI behavior on a device/emulator.
 - Unit tests for update parsing/unknown SHA/HTTP failures and secure-storage failure behavior.
 - Inspect exported diagnostics for private data and ensure users can review what will be shared.
@@ -87,14 +87,14 @@ Acceptance: no consequential action can bypass current consent; failures are rep
 
 ## Phase 5 — Maintainability, UX, performance, and release automation (in progress)
 
-Implemented on the working branch; latest commit still requires CI verification:
+Implemented on the working branch; code commit `d3ac8160a9d092a07e2f5df173d551af516c2ba1` passed both push and PR workflows:
 - Added event/branch-specific workflow concurrency so newer runs cancel stale runs without merging PR and push trust contexts.
 - Signing secrets are only injected into trusted push/manual signing steps; pull-request jobs are restricted to debug builds.
 - CI now runs unit tests plus debug assembly, validates keystore/alias configuration, verifies the signed release APK and its certificate against the configured keystore, and emits SHA-256 checksums for APK artifacts.
 - Started a repository-wide audit. The full audit and prioritized backlog are available in the audit roadmap attached to this conversation; confirmed issues and remaining verification tasks are tracked separately.
 
 Still required before Phase 5 acceptance:
-- Verify the new workflow end-to-end on current HEAD and inspect the downloaded APK/artifact contents.
+- Continue reviewing artifact metadata and retain the signing certificate fingerprint/checksum with release notes; current CI verifies the certificate and computes the checksum, but physical-device install/upgrade smoke tests remain open.
 - Check in a verified Gradle wrapper and distribution checksum instead of generating a wrapper in CI.
 - Establish a static-analysis/lint baseline and gate newly introduced findings.
 - Refactor oversized classes incrementally after characterization tests are added.
