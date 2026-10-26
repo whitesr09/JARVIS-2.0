@@ -90,7 +90,7 @@ object ModelDiscovery {
                         // server internals; keep diagnostics to status/latency.
                         AppLog.w(
                             "API",
-                            "${config.id} GET $modelsHost/models → HTTP " +
+                            "${config.id} list-models → HTTP " +
                                 "${response.code} in ${fetchMs}ms"
                         )
                         return@withContext Result.failure(
@@ -100,7 +100,7 @@ object ModelDiscovery {
                     val ids = parseIds(bodyText)
                     AppLog.d(
                         "API",
-                        "${config.id} GET $modelsHost/models → 200 in " +
+                        "${config.id} list-models → 200 in " +
                             "${fetchMs}ms (${ids.size} models)"
                     )
                     if (ids.isEmpty()) {
@@ -115,8 +115,7 @@ object ModelDiscovery {
                 val safeReason = FriendlyErrors.shortReason(e.message)
                 AppLog.e(
                     "API",
-                    "${config.id} GET $modelsHost/models network error " +
-                        "(${e.javaClass.simpleName}; $safeReason)"
+                    "${config.id} list-models network error (${e.javaClass.simpleName})"
                 )
                 Result.failure(AiException("Network error: $safeReason"))
             } catch (e: AiException) {
