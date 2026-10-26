@@ -1155,6 +1155,21 @@ object AgentPipeline {
             }
             // #61: stop check right after this sub-task's execution.
             TaskState.throwIfStopRequested()
+            val outcomeNeedsReview = result.startsWith("STAGED_FOR_USER") ||
+                result.startsWith("SUBMITTED_UNVERIFIED") ||
+                result.startsWith("OUTCOME_UNKNOWN")
+            if (outcomeNeedsReview) {
+                // The external action may already have reached another app.
+                // Do not continue a compound request into later side effects.
+                TaskQueue.markFailed(item.id)
+                failed++
+                lines += "⚠ " + item.title + " — " +
+                    result.lineSequence().firstOrNull().orEmpty().take(90)
+                items.drop(index + 1).forEach { TaskQueue.skipTask(it.id) }
+                lines += "Stopped remaining tasks: inspect the external app before retrying."
+                AppLog.w("Agent", "task queue stopped after uncertain action outcome at step ${index + 1}")
+                break
+            }
             val ok = !isFailureResult(result)
             AppLog.d(
                 "Agent",
