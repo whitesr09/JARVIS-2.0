@@ -89,10 +89,10 @@ class ProviderStore(context: Context) {
         appContext: Context,
         encrypted: SharedPreferences
     ) {
-        val legacy = appContext.getSharedPreferences(FALLBACK_FILE_NAME, Context.MODE_PRIVATE)
-        val legacyValues = legacy.all
-        if (legacyValues.isEmpty()) return
         try {
+            val legacy = appContext.getSharedPreferences(FALLBACK_FILE_NAME, Context.MODE_PRIVATE)
+            val legacyValues = legacy.all
+            if (legacyValues.isEmpty()) return
             val editor = encrypted.edit()
             for ((key, value) in legacyValues) {
                 if (!encrypted.contains(key) && value is String) {
