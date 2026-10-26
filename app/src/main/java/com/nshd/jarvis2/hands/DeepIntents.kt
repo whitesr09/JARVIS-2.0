@@ -61,6 +61,7 @@ class DeepIntents(context: Context) {
 
     suspend fun whatsappMessage(
         phone: String,
+        expectedContactName: String,
         text: String,
         askBeforeSend: suspend () -> Boolean
     ): ActionResult {
@@ -105,6 +106,22 @@ class DeepIntents(context: Context) {
                 "Aborted: the opened screen is not a recognized WhatsApp composer. Nothing was sent."
             )
         }
+        val visibleRecipient = currentChatTitle(composerPackage)
+        if (
+            visibleRecipient == null ||
+            !WhatsAppRecipientGuard.matchesApprovedChat(
+                visibleTitle = visibleRecipient,
+                approvedName = expectedContactName,
+                approvedDigits = digits
+            )
+        ) {
+            AppLog.w("Send", "stage FAILED: visible recipient did not match approved contact")
+            return ActionResult(
+                false,
+                "Aborted: the visible WhatsApp recipient could not be matched to the approved contact. Nothing was sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        }
         val entry = snapshot.firstOrNull { it.editable }
         if (entry == null || entry.text != text) {
             AppLog.w("Send", "stage FAILED: composer draft could not be verified exactly")
@@ -141,6 +158,24 @@ class DeepIntents(context: Context) {
             return ActionResult(
                 false,
                 "Aborted: the message draft changed after confirmation. Nothing was sent."
+            )
+        }
+        val confirmedRecipient = currentChatTitle(activePackage)
+        if (
+            confirmedRecipient == null ||
+            !WhatsAppRecipientGuard.matchesApprovedChat(
+                visibleTitle = confirmedRecipient,
+                approvedName = expectedContactName,
+                approvedDigits = digits
+            ) ||
+            WhatsAppRecipientGuard.normalizedChatKey(confirmedRecipient) !=
+                WhatsAppRecipientGuard.normalizedChatKey(visibleRecipient)
+        ) {
+            AppLog.w("Send", "stage FAILED: recipient changed or did not re-verify")
+            return ActionResult(
+                false,
+                "Aborted: the WhatsApp recipient changed or could not be re-verified after confirmation. Nothing was sent.",
+                ActionOutcome.STAGED_FOR_USER
             )
         }
 
