@@ -922,7 +922,7 @@ class DeepIntents(context: Context) {
         val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val activities = try {
             appContext.packageManager.queryIntentActivities(launcherIntent, 0)
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             emptyList()
         }
         val wantedTokens = tokenize(name)
@@ -1027,7 +1027,7 @@ class DeepIntents(context: Context) {
         return try {
             audio.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
             ActionResult(true, "Media volume set to $safePercent%.")
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             ActionResult(false, "Volume could not be changed: ${e.message ?: "system denied it"}")
         }
     }
@@ -1053,7 +1053,7 @@ class DeepIntents(context: Context) {
             ?: return ActionResult(false, "No camera is available for the torch.")
             cameraManager.setTorchMode(backCameraId, on)
             ActionResult(true, "Torch turned ${if (on) "on" else "off"}.")
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             ActionResult(false, "Torch could not be changed: ${e.message ?: "camera busy or denied"}")
         }
     }
@@ -1081,7 +1081,7 @@ class DeepIntents(context: Context) {
             val value = (255 * safePercent / 100.0).toInt().coerceIn(0, 255)
             Settings.System.putInt(resolver, Settings.System.SCREEN_BRIGHTNESS, value)
             ActionResult(true, "Brightness set to $safePercent%.")
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             ActionResult(false, "Brightness could not be changed: ${e.message ?: "system denied it"}")
         }
     }
@@ -1118,7 +1118,7 @@ class DeepIntents(context: Context) {
             audio.dispatchMediaKeyEvent(up)
             AppLog.i("Hands", "media key dispatched: $action")
             ActionResult(true, "Media ${action.replace('_', ' ')} sent.")
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             ActionResult(false, "Media key could not be sent: ${e.message ?: "system denied it"}")
         }
     }
@@ -1188,7 +1188,7 @@ class DeepIntents(context: Context) {
                 true,
                 if (on) "Silent mode on." else "Silent mode off — ringer back to normal."
             )
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             ActionResult(false, "Silent mode could not be changed: ${e.message ?: "system denied it"}")
         }
     }
@@ -1201,7 +1201,7 @@ class DeepIntents(context: Context) {
             128
         )
         (value * 100 / 255).coerceIn(0, 100)
-    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
         0
     }
 
@@ -1959,6 +1959,8 @@ class DeepIntents(context: Context) {
         if (latest == null) {
             val encoded = try {
                 service?.captureScreenshotBase64()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 null
             } ?: return ActionResult(
@@ -2008,20 +2010,20 @@ class DeepIntents(context: Context) {
     private fun launch(intent: Intent): Boolean = try {
         appContext.startActivity(intent)
         true
-    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
         false
     }
 
     private fun canResolve(intent: Intent): Boolean = try {
         appContext.packageManager.resolveActivity(intent, 0) != null
-    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
         false
     }
 
     private fun isPackageInstalled(packageName: String): Boolean = try {
         appContext.packageManager.getPackageInfo(packageName, 0)
         true
-    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
         false
     }
 
