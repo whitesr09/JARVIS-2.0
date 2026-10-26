@@ -556,7 +556,10 @@ class ToolExecutor(
             )
             ToolResult(true, "Screenshot taken via $source and saved as ${file.name}.")
         } catch (e: Exception) {
-            ToolResult(false, "The screenshot was captured but could not be saved: ${e.message ?: "storage error"}")
+            ToolResult(
+                false,
+                "The screenshot was captured but could not be saved (${e.javaClass.simpleName})."
+            )
         }
     }
 
@@ -803,11 +806,12 @@ class ToolExecutor(
         }
         val result = HandsActions.insertCodeIntoFocused(code)
         val lineCount = code.trimEnd('\n').lines().size
+        // Never persist actual source snippets in diagnostics; the
+        // code may contain credentials, internal URLs, or private data.
         com.nshd.jarvis2.core.AppLog.i(
             "Tools",
             "insert_code: $lineCount lines / ${code.length} chars, " +
-                "autoOpened=$autoOpened, success=${result.success}, " +
-                "preview='${code.replace('\n', ' ').take(40)}'"
+                "autoOpened=$autoOpened, success=${result.success}"
         )
         if (!result.success) return ToolResult(false, result.message)
         val note = if (autoOpened) " (QuickEdit was opened automatically.)" else ""
@@ -922,17 +926,10 @@ class ToolExecutor(
                     // exact foreground package immediately before the send tap.
                     approved
                 }
-                if (result.success) {
-                    com.nshd.jarvis2.core.AppLog.i(
-                        "Send", "WhatsApp action returned success; see task result for delivery state"
-                    )
-                    ToolResult(true, "WhatsApp message to $name: ${result.message}")
-                } else {
-                    com.nshd.jarvis2.core.AppLog.w(
-                        "Send", "WhatsApp send did not complete after approval; details returned to the task"
-                    )
-                    ToolResult(false, result.message)
-                }
+                // Preserve staged/unverified/unknown action outcomes from
+                // DeepIntents; converting them to a plain Boolean result would
+                // let the caller misunderstand delivery or retry the send.
+                result.toToolResult()
             }
             is ContactResolution.Ambiguous -> ToolResult(
                 false,
