@@ -343,8 +343,7 @@ class ToolExecutor(
         if (image == null) {
             com.nshd.jarvis2.core.AppLog.w(
                 "Hands",
-                "vision-fallback wanted for \"$description\" but no " +
-                    "screenshot source is available — degrading to normal targeting"
+                "vision-fallback wanted but no screenshot source is available — degrading to normal targeting"
             )
             return null
         }
@@ -353,7 +352,7 @@ class ToolExecutor(
         com.nshd.jarvis2.core.AppLog.i(
             "Hands",
             "vision-fallback used (assist $visionAssistsUsed/$MAX_VISION_ASSISTS) " +
-                "for \"$description\""
+                "for grounded target selection"
         )
         return when (val grounded = vision.ground(description, image)) {
             is GroundingResult.Failed -> ToolResult(
@@ -852,7 +851,7 @@ class ToolExecutor(
         // so a "not sending" report can be traced to the exact stage:
         // routed → resolved → opened → typed → verified → asked → tapped → verified.
         com.nshd.jarvis2.core.AppLog.i(
-            "Send", "routed: whatsapp_message to '$contact' (${message.length} chars)"
+            "Send", "routed: whatsapp_message (${message.length} chars)"
         )
         // F7 plan: the panel walks these steps; "Confirm & send"
         // (step 3) is the RUNNING step while the just-in-time send
@@ -876,7 +875,7 @@ class ToolExecutor(
             is ContactResolution.Found -> {
                 val name = resolution.contact.displayName
                 com.nshd.jarvis2.core.AppLog.i(
-                    "Send", "contact resolved: '$contact' → $name (${resolution.contact.phone})"
+                    "Send", "contact resolved for WhatsApp send (unique match)"
                 )
                 // v2.0.2: NO upfront gate — the old
                 // whatsapp_message-always-ConfirmGate special case is
@@ -1146,7 +1145,7 @@ class ToolExecutor(
         val group = args.requiredString("group") ?: return missing("group")
         val message = args.requiredString("message") ?: return missing("message")
         com.nshd.jarvis2.core.AppLog.i(
-            "Send", "routed: whatsapp_group_message to group '$group'"
+            "Send", "routed: whatsapp_group_message"
         )
         if (SendAsk.isPending) {
             return ToolResult(
@@ -1331,7 +1330,7 @@ class ToolExecutor(
             }
             if (found) {
                 com.nshd.jarvis2.core.AppLog.d(
-                    "Tools", "wait_for_text: '$text' appeared after $polls poll(s)"
+                    "Tools", "wait_for_text target matched after $polls poll(s) (${text.length} chars)"
                 )
                 return ToolResult(true, "\"$text\" is now on screen.")
             }
@@ -1367,7 +1366,7 @@ class ToolExecutor(
                 )
             manager.enqueue(request)
             com.nshd.jarvis2.core.AppLog.i(
-                "Tools", "download_url: enqueued $fileName"
+                "Tools", "download_url: request enqueued"
             )
             ToolResult(
                 true,
