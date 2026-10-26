@@ -1159,10 +1159,9 @@ class ToolExecutor(
         // send tap (the per-group confirm, same substance, new timing).
         return intents.whatsappGroupMessage(group, message) {
             val approved = SendAsk.ask("the group \"$group\"", message)
-            if (approved) {
-                HandsActions.grantSendPermit("com.whatsapp")
-                HandsActions.grantSendPermit("com.whatsapp.w4b")
-            }
+            // whatsappGroupMessage opens the regular WhatsApp package only.
+            // Never pre-authorize a second package that is not the composer.
+            if (approved) HandsActions.grantSendPermit("com.whatsapp")
             approved
         }.toToolResult()
     }
