@@ -34,11 +34,14 @@ internal object WhatsAppRecipientGuard {
         val nameKey = normalizedChatKey(approvedName)
         if (titleKey.isNotBlank() && titleKey == nameKey) return true
         val visibleDigits = ContactsResolver.normalizePhone(visibleTitle)
-        return visibleDigits.length >= 7 &&
-            approvedDigits.length >= 7 &&
+        // Seven trailing digits are not enough to distinguish nearby contacts.
+        // Accept either a full international match or a local-number display
+        // that matches the approved number's final ten digits.
+        return visibleDigits.length >= 10 &&
+            approvedDigits.length >= 10 &&
             (visibleDigits == approvedDigits ||
-                visibleDigits.endsWith(approvedDigits.takeLast(7)) ||
-                approvedDigits.endsWith(visibleDigits.takeLast(7)))
+                visibleDigits.endsWith(approvedDigits.takeLast(10)) ||
+                approvedDigits.endsWith(visibleDigits.takeLast(10)))
     }
 }
 
