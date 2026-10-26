@@ -19,8 +19,10 @@ import org.json.JSONObject
  *  - A key that already SUCCEEDED is never executed again this turn:
  *    [gate] returns the cached result prefixed with
  *    "Already done this turn — do not repeat."
- *  - A FAILED key may retry, up to [MAX_ATTEMPTS] total attempts per
- *    turn; past that, [gate] returns the last failure (same prefix).
+ *  - A normal FAILED key may retry, up to [MAX_ATTEMPTS] total attempts
+ *    per turn; past that, [gate] returns the last failure.
+ *  - STAGED_FOR_USER, SUBMITTED_UNVERIFIED, and OUTCOME_UNKNOWN are
+ *    terminal for this turn: a repeat could duplicate an external action.
  *
  * This supersedes the old "no replay on provider failover" concern for
  * same-turn duplicates: even if a model re-issues a call, the phone
