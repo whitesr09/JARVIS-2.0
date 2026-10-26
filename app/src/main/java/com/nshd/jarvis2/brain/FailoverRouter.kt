@@ -418,11 +418,10 @@ class FailoverRouter(
             } catch (e: Exception) {
                 val detail = e.message ?: "unexpected error"
                 if (executedAnyTool) {
-                    // Raw detail → AppLog only. F5.1 (E3): the user
-                    // text is human — it says what DID happen (the
-                    // last tool result), keeps the "I couldn't"
-                    // failure prefix the UI keys on, and never names
-                    // internal mechanics (providers / replay).
+                    // Keep raw detail only in memory for friendly error
+                    // classification; never persist provider/network strings.
+                    // The user text says what DID happen and warns against
+                    // repeating an action whose final state is uncertain.
                     AppLog.e(
                         "Agent",
                         "agent loop stopped mid-task on ${config.id} after tool " +
@@ -450,11 +449,10 @@ class FailoverRouter(
         )
         // F5.1 (E3): same human tone — no "provider"/"agent loop"
         // machinery words in the user-facing text.
-        return "I couldn't reach the model — the connection or the API " +
-            "key needs a look. (" +
+        return "I couldn't reach the model — the connection or API key may need a look. (" +
             failures.joinToString("  •  ") { (label, raw) ->
                 "$label: ${FriendlyErrors.shortReason(raw)}"
-            } + ") The full error is in Settings → App Logs."
+            } + ") For privacy, detailed provider errors are not written to persistent logs."
     }
 
     /**
