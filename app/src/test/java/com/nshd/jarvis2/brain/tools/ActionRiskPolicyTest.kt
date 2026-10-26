@@ -23,6 +23,7 @@ class ActionRiskPolicyTest {
     @Test
     fun unknownToolsFailClosedForOutcomeHandling() {
         assertEquals(ActionRisk.UNKNOWN, ActionRiskPolicy.classify("future_unclassified_tool"))
+        assertTrue(ActionRiskPolicy.mayHaveSideEffect("future_unclassified_tool"))
         assertTrue(ActionRiskPolicy.shouldTreatFailureAsOutcomeUnknown("future_unclassified_tool"))
     }
 
