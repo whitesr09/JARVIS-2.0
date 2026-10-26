@@ -706,7 +706,10 @@ fun HandsFreeScreen(
             onDismissRequest = { selfTestResults = null },
             title = {
                 Text(
-                    "Self-test — ${results.count { it.passed }}/${results.size} passed"
+                    "Self-test — ${results.count { it.passed }}/${results.size} passed" +
+                        results.count { it.notTested }.let { count ->
+                            if (count > 0) " • $count not tested" else ""
+                        }
                 )
             },
             text = {
