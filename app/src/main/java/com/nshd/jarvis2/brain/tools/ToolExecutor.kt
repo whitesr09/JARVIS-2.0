@@ -1042,9 +1042,7 @@ class ToolExecutor(
         // v2.0.2: fill the open chat FIRST, then the just-in-time ask
         // inside typeAndSendInOpenChat, then the send tap.
         return intents.typeAndSendInOpenChat(pkg, message) {
-            val approved = SendAsk.ask(title, message)
-            if (approved) HandsActions.grantSendPermit(pkg)
-            approved
+            SendAsk.ask(title, message)
         }.toToolResult()
     }
 
@@ -1062,9 +1060,7 @@ class ToolExecutor(
             )
         }
         return intents.instagramDm(contact, message) {
-            val approved = SendAsk.ask(contact, message)
-            if (approved) HandsActions.grantSendPermit("com.instagram.android")
-            approved
+            SendAsk.ask(contact, message)
         }.toToolResult()
     }
 
@@ -1081,9 +1077,7 @@ class ToolExecutor(
             )
         }
         return intents.telegramMessage(contact, message) {
-            val approved = SendAsk.ask(contact, message)
-            if (approved) HandsActions.grantSendPermit("org.telegram.messenger")
-            approved
+            SendAsk.ask(contact, message)
         }.toToolResult()
     }
 
@@ -1176,11 +1170,7 @@ class ToolExecutor(
         // after the group chat opens + the text is typed, before the
         // send tap (the per-group confirm, same substance, new timing).
         return intents.whatsappGroupMessage(group, message) {
-            val approved = SendAsk.ask("the group \"$group\"", message)
-            // whatsappGroupMessage opens the regular WhatsApp package only.
-            // Never pre-authorize a second package that is not the composer.
-            if (approved) HandsActions.grantSendPermit("com.whatsapp")
-            approved
+            SendAsk.ask("the group \"$group\"", message)
         }.toToolResult()
     }
 
