@@ -680,7 +680,9 @@ object VoiceSessionManager {
                 callWatch = listener
             }
             AppLog.i("Voice", "call auto-resume watch registered")
-        }.onFailure { AppLog.w("Voice", "call watch registration failed: ${it.message}") }
+        }.onFailure {
+            AppLog.w("Voice", "call watch registration failed (${it.javaClass.simpleName})")
+        }
     }
 
     /** Unregister the call watch and clear any pending resume. Idempotent. */
@@ -1117,10 +1119,10 @@ object VoiceSessionManager {
             scope.launch { handleLiveFailure(message) }
             return
         }
-        CrashLogger.stage(TAG, "live failure: $message")
-        // F5: the FULL reason goes to the log; the caption carries the
-        // short FriendlyErrors cause so the user can see WHY Live died.
-        AppLog.e("Live", "native live failed: $message")
+        CrashLogger.stage(TAG, "Live failure (${FriendlyErrors.shortReason(message)})")
+        // The detailed reason stays in the in-memory UI state for the
+        // sanitized Details view; persistent logs store only its category.
+        AppLog.e("Live", "native Live failed (${FriendlyErrors.shortReason(message)})")
         lastLiveFailureReason = message
         // F8 (#13): network-class failures feed the weak-network
         // guard (reset by the next successful setup).
@@ -1465,7 +1467,7 @@ object VoiceSessionManager {
 
         override fun onError(message: String) {
             if (!active) return
-            AppLog.w("Live", "session error notice: $message")
+            AppLog.w("Live", "session error notice (${FriendlyErrors.shortReason(message)})")
             _uiState.value = _uiState.value.copy(sttHint = message)
         }
 
@@ -1595,7 +1597,7 @@ object VoiceSessionManager {
             .ifBlank { "Voice task" }
         TaskQueue.beginTask(goal)
         TaskState.begin(goal = goal, job = job, maxSteps = 10)
-        AppLog.i("Queue", "Live tool turn opened task window: '$goal'")
+        AppLog.i("Queue", "Live tool turn opened task window")
     }
 
     /** F6: close the Live task window (turn end / session teardown). Idempotent. */
