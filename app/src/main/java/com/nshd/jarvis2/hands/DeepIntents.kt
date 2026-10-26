@@ -1185,7 +1185,7 @@ class DeepIntents(context: Context) {
         if (!launch(intent)) {
             return ActionResult(false, "WhatsApp could not be opened for the photo share.")
         }
-        AppLog.i("Send", "stage: photo share opened for $digits")
+        AppLog.i("Send", "stage: WhatsApp photo share opened")
         HandsActions.waitForPackage(pkg, 3_000)
         HandsActions.waitForSettle(1_500)
         TaskState.throwIfStopRequested()
@@ -1215,7 +1215,7 @@ class DeepIntents(context: Context) {
                 false, "The photo share opened, but Send could not be pressed: ${click.message}"
             )
         }
-        AppLog.i("Send", "stage: photo send tapped for $digits")
+        AppLog.i("Send", "stage: WhatsApp photo send control tapped")
         return ActionResult(true, "Photo sent to the WhatsApp chat.")
     }
 
