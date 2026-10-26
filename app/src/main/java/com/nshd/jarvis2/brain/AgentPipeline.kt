@@ -742,16 +742,15 @@ object AgentPipeline {
                     "Failed: " +
                         com.nshd.jarvis2.ui.FriendlyErrors.shortReason(e.message)
                 }
-                val ok = !isFailureResult(result)
-                if (ok) done++ else failed++
-                lines += (if (ok) "✅ " else "❌ ") + stepText + " — " +
-                    result.lineSequence().firstOrNull().orEmpty().take(90)
                 val requiresOutcomeReview =
                     result.startsWith("STAGED_FOR_USER") ||
                         result.startsWith("SUBMITTED_UNVERIFIED") ||
                         result.startsWith("OUTCOME_UNKNOWN")
+                val ok = !requiresOutcomeReview && !isFailureResult(result)
+                if (ok) done++ else failed++
+                lines += (if (ok) "✅ " else "❌ ") + stepText + " — " +
+                    result.lineSequence().firstOrNull().orEmpty().take(90)
                 if (requiresOutcomeReview) {
-                    failed++
                     lines += "Stopped remaining routine steps: inspect the external app before retrying this action."
                     AppLog.w(
                         "Agent",
