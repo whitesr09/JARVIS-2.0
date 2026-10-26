@@ -746,6 +746,19 @@ object AgentPipeline {
                 if (ok) done++ else failed++
                 lines += (if (ok) "✅ " else "❌ ") + stepText + " — " +
                     result.lineSequence().firstOrNull().orEmpty().take(90)
+                val requiresOutcomeReview =
+                    result.startsWith("STAGED_FOR_USER") ||
+                        result.startsWith("SUBMITTED_UNVERIFIED") ||
+                        result.startsWith("OUTCOME_UNKNOWN")
+                if (requiresOutcomeReview) {
+                    failed++
+                    lines += "Stopped remaining routine steps: inspect the external app before retrying this action."
+                    AppLog.w(
+                        "Agent",
+                        "routine stopped after uncertain action outcome at step " + (index + 1)
+                    )
+                    break
+                }
             }
         } finally {
             if (registerTask) TaskQueue.finishRunning(failed == 0)
