@@ -5,6 +5,7 @@ import android.app.DownloadManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.telecom.TelecomManager
 import androidx.core.content.ContextCompat
@@ -1404,6 +1405,12 @@ class ToolExecutor(
                 telecom.acceptRingingCall()
                 ToolResult(true, "Call answered.")
             } else {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+                    return ToolResult(
+                        false,
+                        "Rejecting a call by voice requires Android 9 or newer on this device. Use the phone screen instead."
+                    )
+                }
                 val ended = telecom.endCall()
                 if (ended) {
                     ToolResult(true, "Call rejected.")
