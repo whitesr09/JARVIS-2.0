@@ -300,6 +300,15 @@ fun SettingsScreen(
     }
 
     fun recordBioSample(index: Int) {
+        // Permissions can be revoked while Settings remains open. Re-request
+        // before entering the recorder instead of treating this as a bad WAV
+        // and clearing enrollment state.
+        if (!hasMicPermission(context)) {
+            bioMicGranted = false
+            bioError = "Microphone permission is required to record a sample."
+            bioMicLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
         settingsScope.launch {
             bioRecordingIndex = index
             bioError = null
