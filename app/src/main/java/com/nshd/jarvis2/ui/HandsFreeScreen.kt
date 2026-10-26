@@ -464,17 +464,14 @@ fun HandsFreeScreen(
                 caption = if (batteryFree) {
                     "Done — Jarvis already runs unrestricted. ✓"
                 } else {
-                    "Choose \"Unrestricted\" on the page that opens so the " +
-                        "system doesn't freeze Jarvis to save battery."
+                    "Find Jarvis in battery settings and allow unrestricted/background " +
+                        "activity if your device offers that option."
                 },
                 buttonLabel = "Open Battery settings"
             ) {
                 runCatching {
                     context.startActivity(
-                        Intent(
-                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                            Uri.parse("package:${context.packageName}")
-                        )
+                        Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
                     )
                 }
             }
