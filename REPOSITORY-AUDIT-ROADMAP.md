@@ -2,7 +2,7 @@
 
 Audit date: 2026-10-26  
 Working branch: improvement/phase-1-release-hardening  
-Status: Broad audit baseline recorded; latest secure-storage, self-test, and Phase 5 workflow commits still require CI. This document is not a release sign-off.
+Status: The PR and trusted push workflows passed for code commit `d3ac8160a9d092a07e2f5df173d551af516c2ba1`. Unit tests and debug APK assembly passed; the signed release APK passed signature/certificate verification and SHA-256 checksum generation, and release/debug artifacts were uploaded. Legacy storage migration and device smoke testing remain open. This document is not a release sign-off.
 
 ## Scope and method
 
@@ -10,14 +10,20 @@ Both uploaded archives were inventoried and compared. The main snapshot containe
 
 The review covered the source/resource/workflow/build/documentation inventory; repository-wide scans for TODO/error handling, non-null assertions, direct logging of personal values, and high-risk Android APIs; and focused inspection of provider storage, self-tests, update checks, backup/import, diagnostics, model/tool validation, failover/cancellation, voice lifecycle, confirmation gates, accessibility actions, and send flows. Device-specific microphone, Bluetooth, background-service, accessibility-tree, and message-delivery behavior remains unverified until tested on devices.
 
+### Quantified static-scan baseline
+
+The uploaded archive comparison found 4 files added and 13 changed in the improvement snapshot, with none removed. Added files were the phased plan and three unit-test files. A lightweight Kotlin scan of the uploaded `main` / improvement snapshots respectively found 157 / 155 `runCatching` calls, 8 / 8 `catch (Throwable)` clauses, 5 / 5 non-null assertion (`!!`) tokens, and one `Thread.sleep` occurrence in `ChimePlayer.kt`. A broad log-call keyword scan flagged 28 / 23 candidate lines containing phone/contact/recipient/message/clipboard/transcript/screenshot wording. This is intentionally over-inclusive and is a review queue, not proof that every match leaks data. Recent live-branch commits redact several high-confidence contact/photo-send values; the full log-call audit remains open.
+
+The `catch (Throwable)` occurrences in `GeminiLiveClient.kt` wrap callback paths in the inspected snapshot and should be reviewed individually to ensure cancellation and fatal VM/linkage errors are not swallowed. The single `Thread.sleep` in `ChimePlayer.kt` needs a thread-ownership/blocking review rather than a mechanical replacement.
+
 ## Confirmed findings
 
 Severity: P0 = security/release blocker; P1 = important privacy/reliability risk; P2 = maintainability/quality issue. These findings are grounded in inspected code; device-specific reproduction may still be needed.
 
 | ID | Severity | Finding | Status |
 |---|---|---|---|
-| A-01 | P0 | ProviderStore previously fell back to plaintext SharedPreferences when encrypted preferences failed, risking API-key exposure at rest. | Fix committed: fail closed, attempt migration into encrypted storage, and remove the legacy plaintext file only after a successful encrypted commit. CI and migration failure paths still need verification. |
-| A-02 | P1 | The Voice replies self-test hard-coded PASS without attempting a real audio exchange. | Fix committed: reports NOT TESTED and adds an encrypted-provider-storage check. CI still pending. |
+| A-01 | P0 | ProviderStore previously fell back to plaintext SharedPreferences when encrypted preferences failed, risking API-key exposure at rest. | Fix committed: fail closed, attempt migration into encrypted storage, and remove the legacy plaintext file only after a successful encrypted commit. Current PR and trusted push CI passed; legacy migration failure paths still need targeted device/emulator validation. |
+| A-02 | P1 | The Voice replies self-test hard-coded PASS without attempting a real audio exchange. | Fix committed: reports NOT TESTED and adds an encrypted-provider-storage check. CI passed on the current code commit; live audio remains explicitly untested by this self-test. |
 | A-03 | P1 | DiagnosticsPack exports crash/log history after credential-pattern sanitization. Sanitizing API-key patterns does not remove all personal information. Recent commits redact corrected names and recipient digits in the identified contact-correction/photo-sharing logs, but a full log-call audit remains necessary. | Open: redact personal values at call sites; review/preview exported diagnostics before sharing. |
 | A-04 | P1 | BackupManager import checks a format marker but does not fully validate formatVersion, a settings-key allowlist, payload size, and value constraints. | Open: strict version/schema/key/type/size validation and transactional restore tests. |
 | A-05 | P1 | Some communication paths use a Boolean success result for a staged composer or dispatched tap, which is not the same as verified message delivery. | Open: add explicit VERIFIED / STAGED_FOR_USER / FAILED / OUTCOME_UNKNOWN action outcomes. |
