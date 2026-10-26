@@ -4,6 +4,7 @@ import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
 import com.nshd.jarvis2.hands.ActionOutcome
+import com.nshd.jarvis2.hands.TaskStoppedException
 import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.ui.FriendlyErrors
 import kotlinx.coroutines.CancellationException
@@ -31,6 +32,18 @@ sealed class ChatOutcome {
  * a 5xx or a dead endpoint never ends the conversation — the next provider
  * gets its turn. Pattern carried over from the Gemini-FreeLLM app.
  */
+private val OUTCOME_UNKNOWN_ON_EXCEPTION_TOOLS = setOf(
+    "open_app", "click_element", "click_text", "tap_percent", "long_press",
+    "double_tap", "drag", "pinch_zoom", "set_slider", "press_key", "type_text",
+    "edit_text", "insert_code", "undo_action", "clipboard_set", "paste_clipboard",
+    "copy_selection", "fill_form", "whatsapp_message", "whatsapp_group_message",
+    "whatsapp_photo", "whatsapp_reply_current", "instagram_message",
+    "telegram_message", "sms_message", "gmail_send", "call_contact",
+    "answer_call", "reject_call", "set_alarm", "set_timer", "set_volume",
+    "set_brightness", "toggle_torch", "set_silent", "media_control",
+    "download_url", "calendar_event", "share_screenshot"
+)
+
 class FailoverRouter(
     private val configsInOrder: List<ProviderConfig>,
     private val toolExecutor: ToolExecutor? = null,
@@ -259,11 +272,28 @@ class FailoverRouter(
                             // Do not report a cancelled task as a completed tool
                             // result or let the model continue with another action.
                             throw e
+                        } catch (e: TaskStoppedException) {
+                            // User stop is control flow, not a retryable tool error.
+                            throw e
                         } catch (e: Exception) {
-                            ToolResult(
-                                false,
-                                "Tool ${call.name} failed safely: ${e.message ?: "unexpected error"}"
-                            )
+                            // A failure outside ToolExecutor may still happen after
+                            // a device action took effect. Mark high-risk/mutating
+                            // actions uncertain so the model cannot submit them again.
+                            val uncertain = call.name in OUTCOME_UNKNOWN_ON_EXCEPTION_TOOLS
+                            if (uncertain) {
+                                ToolResult(
+                                    success = false,
+                                    message = "OUTCOME_UNKNOWN — Tool ${call.name} stopped unexpectedly " +
+                                        "(${e.javaClass.simpleName}). Check the app/device before retrying.",
+                                    outcome = ActionOutcome.OUTCOME_UNKNOWN
+                                )
+                            } else {
+                                ToolResult(
+                                    success = false,
+                                    message = "Tool ${call.name} failed safely (${e.javaClass.simpleName}).",
+                                    outcome = ActionOutcome.FAILED
+                                )
+                            }
                         }
                         val toolMs = System.currentTimeMillis() - toolStartedAt
                         actionMs += toolMs
