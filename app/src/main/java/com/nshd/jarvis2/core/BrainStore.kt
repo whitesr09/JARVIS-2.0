@@ -503,35 +503,48 @@ object BrainStore {
  */
 object MacroRecorder {
 
-    @Volatile
     private var armed = false
-
+    private var failed = false
     private val steps = mutableListOf<BrainStore.RecordedStep>()
 
     fun begin() {
         synchronized(steps) {
             steps.clear()
+            failed = false
             armed = true
         }
     }
 
     fun record(tool: String, argsJson: String) {
-        if (!armed) return
         synchronized(steps) {
+            if (!armed || failed) return
             steps += BrainStore.RecordedStep(tool, argsJson)
+        }
+    }
+
+    /** Any failed/uncertain step invalidates the entire candidate sequence. */
+    fun markFailure() {
+        synchronized(steps) {
+            if (armed) failed = true
         }
     }
 
     fun snapshot(): List<BrainStore.RecordedStep> {
         synchronized(steps) {
             armed = false
-            return steps.toList()
+            val result = if (failed) emptyList() else steps.toList()
+            // Tool arguments may contain user text. Keep only the copy handed
+            // to the explicit in-memory candidate, not a second hidden copy.
+            steps.clear()
+            failed = false
+            return result
         }
     }
 
     fun disarm() {
         synchronized(steps) {
             armed = false
+            failed = false
             steps.clear()
         }
     }

@@ -198,6 +198,7 @@ object AgentPipeline {
             )
             result
         } catch (e: CancellationException) {
+            MacroRecorder.disarm()
             // Abort path (overlay stop / caller cancel): the current
             // sub-task dies with this coroutine and the queue is aborted
             // so nothing queued can run afterwards.
@@ -205,6 +206,7 @@ object AgentPipeline {
             TaskState.finish(false, "Aborted")
             throw e
         } catch (e: TaskStoppedException) {
+            MacroRecorder.disarm()
             // #61: a user stop is a CLEAN cancellation — caught BEFORE
             // the generic handler so it can never be treated as a
             // failure, retried, or failed over to another provider,
@@ -213,6 +215,7 @@ object AgentPipeline {
             TaskState.finish(false, "Stopped")
             "Stopped."
         } catch (e: Exception) {
+            MacroRecorder.disarm()
             TaskQueue.finishRunning(false)
             TaskState.finish(false, e.message ?: "Failed")
             throw e
@@ -234,6 +237,13 @@ object AgentPipeline {
     ): String = withContext(Dispatchers.IO) {
         val clean = text.trim()
         if (clean.isBlank()) return@withContext "I didn't catch that — please try again."
+        // Clear an old in-memory candidate on every new user goal except
+        // the explicit command that saves the previous completed candidate.
+        // This prevents "save that as a command" after an unrelated turn from
+        // accidentally saving an older task sequence.
+        if (depth == 0 && macroSaveMatch(clean) == null) {
+            BrainStore.clearCandidate(context)
+        }
         // Scrub old builds' serialized macro candidates and clear-text goal
         // count keys before handling this turn. New candidates stay in memory
         // until an explicit save-as-command request.
@@ -461,6 +471,16 @@ object AgentPipeline {
      * route matched, or null to continue down the normal pipeline
      * (quick commands → classifier → editor route → splitter → loop).
      */
+    /** Recognize only the explicit command that saves the prior candidate. */
+    private fun macroSaveMatch(raw: String): MatchResult? {
+        val normalized = normalizeCommandText(raw)
+        return Regex(
+            "(?i)^save (?:that|this) as a (?:quick )?command(?: called (.+))?$"
+        ).matchEntire(normalized) ?: Regex(
+            "(?i)^make (?:that|this) a (?:quick )?command(?: called (.+))?$"
+        ).matchEntire(normalized)
+    }
+
     private suspend fun brainRoutes(
         context: Context,
         clean: String,
@@ -475,11 +495,7 @@ object AgentPipeline {
         val normalized = normalizeCommandText(clean)
 
         // ── #16: "save that as a command [called X]" ────────────────
-        val saveMatch = Regex(
-            "(?i)^save (?:that|this) as a (?:quick )?command(?: called (.+))?$"
-        ).matchEntire(normalized) ?: Regex(
-            "(?i)^make (?:that|this) a (?:quick )?command(?: called (.+))?$"
-        ).matchEntire(normalized)
+        val saveMatch = macroSaveMatch(clean)
         if (saveMatch != null) {
             AppLog.i("Agent", "route=macro-save")
             val candidate = BrainStore.lastCandidate(context)

@@ -79,6 +79,9 @@ class ToolExecutor(
         // required fields, JSON types, enums and payload bounds before task
         // bookkeeping, dedupe-ledger access, or any phone-side effect.
         ToolRegistry.validateArguments(name, args)?.let { validationError ->
+            // A rejected step means this turn did not produce a complete,
+            // replayable macro candidate, even if earlier steps succeeded.
+            MacroRecorder.markFailure()
             com.nshd.jarvis2.core.AppLog.w(
                 "Agent", "rejected invalid tool call '$name': $validationError"
             )
@@ -102,6 +105,7 @@ class ToolExecutor(
             name in OBSERVATION_TOOLS || name in REPEATABLE_TOOLS
         }
         activeLedger?.gate(name, args)?.let { cached ->
+            if (!cached.success) MacroRecorder.markFailure()
             // F5: ledger cache hits are exactly the "why didn't it run
             // again?" question the log exists to answer.
             com.nshd.jarvis2.core.AppLog.d(
@@ -175,6 +179,8 @@ class ToolExecutor(
         // not arm the recorder then, so macros never record themselves.
         if (raw.success) {
             MacroRecorder.record(name, args.toString())
+        } else {
+            MacroRecorder.markFailure()
         }
         // v1.9.0 (#41): record the honest inverses of reversible
         // successes. Sends/plays are never recorded (they cannot be
