@@ -46,6 +46,23 @@ object MemoryCategories {
 class MemoryDb(context: Context) :
     SQLiteOpenHelper(context.applicationContext, DB_NAME, null, DB_VERSION) {
 
+    /**
+     * Run a group of DAO operations in one SQLite transaction. If [block]
+     * throws, the transaction is rolled back; callers must not swallow the
+     * exception before this method reaches its finally block.
+     */
+    fun <T> withTransaction(block: () -> T): T {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val result = block()
+            db.setTransactionSuccessful()
+            return result
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE facts (" +

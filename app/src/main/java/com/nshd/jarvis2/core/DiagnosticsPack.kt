@@ -13,16 +13,99 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * F8 (#97): one-tap diagnostics pack — a single .txt a user can share
- * when something breaks: app + device identity, the last crash report
- * (when one exists), the last 500 AppLog lines, provider ids + model
- * names + probe latencies, and a settings summary.
+ * F8 (#97): one-tap, privacy-reduced diagnostics pack. It contains
+ * app/device metadata, a limited settings/provider summary, crash metadata
+ * (not exception messages or stacks), and selected low-risk log events.
  *
- * NO SECRETS, by construction: API keys are never read here (only
- * provider ids, model names and probe metadata), and the whole text
- * still passes through [AppLog.sanitize] before it leaves.
+ * API keys are never read here. High-risk action/provider/clipboard/memory
+ * logs and stack traces are excluded by default; common email/phone patterns
+ * are masked and [AppLog.sanitize] is applied to the final text. This is
+ * risk reduction, not a guarantee that every possible personal value is
+ * detected, so the UI asks users to review the pack before sharing.
  */
 object DiagnosticsPack {
+
+    private val SAFE_LOG_TAGS = setOf("App", "Voice", "Live", "Wake", "Overlay")
+    private val EMAIL_REGEX = Regex("(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b")
+    private val PHONE_REGEX = Regex("(?<!\\w)(?:\\+\\d{1,3}[ .-]?)?\\d{10,13}(?!\\w)")
+
+    /** Normalize only known low-risk event messages; discard raw errors and arbitrary text. */
+    internal fun safeDiagnosticEvent(tag: String, message: String): String? = when (tag) {
+        "App" -> when {
+            message.startsWith("Cold start setup took ") -> "Cold-start setup completed"
+            else -> null
+        }
+        "Voice" -> when {
+            message.startsWith("session start engine=") -> "Voice session started"
+            message.startsWith("engine decision:") -> "Voice engine selection started"
+            message.startsWith("stop reading requested") -> "Stop-reading requested"
+            message.startsWith("call auto-resume unavailable") -> "Phone-call monitoring unavailable"
+            message == "call auto-resume watch registered" -> "Phone-call monitoring registered"
+            message.startsWith("phone call active") -> "Voice paused for phone call"
+            message.startsWith("call ended — resuming session") -> "Voice resumed after phone call"
+            else -> null
+        }
+        "Live" -> when {
+            message.startsWith("setup timeout after ") -> "Live setup timed out"
+            message.startsWith("WS open — setup sent") -> "Live WebSocket opened"
+            message.startsWith("first audio frame") -> "Live audio frame received"
+            message.startsWith("tool call: ") -> {
+                val tool = message.substringAfter("tool call: ").trim()
+                if (tool.matches(Regex("[A-Za-z0-9_]{1,64}"))) "Live tool call: $tool"
+                else "Live tool call observed"
+            }
+            message.startsWith("model fallback chain exhausted") -> "Live model fallback exhausted"
+            message.startsWith("setup took ") -> "Live setup completed"
+            else -> null
+        }
+        "Wake" -> when {
+            message == "wake phrase detected" -> "Wake phrase detected"
+            message.startsWith("wake phrase below sensitivity threshold") -> "Wake phrase below sensitivity threshold"
+            message.startsWith("paused — battery at ") -> "Wake-word paused for low battery"
+            message.startsWith("battery pause lifted ") -> "Wake-word resumed after battery pause"
+            else -> null
+        }
+        "Overlay" -> when {
+            message.startsWith("task panel shown ") -> "Task panel shown"
+            message == "tap — toggle voice session" -> "Voice toggle tapped"
+            else -> null
+        }
+        else -> null
+    }
+
+    internal fun redactCommonContactPatterns(text: String): String =
+        PHONE_REGEX.replace(
+            EMAIL_REGEX.replace(text, "[email redacted]"),
+            "[phone redacted]"
+        )
+
+    /** Build only allowlisted and normalized diagnostic events. */
+    internal fun safeLogText(entries: List<AppLog.Entry>): String {
+        val selected = entries.mapNotNull { entry ->
+            if (entry.tag !in SAFE_LOG_TAGS || !entry.stack.isNullOrBlank()) return@mapNotNull null
+            val normalized = safeDiagnosticEvent(entry.tag, entry.message) ?: return@mapNotNull null
+            entry.copy(message = redactCommonContactPatterns(normalized), stack = null)
+        }
+        return AppLog.formatAll(selected)
+    }
+
+    /** Keep crash time/version/type, but never export the exception message or stack by default. */
+    internal fun summarizeCrashReport(report: String): String {
+        if (report.isBlank() || report.contains("No crash report file was found")) return "(none)"
+        val lines = report.lineSequence().takeWhile { it != "---" }.toList()
+        val time = lines.firstOrNull { it.startsWith("Time: ") }?.removePrefix("Time: ")
+        val version = lines.firstOrNull { it.startsWith("App version: ") }?.removePrefix("App version: ")
+        val exception = lines.firstOrNull { it.startsWith("Exception: ") }
+            ?.removePrefix("Exception: ")
+            ?.substringBefore(":")
+            ?.trim()
+        return buildString {
+            appendLine("Crash metadata only; exception message and stack trace omitted.")
+            if (time != null) appendLine("Time: $time")
+            if (version != null) appendLine("App version: $version")
+            if (!exception.isNullOrBlank()) appendLine("Exception type: $exception")
+        }.trim()
+    }
 
     /** Build the pack text. File/metadata reads only — call off Main. */
     fun buildText(context: Context): String {
@@ -42,8 +125,9 @@ object DiagnosticsPack {
             "yyyy-MM-dd HH:mm:ss", Locale.US
         ).format(Date())
         return buildString {
-            appendLine("JARVIS diagnostics pack")
+            appendLine("JARVIS diagnostics pack (redacted)")
             appendLine("Generated: $stamp")
+            appendLine("Privacy: raw action, clipboard, memory, API-response, and crash-stack logs are omitted; common phone/email patterns are masked. Review before sharing.")
             appendLine("App version: $version")
             appendLine(
                 "Device: ${Build.MANUFACTURER} ${Build.MODEL} " +
@@ -56,16 +140,16 @@ object DiagnosticsPack {
             appendLine("== Providers (no keys) ==")
             appendLine(providersSummary(appContext))
             appendLine()
-            appendLine("== Last crash report ==")
+            appendLine("== Last crash metadata ==")
             val crashFile = File(appContext.filesDir, "last_crash.txt")
             if (crashFile.exists()) {
-                appendLine(CrashLogger.readCrashReport(appContext))
+                appendLine(summarizeCrashReport(CrashLogger.readCrashReport(appContext)))
             } else {
                 appendLine("(none)")
             }
             appendLine()
-            appendLine("== App log (last 500 lines) ==")
-            append(AppLog.formatAll(AppLog.entries.value.takeLast(500)))
+            appendLine("== Selected redacted diagnostic events (last 500 entries scanned) ==")
+            append(safeLogText(AppLog.entries.value.takeLast(500)))
         }.let { AppLog.sanitize(it) }
     }
 
@@ -141,11 +225,11 @@ object DiagnosticsPack {
             )
             AppLog.i(
                 "App",
-                "diagnostics pack shared (${text.lines().size} lines, no keys)"
+                "redacted diagnostics pack created (${text.lines().size} lines)"
             )
             true
         }.getOrElse { error ->
-            AppLog.e("App", "diagnostics pack share failed: ${error.message}")
+            AppLog.e("App", "diagnostics pack share failed (${error.javaClass.simpleName})")
             false
         }
     }

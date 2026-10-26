@@ -17,17 +17,19 @@ import com.nshd.jarvis2.voice.UniversalVoice
 import com.nshd.jarvis2.voice.VoskModelManager
 import java.io.File
 
-/** One self-test line: PASS/FAIL + a one-line detail + an optional Fix deep link. */
+/** One self-test line with a real pass, failure, or explicitly untested state. */
 data class SelfTestResult(
     val name: String,
     val passed: Boolean,
     val detail: String,
     val fixLabel: String? = null,
-    val fixIntent: Intent? = null
+    val fixIntent: Intent? = null,
+    /** True when this row cannot be verified by a configuration-only self-test. */
+    val notTested: Boolean = false
 )
 
 /**
- * F8 (#106): the in-app self-test — eight sequential LIVE checks of
+ * F8 (#106): the in-app self-test — nine checks of
  * everything a hands-free session depends on, each with a one-line
  * verdict and a "Fix" deep link where one exists. No network calls:
  * the provider check reads only the cached probe results. Every
@@ -71,16 +73,15 @@ object SelfTest {
             }
         )
 
-        // 3) v2.0.3: Live voice replies speak again (Gemini Live
-        // audio, not a session TTS engine); the only system TTS use
-        // is the manual chat-bubble "Speak" action. No session TTS
-        // engine exists to check (check numbering kept stable for
-        // the diagnostics log).
+        // 3) This offline self-test does not open a Live session or
+        // validate received/played audio. Never report a real voice
+        // round-trip as passing without an actual audio exchange.
         results += SelfTestResult(
             name = "Voice replies",
-            passed = true,
-            detail = "Live audio replies restored in v2.0.3; manual " +
-                "chat Speak is the only system-TTS use"
+            passed = false,
+            notTested = true,
+            detail = "Not verified by this self-test. Start a Live voice session " +
+                "and confirm that an assistant audio response is received and played."
         )
 
         // 4) Accessibility service alive.
@@ -122,8 +123,21 @@ object SelfTest {
             }
         )
 
-        // 6) Provider configured + last probe latency (cached only).
+        // 6) Provider key storage must be encrypted; no plaintext fallback is allowed.
         val store = ProviderStore(appContext)
+        val secureStorageOk = store.secureStorageAvailable && store.migrationWarning == null
+        results += SelfTestResult(
+            name = "Provider key storage",
+            passed = secureStorageOk,
+            detail = when {
+                !store.secureStorageAvailable ->
+                    store.storageError ?: "Encrypted provider storage is unavailable."
+                store.migrationWarning != null -> store.migrationWarning!!
+                else -> "Encrypted provider storage is available."
+            }
+        )
+
+        // 7) Provider configured + last probe latency (cached only).
         val configured = store.orderedConfigs().filter { it.isConfigured }
         val providerResult = if (configured.isEmpty()) {
             SelfTestResult(
@@ -151,7 +165,7 @@ object SelfTest {
         }
         results += providerResult
 
-        // 7) Vosk wake model state (also the offline-commands model).
+        // 8) Vosk wake model state (also the offline-commands model).
         val voskReady = VoskModelManager.status(appContext) ==
             VoskModelManager.ModelStatus.READY
         results += SelfTestResult(
@@ -164,7 +178,7 @@ object SelfTest {
             }
         )
 
-        // 8) Storage writable (logs dir probe).
+        // 9) Storage writable (logs dir probe).
         val storageOk = runCatching {
             val dir = File(appContext.filesDir, "logs").apply { mkdirs() }
             val probe = File(dir, ".selftest-probe")
@@ -184,11 +198,12 @@ object SelfTest {
         )
 
         results.forEach { result ->
-            AppLog.i(
-                "App",
-                "selftest ${result.name}: " +
-                    "${if (result.passed) "PASS" else "FAIL"} — ${result.detail}"
-            )
+            val verdict = when {
+                result.passed -> "PASS"
+                result.notTested -> "NOT TESTED"
+                else -> "FAIL"
+            }
+            AppLog.i("App", "selftest ${result.name}: $verdict — ${result.detail}")
         }
         val passedCount = results.count { it.passed }
         AppLog.i("App", "selftest complete: $passedCount/${results.size} passed")

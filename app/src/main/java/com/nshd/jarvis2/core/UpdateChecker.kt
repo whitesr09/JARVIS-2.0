@@ -1,23 +1,22 @@
 package com.nshd.jarvis2.core
 
 import android.content.Context
+import com.nshd.jarvis2.BuildConfig
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.ResponseBody
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
- * Plan #104: update checker. Jarvis ships through GitHub Actions
- * artifacts (no Play Store, no GitHub Releases), so the checker asks
- * the repo's Actions API for the newest SUCCESSFUL "Build JARVIS-2.0
- * APK" run on main and compares its creation time with this build's:
- * if a green build finished after the installed version was released
- * (approximated by the app's lastUpdateTime), an update is available
- * and the Updates tab shows a badge. The link target is the Actions
- * page itself, where the APK artifact is downloaded.
+ * Checks whether main has a newer successful APK build than this installed
+ * source revision. A build timestamp is not a reliable installed-version
+ * identifier, so comparison uses the source commit SHA embedded by CI.
  */
 object UpdateChecker {
 
@@ -25,7 +24,9 @@ object UpdateChecker {
         "https://github.com/whitesr09/JARVIS-2.0/actions"
     private const val RUNS_API =
         "https://api.github.com/repos/whitesr09/JARVIS-2.0/actions/runs" +
-            "?branch=main&status=success&per_page=5"
+            "?branch=main&status=success&per_page=10"
+    private const val MAX_RUNS_RESPONSE_BYTES = 1_048_576
+    private const val EXPECTED_WORKFLOW_NAME = "Build JARVIS-2.0 APK"
 
     private val _updateAvailable = MutableStateFlow(false)
     val updateAvailable: StateFlow<Boolean> = _updateAvailable.asStateFlow()
@@ -35,74 +36,121 @@ object UpdateChecker {
 
     @Volatile
     private var checkedThisProcess = false
+    private var checkInProgress = false
+    private val checkLock = Any()
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(20, TimeUnit.SECONDS)
         .build()
 
     /** Blocking network call — invoke from Dispatchers.IO only. */
     fun check(context: Context) {
-        if (checkedThisProcess) return
-        checkedThisProcess = true
-        val appContext = context.applicationContext
-        runCatching {
+        synchronized(checkLock) {
+            if (checkedThisProcess || checkInProgress) return
+            checkInProgress = true
+        }
+
+        var completed = false
+        try {
+            val installedSha = BuildConfig.GIT_COMMIT_SHA
+            if (installedSha.isBlank() || installedSha == "unknown") {
+                _updateAvailable.value = false
+                _statusLine.value =
+                    "This APK has no build revision metadata; update status cannot be verified."
+                return
+            }
+
             val request = Request.Builder()
                 .url(RUNS_API)
                 .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
                 .build()
+
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     _statusLine.value =
-                        "Couldn't reach GitHub (HTTP ${response.code}) — check your connection."
+                        "Couldn't check GitHub (HTTP ${response.code}); try again later."
                     return
                 }
-                val body = response.body?.string().orEmpty()
-                val runs = JSONObject(body).optJSONArray("workflow_runs")
-                var newestBuildMs = 0L
-                if (runs != null) {
-                    for (i in 0 until runs.length()) {
-                        val run = runs.optJSONObject(i) ?: continue
-                        if (run.optString("name") != "Build JARVIS-2.0 APK") continue
-                        val created = run.optString("created_at")
-                        val parsed = parseIsoMs(created)
-                        if (parsed > newestBuildMs) newestBuildMs = parsed
-                    }
-                }
-                if (newestBuildMs == 0L) {
-                    _statusLine.value = "No successful builds found on GitHub yet."
+
+                val responseText = readLimitedBody(response.body)
+                val newestSha = newestSuccessfulSha(responseText)
+
+                if (newestSha == null) {
+                    _updateAvailable.value = false
+                    _statusLine.value = "No successful main-branch APK build could be identified."
+                    completed = true
                     return
                 }
-                val info = appContext.packageManager
-                    .getPackageInfo(appContext.packageName, 0)
-                val installedAt = info.lastUpdateTime
-                if (newestBuildMs > installedAt) {
-                    _updateAvailable.value = true
-                    _statusLine.value =
-                        "A newer build finished on GitHub after this install — " +
-                            "open Actions to download the latest APK."
+
+                val installed = installedSha.trim()
+                val latest = newestSha.trim()
+                _updateAvailable.value = installed != latest
+                _statusLine.value = if (installed == latest) {
+                    "This APK matches the latest successful main-branch build."
                 } else {
-                    _statusLine.value = "You're on the latest build."
+                    "A different successful main-branch build is available. Open Actions to inspect its artifact."
                 }
                 AppLog.i(
                     "App",
-                    "Update check: newest green build=$newestBuildMs installed=$installedAt " +
-                        "available=${_updateAvailable.value}"
+                    "Update check: installed revision=${installed.take(12)}, latest revision=${latest.take(12)}, available=${_updateAvailable.value}"
                 )
+                completed = true
             }
-        }.onFailure {
+        } catch (e: Exception) {
             _statusLine.value = "Update check failed — you're offline or GitHub is unreachable."
-            AppLog.w("App", "Update check failed: ${it.message}")
+            AppLog.w("App", "Update check failed: ${e.javaClass.simpleName}")
+        } finally {
+            synchronized(checkLock) {
+                checkInProgress = false
+                // A transient failure must not prevent a later retry.
+                if (completed) checkedThisProcess = true
+            }
+        }
+    }
+    /** Bounded response read: GitHub metadata should never allocate unbounded memory. */
+    private fun readLimitedBody(body: ResponseBody?): String {
+        if (body == null) return ""
+        val declaredLength = body.contentLength()
+        if (declaredLength > MAX_RUNS_RESPONSE_BYTES) {
+            throw IOException("Update response exceeded the size limit")
+        }
+        body.byteStream().use { input ->
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(8_192)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (output.size() + read > MAX_RUNS_RESPONSE_BYTES) {
+                    throw IOException("Update response exceeded the size limit")
+                }
+                output.write(buffer, 0, read)
+            }
+            return output.toString(Charsets.UTF_8.name())
         }
     }
 
-    /** Minimal ISO-8601 (yyyy-MM-ddTHH:mm:ssZ) parser — UTC only. */
-    private fun parseIsoMs(value: String): Long = runCatching {
-        val format = java.text.SimpleDateFormat(
-            "yyyy-MM-dd'T'HH:mm:ss'Z'",
-            java.util.Locale.US
-        )
-        format.timeZone = java.util.TimeZone.getTimeZone("UTC")
-        format.parse(value)?.time ?: 0L
-    }.getOrDefault(0L)
+    /** Pure parser for newest successful build SHA; covered by JVM tests. */
+    internal fun newestSuccessfulSha(json: String): String? {
+        val runs = JSONObject(json).optJSONArray("workflow_runs") ?: return null
+        var newestSha: String? = null
+        var newestCreated = ""
+        for (i in 0 until runs.length()) {
+            val run = runs.optJSONObject(i) ?: continue
+            if (run.optString("name") != EXPECTED_WORKFLOW_NAME) continue
+            if (run.optString("conclusion") != "success") continue
+            val sha = run.optString("head_sha").takeIf {
+                it.isNotBlank() && it != "null"
+            } ?: continue
+            val created = run.optString("created_at")
+            if (newestSha == null || created > newestCreated) {
+                newestSha = sha
+                newestCreated = created
+            }
+        }
+        return newestSha
+    }
+
 }

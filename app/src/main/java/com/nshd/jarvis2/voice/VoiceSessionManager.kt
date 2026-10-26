@@ -47,6 +47,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
 enum class VoiceMode { NONE, LIVE }
@@ -143,6 +144,9 @@ object VoiceSessionManager {
 
     private var client: GeminiLiveClient? = null
     private var capture: AudioCapture? = null
+    // Serializes late Live setup callbacks with session teardown. A callback
+    // must not acquire/start the microphone after stop has cleared ownership.
+    private val captureLifecycleLock = Any()
     private var player: AudioPlayer? = null
     private var chime: ChimePlayer? = null
 
@@ -306,6 +310,12 @@ object VoiceSessionManager {
     /** v2.0.0: pending Live session time warning (see onSetupComplete). */
     private var liveTimeWarningJob: Job? = null
 
+    /** Startup / Live setup coroutine; cancelled whenever the session is stopped. */
+    private var sessionJob: Job? = null
+
+    /** Delayed reconnect; cancelled when the session ends or is replaced. */
+    private var reconnectJob: Job? = null
+
     private var pulseJob: Job? = null
 
     /** Screen-share → Live video forwarder (Level 5), Live path only. */
@@ -424,12 +434,18 @@ object VoiceSessionManager {
         // consumers racing is a classic OEM-stack crash. The engine
         // starts only after acquireForSession confirms the mic is free
         // (or the short timeout elapses, which is logged).
-        scope.launch {
+        sessionJob = scope.launch {
             CrashLogger.stage(TAG, "mic acquire: begin")
-            val acquired = WakeWordControl.acquireForSession(MIC_ACQUIRE_TIMEOUT_MS)
-            CrashLogger.stage(TAG, "mic acquire: acquired=$acquired")
-            if (!active) return@launch
-            beginEngine()
+            try {
+                val acquired = WakeWordControl.acquireForSession(MIC_ACQUIRE_TIMEOUT_MS)
+                CrashLogger.stage(TAG, "mic acquire: acquired=$acquired")
+                if (!active || !currentCoroutineContext().isActive) return@launch
+                beginEngine()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (active) fail(startFailureMessage(e))
+            }
         }
     }
 
@@ -664,7 +680,9 @@ object VoiceSessionManager {
                 callWatch = listener
             }
             AppLog.i("Voice", "call auto-resume watch registered")
-        }.onFailure { AppLog.w("Voice", "call watch registration failed: ${it.message}") }
+        }.onFailure {
+            AppLog.w("Voice", "call watch registration failed (${it.javaClass.simpleName})")
+        }
     }
 
     /** Unregister the call watch and clear any pending resume. Idempotent. */
@@ -746,6 +764,11 @@ object VoiceSessionManager {
 
     private fun stopInternal(resetUi: Boolean) {
         active = false
+        sessionJob?.cancel()
+        sessionJob = null
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnecting = false
         // v1.8 (#11): the call watch lives only while a session does.
         unregisterCallWatch()
         // F6: a stopped session closes any open Live task window so
@@ -773,8 +796,11 @@ object VoiceSessionManager {
         liveTimeWarningJob = null
         shareJob?.cancel()
         shareJob = null
-        capture?.stop()
-        capture = null
+        synchronized(captureLifecycleLock) {
+            val ownedCapture = capture
+            capture = null
+            ownedCapture?.stop()
+        }
         client?.close()
         client = null
         player?.stop()
@@ -786,7 +812,9 @@ object VoiceSessionManager {
     }
 
     private fun fail(message: String) {
-        CrashLogger.stage(TAG, "fail: $message")
+        // The full reason is shown in the voice UI; keep persistent stage logs
+        // free of raw server/exception text.
+        CrashLogger.stage(TAG, "fail: voice session error (details omitted)")
         unregisterCallWatch()
         pulseJob?.cancel()
         teardownLive()
@@ -863,10 +891,12 @@ object VoiceSessionManager {
         player = playback
         CrashLogger.stage(TAG, "live: audio player started")
 
-        scope.launch {
-            val facts = withContext(Dispatchers.IO) { db.allFacts(null, null) }
-            if (!active) return@launch
-            val prompt = PersonaPrompts.build(s, facts, codeMode = false)
+        sessionJob?.cancel()
+        sessionJob = scope.launch {
+            try {
+                val facts = withContext(Dispatchers.IO) { db.allFacts(null, null) }
+                if (!active || !currentCoroutineContext().isActive) return@launch
+                val prompt = PersonaPrompts.build(s, facts, codeMode = false)
             // F5.1: NO persisted handle is read here anymore — the
             // only handle a connect may carry is the in-memory one
             // from THIS session's goAway reconnect (resumeHandle).
@@ -899,7 +929,12 @@ object VoiceSessionManager {
             // connect() can fail synchronously (blank key) and fail
             // the session — only forward frames if the session is
             // still on the Live engine.
-            if (_uiState.value.mode == VoiceMode.LIVE) startShareForwarder()
+                if (_uiState.value.mode == VoiceMode.LIVE) startShareForwarder()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (active) fail(startFailureMessage(e))
+            }
         }
     }
 
@@ -1086,10 +1121,10 @@ object VoiceSessionManager {
             scope.launch { handleLiveFailure(message) }
             return
         }
-        CrashLogger.stage(TAG, "live failure: $message")
-        // F5: the FULL reason goes to the log; the caption carries the
-        // short FriendlyErrors cause so the user can see WHY Live died.
-        AppLog.e("Live", "native live failed: $message")
+        CrashLogger.stage(TAG, "Live failure (${FriendlyErrors.shortReason(message)})")
+        // The detailed reason stays in the in-memory UI state for the
+        // sanitized Details view; persistent logs store only its category.
+        AppLog.e("Live", "native Live failed (${FriendlyErrors.shortReason(message)})")
         lastLiveFailureReason = message
         // F8 (#13): network-class failures feed the weak-network
         // guard (reset by the next successful setup).
@@ -1286,7 +1321,13 @@ object VoiceSessionManager {
                     )
                 }
             }
+            val captureContext = appContext
+            if (captureContext == null) {
+                fail("App context is unavailable; microphone capture cannot start.")
+                return
+            }
             val captureDevice = AudioCapture(
+                context = captureContext,
                 onChunk = { chunk ->
                     if (!_uiState.value.micMuted) client?.sendAudioChunk(chunk)
                 },
@@ -1301,15 +1342,24 @@ object VoiceSessionManager {
                 },
                 onError = { message -> if (active) fail(message) }
             )
-            capture = captureDevice
-            CrashLogger.stage(TAG, "live: audio capture start")
-            if (captureDevice.start()) {
-                CrashLogger.stage(TAG, "live: capture running — LISTENING")
-                setStatus(VoiceStatus.LISTENING)
-            } else if (active) {
-                // AudioCapture already reported via onError; if it returns
-                // false silently, surface a generic mic failure.
-                if (_uiState.value.status != VoiceStatus.ERROR) {
+            synchronized(captureLifecycleLock) {
+                if (!active) return
+                capture = captureDevice
+                CrashLogger.stage(TAG, "live: audio capture start")
+                val started = captureDevice.start()
+                // stopInternal() marks active=false before waiting for this
+                // lock; if it raced with start(), release the newly acquired mic.
+                if (!active) {
+                    if (capture === captureDevice) capture = null
+                    captureDevice.stop()
+                    return
+                }
+                if (started) {
+                    CrashLogger.stage(TAG, "live: capture running — LISTENING")
+                    setStatus(VoiceStatus.LISTENING)
+                } else if (_uiState.value.status != VoiceStatus.ERROR) {
+                    // AudioCapture reports permission/hardware errors itself;
+                    // still surface a generic failure if it returned silently.
                     fail("Microphone could not be started")
                 }
             }
@@ -1402,15 +1452,24 @@ object VoiceSessionManager {
             client?.close()
             client = null
             setStatus(VoiceStatus.CONNECTING)
-            scope.launch {
-                delay(600)
-                if (active) startLive(liveSessionHandle)
+            reconnectJob?.cancel()
+            reconnectJob = scope.launch {
+                try {
+                    delay(600)
+                    if (active && currentCoroutineContext().isActive) {
+                        startLive(liveSessionHandle)
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } finally {
+                    reconnectJob = null
+                }
             }
         }
 
         override fun onError(message: String) {
             if (!active) return
-            AppLog.w("Live", "session error notice: $message")
+            AppLog.w("Live", "session error notice (${FriendlyErrors.shortReason(message)})")
             _uiState.value = _uiState.value.copy(sttHint = message)
         }
 
@@ -1540,7 +1599,7 @@ object VoiceSessionManager {
             .ifBlank { "Voice task" }
         TaskQueue.beginTask(goal)
         TaskState.begin(goal = goal, job = job, maxSteps = 10)
-        AppLog.i("Queue", "Live tool turn opened task window: '$goal'")
+        AppLog.i("Queue", "Live tool turn opened task window")
     }
 
     /** F6: close the Live task window (turn end / session teardown). Idempotent. */

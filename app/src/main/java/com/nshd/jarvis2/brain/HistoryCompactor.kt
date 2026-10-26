@@ -77,7 +77,7 @@ object HistoryCompactor {
                 "history compacted: ${old.size} messages folded into a memory note"
             )
         } catch (e: Exception) {
-            AppLog.w("App", "history compact failed safely: ${e.message}")
+            AppLog.w("App", "history compact failed safely (${e.javaClass.simpleName})")
         } finally {
             running = false
         }

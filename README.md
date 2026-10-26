@@ -1,48 +1,49 @@
 # JARVIS-2.0
 
-**Jarvis** — a local-first, hands-free, fully controllable mobile agent for Android, developed by **N S H D**.
+**Jarvis** — a local-first, hands-free mobile agent for Android, developed by **N S H D**.
 
-Jarvis talks (real-time voice), sees your screen (accessibility tree + screen-vision fallback), and acts for you — tapping, typing, scrolling and controlling hardware — while a floating avatar and task HUD show exactly what it's doing. No accounts, no external backend: your API keys, memory and voice stay on your device.
+Jarvis combines real-time voice, AI-provider integrations, on-device memory, accessibility-based actions, screen-vision support, a floating avatar/task HUD, and an optional offline wake word. Features depend on provider configuration, Android permissions, device capabilities, and background-execution restrictions.
 
-> **Current release: v1.2.0 — task queue, background wake, Connection Test v2.** Real-time voice (Gemini Live + on-device fallback), a provider-failover brain with Memory Core, accessibility automation with hard safety guardrails, screen vision, a floating avatar with a task-queue HUD, and an offline "Hey Jarvis" wake word that now starts listening in the background without opening the app. The UI runs the Warm Minimal · Purple design system (Purple / Light / Dark / Red themes + custom hex).
+> **Current app version: v2.0.3.** This repository's current implementation includes a provider-based AI brain, Memory Core, Gemini Live voice, Digital Hands accessibility automation, screen vision, floating overlay/task HUD, and optional Vosk wake-word recognition. A successful CI build verifies compilation and configured build tasks; it does not guarantee every live voice or device-automation flow works on every phone.
 
 ## Build the APK (GitHub Actions)
 
-Every push to `main` builds a debug APK in CI — no local Android Studio needed:
+1. Open the repository's **Actions** tab: <https://github.com/whitesr09/JARVIS-2.0/actions>.
+2. Open the latest successful **Build JARVIS-2.0 APK** run.
+3. Download the artifact attached to that run and extract it.
+4. Check the APK type and signing certificate before installing. A debug APK and a permanently signed release APK are not interchangeable for upgrades if their signing certificates differ.
 
-1. Open the repo's **Actions** tab → **Build JARVIS-2.0 APK**.
-2. Wait for the run to go green, open it, and download the **`jarvis-2.0-apk`** artifact.
-3. Unzip it and install `app-debug.apk` on your phone (allow "install from browser/files" once if Android asks).
+You can also run the workflow manually from the Actions tab when the workflow supports manual dispatch. Release builds should only be treated as release-ready after the signing configuration and artifact have been verified.
 
-You can also run the workflow manually from the Actions tab (**Run workflow**).
+## Phone setup
 
-## Phone setup (first run)
+1. Install and open Jarvis.
+2. Open **Settings → System Permissions**.
+3. Grant only the permissions needed for the features you intend to use: microphone, notifications, contacts, overlay, accessibility, and screen capture.
+4. Review Android's battery/background restrictions if you enable always-on wake-word listening. Some manufacturers may still restrict background services.
+5. Configure an AI provider and verify its connection before testing voice or agent actions.
 
-1. Install and open **Jarvis**.
-2. Go to **Settings → System Permissions** (or the **Screen** tile on Home).
-3. Grant what you want Jarvis to use — Microphone, Notifications, Contacts, and the special pages for **Display Over Other Apps**, **Accessibility Service** (enable *Jarvis Digital Hands*), **Background Battery** (important on Vivo/iQOO so the system doesn't kill Jarvis), and **Modify System Settings**.
-4. Personalize in **Settings**: assistant name (default *Jarvis*), what it calls you (default *Nishad*), persona, language, theme.
+Accessibility and screen-capture features can expose sensitive on-screen information or perform actions in other apps. Keep them disabled when not needed, review each action's confirmation behavior, and never share diagnostic logs without checking them for private information.
 
-## Roadmap
+## Development and verification
 
-| Level | Scope |
-|---|---|
-| **L1 Foundation** | Scaffold + CI, theme engine, orb home, bottom nav with raised mic, chat shell, settings, permissions dashboard, developer section |
-| **L2 Brain** | Provider layer (Gemini + Groq / FreeLLMAPI / OpenRouter) with free-tier failover, API key settings + connection test, real chat + Code mode (markdown/highlight/copy), Memory Core |
-| **L3 Voice** | Gemini Live WebSocket voice loop, tap-to-talk orb, TTS voices + custom voice, personas + 12 languages, silent execution + finish chime |
-| **L4 Digital Hands** | Full accessibility automation, deep intents, verified action loop + recovery, hardware controls, contact-aware calling/messaging with hard safety guardrails |
-| **L5 Vision + Overlay** | MediaProjection 1 FPS vision fallback, floating avatar (12 designs, drag/edge-snap, tap/double-tap) + 4-step Task HUD |
-| **L6 Always-on** | Vosk wake word (screen-off), voice biometrics (3-sample enroll), battery-aware mode switching |
+- **Primary branch:** `main`
+- **Current app version:** `2.0.3` (see `app/build.gradle.kts`)
+- **Language/UI:** Kotlin, Jetpack Compose
+- **JDK:** 17
+- **Android:** minimum SDK 26; compile/target SDK 35 in the current Gradle configuration
+- **Build workflow:** GitHub Actions
 
-Full design: see [MASTER-PLAN.md](MASTER-PLAN.md). A clickable pre-build replica lives in [simulator/](simulator/).
+Use a feature branch for changes. For each change set, run the available Gradle tests and APK build, inspect the generated artifact, and perform device-level smoke tests for features that depend on Android services, permissions, providers, audio, or accessibility.
+
+See [PHASED-IMPROVEMENT-PLAN.md](PHASED-IMPROVEMENT-PLAN.md) for the staged hardening roadmap and acceptance criteria. The interactive pre-build simulator lives in [simulator/](simulator/).
 
 ## Developer
 
 **N S H D**
 
-- Instagram: https://www.instagram.com/__nshd.__
-- WhatsApp: https://wa.me/+918590455801
-- Telegram: https://t.me/nshd_0
+- Instagram: <https://www.instagram.com/__nshd.__>
+- WhatsApp: <https://wa.me/+918590455801>
+- Telegram: <https://t.me/nshd_0>
 - Email: nishadahammed081@gmail.com
-- GitHub: https://github.com/whitesr09
-- Phone: +91 8590455801
+- GitHub: <https://github.com/whitesr09>

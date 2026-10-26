@@ -36,16 +36,32 @@ object LocationHelper {
 
     /** Best last-known fix (freshest of GPS / network), or null. */
     fun lastKnownFix(context: Context): Fix? {
-        if (!hasPermission(context)) return null
+        val fineGranted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        val coarseGranted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!fineGranted && !coarseGranted) return null
+
         val manager = context.getSystemService(LocationManager::class.java)
             ?: return null
         val candidates = mutableListOf<Location>()
-        for (provider in listOf(
-            LocationManager.GPS_PROVIDER,
-            LocationManager.NETWORK_PROVIDER
-        )) {
-            runCatching { manager.getLastKnownLocation(provider) }
-                .getOrNull()?.let { candidates += it }
+        // GPS access requires fine location; network may be used with coarse.
+        val providers = buildList {
+            if (fineGranted) add(LocationManager.GPS_PROVIDER)
+            if (fineGranted || coarseGranted) add(LocationManager.NETWORK_PROVIDER)
+        }
+        for (provider in providers) {
+            val fix = try {
+                manager.getLastKnownLocation(provider)
+            } catch (e: SecurityException) {
+                // Permission can be revoked between the check and the call.
+                null
+            } catch (e: Exception) {
+                null
+            }
+            fix?.let { candidates += it }
         }
         val best = candidates.maxByOrNull { it.time } ?: run {
             AppLog.w("Hands", "location: no last-known fix available")

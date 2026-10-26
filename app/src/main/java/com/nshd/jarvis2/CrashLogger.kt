@@ -109,9 +109,7 @@ object CrashLogger {
         runCatching {
             com.nshd.jarvis2.core.AppLog.e(
                 "Crash",
-                "UNCAUGHT on thread ${thread.name}: " +
-                    "${throwable.javaClass.name}: ${throwable.message ?: "(no message)"}",
-                throwable
+                "UNCAUGHT on thread ${thread.name}: ${throwable.javaClass.name}"
             )
         }
         // commit(), not apply(): the process is dying right now.
@@ -227,17 +225,14 @@ object CrashLogger {
 
     /** Non-fatal error breadcrumb (one summary line + a few trace lines). */
     fun logNonFatal(tag: String, throwable: Throwable) {
-        val summary = "${throwable.javaClass.simpleName}: ${throwable.message ?: "(no message)"}"
-        val traceLines = throwable.stackTraceToString()
-            .lineSequence()
-            .drop(1)
+        val summary = throwable.javaClass.simpleName
+        val traceLines = throwable.stackTrace
             .take(10)
-            .map { "    ${it.trim()}" }
-            .toList()
+            .map { "    at $it" }
         appendLines(listOf("E/$tag $summary") + traceLines)
-        // F5: mirror into the full AppLog (Settings → App Logs viewer).
+        // Exception messages and chained-cause payloads are omitted from logs.
         runCatching {
-            com.nshd.jarvis2.core.AppLog.e("Crash", "[$tag] $summary", throwable)
+            com.nshd.jarvis2.core.AppLog.e("Crash", "[$tag] $summary")
         }
     }
 

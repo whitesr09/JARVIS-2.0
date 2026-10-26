@@ -149,10 +149,7 @@ object BrainStore {
             )
         }
         writeArray(context, KEY_MACROS, array)
-        AppLog.i(
-            "Brain",
-            "macro saved: '${macro.trigger}' (${macro.steps.size} steps)"
-        )
+        AppLog.i("Brain", "macro saved (${macro.steps.size} steps)")
     }
 
     fun deleteMacro(context: Context, trigger: String) {
@@ -278,7 +275,7 @@ object BrainStore {
             )
         }
         writeArray(context, KEY_CUSTOM, array)
-        AppLog.i("Brain", "custom command saved: '${command.phrase}'")
+        AppLog.i("Brain", "custom command saved")
     }
 
     fun deleteCustomCommand(context: Context, phrase: String) {
@@ -326,11 +323,7 @@ object BrainStore {
             normalizeKey(it.name) != normalizeKey(routine.name)
         }
         writeRoutines(context, kept + routine)
-        AppLog.i(
-            "Brain",
-            "routine saved: '${routine.name}' trigger=${routine.trigger} " +
-                "steps=${routine.steps.size}"
-        )
+        AppLog.i("Brain", "routine saved trigger=${routine.trigger} steps=${routine.steps.size}")
     }
 
     fun deleteRoutine(context: Context, name: String) {
@@ -401,10 +394,7 @@ object BrainStore {
         prefs.edit().putLong(KEY_SCHEDULED_SEQ, id).apply()
         val item = ScheduledMessage(id, contact, message, fireAtMs)
         writeScheduled(context, scheduled(context) + item)
-        AppLog.i(
-            "Brain",
-            "scheduled message #$id to '$contact' at $fireAtMs"
-        )
+        AppLog.i("Brain", "scheduled message #$id created")
         return item
     }
 

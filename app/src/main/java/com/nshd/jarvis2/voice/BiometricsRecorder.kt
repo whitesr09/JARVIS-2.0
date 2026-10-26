@@ -1,13 +1,19 @@
 package com.nshd.jarvis2.voice
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import androidx.core.content.ContextCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /**
@@ -35,9 +41,18 @@ object BiometricsRecorder {
     fun sampleFile(context: Context, index: Int): File =
         File(sampleDir(context), "sample_$index.wav")
 
-    /** How many valid sample files are on disk right now (0..[TOTAL_SAMPLES]). */
+    /** How many complete, correctly formatted three-second samples are on disk. */
     fun countSamples(context: Context): Int =
-        (1..TOTAL_SAMPLES).count { sampleFile(context, it).let { f -> f.exists() && f.length() > 44 } }
+        (1..TOTAL_SAMPLES).count { isValidWavFile(sampleFile(context, it)) }
+
+    /** First sample slot needing capture, so a corrupt earlier slot cannot block enrollment. */
+    fun nextMissingSampleIndex(context: Context): Int =
+        nextMissingSampleIndex((1..TOTAL_SAMPLES).filter {
+            isValidWavFile(sampleFile(context, it))
+        }.toSet())
+
+    internal fun nextMissingSampleIndex(validSampleIndexes: Set<Int>): Int =
+        (1..TOTAL_SAMPLES).firstOrNull { it !in validSampleIndexes } ?: TOTAL_SAMPLES
 
     fun deleteSamples(context: Context) {
         (1..TOTAL_SAMPLES).forEach { runCatching { sampleFile(context, it).delete() } }
@@ -50,9 +65,29 @@ object BiometricsRecorder {
      */
     suspend fun recordSample(context: Context, index: Int): Boolean =
         withContext(Dispatchers.IO) {
-            val minBuffer = AudioRecord.getMinBufferSize(
-                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-            )
+            if (ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.RECORD_AUDIO
+                ) != PackageManager.PERMISSION_GRANTED
+            ) return@withContext false
+            if (index !in 1..TOTAL_SAMPLES) return@withContext false
+            // Check before deleting the old slot: a permission revoke should
+            // not destroy a previously valid sample without a new recording.
+            if (ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.RECORD_AUDIO
+                ) != PackageManager.PERMISSION_GRANTED
+            ) return@withContext false
+            val file = sampleFile(context, index)
+            // A failed re-record must not leave an older sample looking current.
+            runCatching { file.delete() }
+            currentCoroutineContext().ensureActive()
+
+            val minBuffer = try {
+                AudioRecord.getMinBufferSize(
+                    SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+                )
+            } catch (e: Exception) {
+                return@withContext false
+            }
             if (minBuffer <= 0) return@withContext false
             val record = try {
                 AudioRecord(
@@ -62,6 +97,8 @@ object BiometricsRecorder {
                     AudioFormat.ENCODING_PCM_16BIT,
                     maxOf(minBuffer * 2, 16_000)
                 )
+            } catch (e: SecurityException) {
+                return@withContext false
             } catch (e: Exception) {
                 return@withContext false
             }
@@ -75,24 +112,37 @@ object BiometricsRecorder {
             try {
                 record.startRecording()
                 while (filled < targetBytes) {
+                    currentCoroutineContext().ensureActive()
                     val read = record.read(pcm, filled, targetBytes - filled)
                     if (read <= 0) break
                     filled += read
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: SecurityException) {
+                return@withContext false
             } catch (e: Exception) {
                 return@withContext false
             } finally {
                 runCatching { record.stop() }
                 runCatching { record.release() }
             }
-            if (filled < targetBytes / 2) return@withContext false
-            val file = sampleFile(context, index)
-            writeWav(file, pcm.copyOf(filled))
-            true
+            currentCoroutineContext().ensureActive()
+            if (filled != targetBytes) return@withContext false
+            try {
+                writeWav(file, pcm)
+                isValidWavFile(file)
+            } catch (e: CancellationException) {
+                runCatching { file.delete() }
+                throw e
+            } catch (e: Exception) {
+                runCatching { file.delete() }
+                false
+            }
         }
 
     /** Minimal RIFF/WAVE writer: 44-byte header + PCM16 mono data. */
-    private fun writeWav(file: File, pcm: ByteArray) {
+    internal fun writeWav(file: File, pcm: ByteArray) {
         FileOutputStream(file).use { out ->
             out.write(wavHeader(pcm.size))
             out.write(pcm)
@@ -107,6 +157,39 @@ object BiometricsRecorder {
             raf.writeIntLE(pcm.size)
         }
     }
+
+    /** Validate RIFF/WAVE PCM16 mono format, exact three-second payload, and file size. */
+    internal fun isValidWavFile(file: File): Boolean = runCatching {
+        val expectedDataBytes = SAMPLE_RATE * 2 * SAMPLE_SECONDS
+        if (!file.isFile || file.length() != 44L + expectedDataBytes) return@runCatching false
+        RandomAccessFile(file, "r").use { raf ->
+            val header = ByteArray(44)
+            raf.readFully(header)
+            fun ascii(offset: Int, length: Int) =
+                String(header, offset, length, Charsets.US_ASCII)
+            fun intLe(offset: Int): Int =
+                (header[offset].toInt() and 0xff) or
+                    ((header[offset + 1].toInt() and 0xff) shl 8) or
+                    ((header[offset + 2].toInt() and 0xff) shl 16) or
+                    ((header[offset + 3].toInt() and 0xff) shl 24)
+            fun shortLe(offset: Int): Int =
+                (header[offset].toInt() and 0xff) or
+                    ((header[offset + 1].toInt() and 0xff) shl 8)
+            ascii(0, 4) == "RIFF" &&
+                intLe(4) == 36 + expectedDataBytes &&
+                ascii(8, 4) == "WAVE" &&
+                ascii(12, 4) == "fmt " &&
+                intLe(16) == 16 &&
+                shortLe(20) == 1 &&
+                shortLe(22) == 1 &&
+                intLe(24) == SAMPLE_RATE &&
+                intLe(28) == SAMPLE_RATE * 2 &&
+                shortLe(32) == 2 &&
+                shortLe(34) == 16 &&
+                ascii(36, 4) == "data" &&
+                intLe(40) == expectedDataBytes
+        }
+    }.getOrDefault(false)
 
     private fun wavHeader(dataBytes: Int): ByteArray {
         val header = ByteArray(44)

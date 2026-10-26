@@ -18,6 +18,36 @@ import com.nshd.jarvis2.service.JarvisAccessibilityService
 import kotlinx.coroutines.delay
 
 /**
+ * Pure recipient guard for photo-send UI flows. The caller must match the
+ * contact selected before consent and re-check it after the consent prompt.
+ */
+internal object WhatsAppRecipientGuard {
+    fun normalizedChatKey(value: String): String =
+        value.lowercase().filter { it.isLetterOrDigit() }
+
+    fun matchesApprovedChat(
+        visibleTitle: String,
+        approvedName: String,
+        approvedDigits: String
+    ): Boolean {
+        val titleKey = normalizedChatKey(visibleTitle)
+        val nameKey = normalizedChatKey(approvedName)
+        if (titleKey.isNotBlank() && titleKey == nameKey) return true
+        val visibleDigits = ContactsResolver.normalizePhone(visibleTitle)
+        // Seven trailing digits are not enough to distinguish nearby contacts.
+        // Accept either a full international match or a local-number display
+        // that matches the approved number's final ten digits.
+        return visibleDigits == approvedDigits ||
+            (visibleDigits.length == 10 &&
+                approvedDigits.length > 10 &&
+                approvedDigits.endsWith(visibleDigits)) ||
+            (approvedDigits.length == 10 &&
+                visibleDigits.length > 10 &&
+                visibleDigits.endsWith(approvedDigits))
+    }
+}
+
+/**
  * Deep Android intents and hardware controls.
  *
  * Intents are always preferred over simulated taps. Accessibility is used
@@ -31,11 +61,13 @@ class DeepIntents(context: Context) {
 
     suspend fun whatsappMessage(
         phone: String,
+        expectedContactName: String,
         text: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val digits = ContactsResolver.normalizePhone(phone)
         if (digits.length < 10) return ActionResult(false, "The WhatsApp number looks incomplete.")
+        if (text.isBlank()) return ActionResult(false, "The message is empty; nothing was sent.")
         val url = "https://api.whatsapp.com/send?phone=$digits&text=${Uri.encode(text)}"
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -43,10 +75,10 @@ class DeepIntents(context: Context) {
             else if (isPackageInstalled("com.whatsapp.w4b")) setPackage("com.whatsapp.w4b")
         }
         if (!launch(intent)) {
-            AppLog.w("Send", "stage FAILED: chat could not be opened for $digits")
+            AppLog.w("Send", "stage FAILED: WhatsApp chat could not be opened")
             return ActionResult(false, "WhatsApp could not be opened for this chat.")
         }
-        AppLog.i("Send", "stage: chat opened for $digits (deep link, text prefilled)")
+        AppLog.i("Send", "stage: WhatsApp chat opened (deep link, draft prefilled)")
         TaskState.throwIfStopRequested() // #61: after open-app
         // F7 plan: the deep link opens the chat AND types the text
         // atomically, so plan steps 1–2 complete here; step 3
@@ -55,71 +87,145 @@ class DeepIntents(context: Context) {
 
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
-                true,
-                "Opened WhatsApp with the message typed — tap Send to send it. " +
-                    "(Enable Accessibility to let Jarvis press Send and verify it.)"
+                false,
+                "WhatsApp is open with a draft ready, but Jarvis did not send it. Enable Accessibility or tap Send yourself before treating this as sent.",
+                ActionOutcome.STAGED_FOR_USER
             )
 
         HandsActions.waitForSettle(2_500)
         TaskState.throwIfStopRequested() // #61: after settle, before reading the field
         val reader = service.screenReader()
         var snapshot = reader.snapshot()
-        val entry = snapshot.firstOrNull { it.editable }
-        if (entry != null && entry.text.isBlank()) {
-            AppLog.w("Send", "stage FAILED: message field empty after open — prefill lost")
+        val composerPackage = JarvisAccessibilityService.lastPackageName
+            ?: reader.currentPackage()
+        if (composerPackage != Playbooks.WHATSAPP_PACKAGE &&
+            composerPackage != Playbooks.WHATSAPP_BUSINESS_PACKAGE
+        ) {
             return ActionResult(
                 false,
-                "Aborted: the WhatsApp message field is empty, so Send was not pressed."
+                "Aborted: the opened screen is not a recognized WhatsApp composer. Nothing was sent."
             )
         }
-        AppLog.i(
-            "Send",
-            "stage: typed — message field holds ${entry?.text?.length ?: 0} chars"
-        )
+        val visibleRecipient = currentChatTitle(composerPackage)
+        if (
+            visibleRecipient == null ||
+            !WhatsAppRecipientGuard.matchesApprovedChat(
+                visibleTitle = visibleRecipient,
+                approvedName = expectedContactName,
+                approvedDigits = digits
+            )
+        ) {
+            AppLog.w("Send", "stage FAILED: visible recipient did not match approved contact")
+            return ActionResult(
+                false,
+                "Aborted: the visible WhatsApp recipient could not be matched to the approved contact. Nothing was sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        }
+        val entry = snapshot.firstOrNull { it.editable }
+        if (entry == null || entry.text != text) {
+            AppLog.w("Send", "stage FAILED: composer draft could not be verified exactly")
+            return ActionResult(
+                false,
+                "Aborted: I couldn't verify that WhatsApp's draft exactly matches the approved message. Nothing was sent."
+            )
+        }
+        AppLog.i("Send", "stage: exact draft verified (${entry.text.length} chars)")
 
         // v2.0.2 JIT ask: composer filled + verified, send NOT yet
         // tapped. A decline/timeout leaves the typed text in place.
-        if (askBeforeSend != null && !askBeforeSend()) {
+        if (!askBeforeSend()) {
             AppLog.i("Send", "stage: send ask declined/timeout — composer left untouched")
             return ActionResult(false, "Not sent.")
         }
 
-        // F8 (#36): the send control comes from the WhatsApp
-        // playbook now — its primary descriptors ARE the inline
-        // checks this code used before (viewId …:id/send, desc/text
-        // "Send"), so a primary hit behaves identically.
-        val send = Playbooks.find(snapshot, Playbooks.WHATSAPP_PACKAGE, Playbooks.ROLE_SEND_BUTTON)
-            ?: Playbooks.find(snapshot, Playbooks.WHATSAPP_BUSINESS_PACKAGE, Playbooks.ROLE_SEND_BUTTON)
-            ?: reader.findByText("Send", snapshot)?.takeIf { it.clickable || it.desc.contains("send", true) }
-
-        if (send == null) {
-            // F7: the tree dump belongs in the log, not the reply text.
-            AppLog.w(
-                "Hands",
-                "whatsapp send: Send control not found. Screen: ${reader.serialize(25)}"
-            )
-            AppLog.w("Send", "stage FAILED: Send control not found on screen")
+        // The confirmation may take up to 30 seconds. Refresh the
+        // screen afterward so approval cannot authorize a stale index,
+        // a changed draft, or a switch to an unrelated app.
+        TaskState.throwIfStopRequested()
+        snapshot = reader.snapshot()
+        val activePackage = JarvisAccessibilityService.lastPackageName
+            ?: reader.currentPackage()
+        if (activePackage != composerPackage) {
             return ActionResult(
                 false,
-                "WhatsApp opened with the message typed, but the Send button " +
-                    "was not found on screen."
+                "Aborted: the active app changed after confirmation. Nothing was sent."
+            )
+        }
+        val confirmedEntry = snapshot.firstOrNull { it.editable }
+        if (confirmedEntry == null || confirmedEntry.text != text) {
+            AppLog.w("Send", "stage FAILED: composer changed after confirmation")
+            return ActionResult(
+                false,
+                "Aborted: the message draft changed after confirmation. Nothing was sent."
+            )
+        }
+        val confirmedRecipient = currentChatTitle(activePackage)
+        if (
+            confirmedRecipient == null ||
+            !WhatsAppRecipientGuard.matchesApprovedChat(
+                visibleTitle = confirmedRecipient,
+                approvedName = expectedContactName,
+                approvedDigits = digits
+            ) ||
+            WhatsAppRecipientGuard.normalizedChatKey(confirmedRecipient) !=
+                WhatsAppRecipientGuard.normalizedChatKey(visibleRecipient)
+        ) {
+            AppLog.w("Send", "stage FAILED: recipient changed or did not re-verify")
+            return ActionResult(
+                false,
+                "Aborted: the WhatsApp recipient changed or could not be re-verified after confirmation. Nothing was sent.",
+                ActionOutcome.STAGED_FOR_USER
             )
         }
 
+        // Resolve the send control again from the fresh post-confirmation
+        // snapshot; never reuse an element index from before the prompt.
+        val confirmedSend =
+            Playbooks.find(snapshot, Playbooks.WHATSAPP_PACKAGE, Playbooks.ROLE_SEND_BUTTON)
+                ?: Playbooks.find(snapshot, Playbooks.WHATSAPP_BUSINESS_PACKAGE, Playbooks.ROLE_SEND_BUTTON)
+                ?: reader.findByText("Send", snapshot)
+                    ?.takeIf { it.clickable || it.desc.contains("send", true) }
+        if (confirmedSend == null) {
+            AppLog.w("Send", "stage FAILED: Send control disappeared after confirmation")
+            return ActionResult(
+                false,
+                "The Send button is no longer available. Nothing was sent."
+            )
+        }
+
+        // Snapshot matching non-editable text before the tap. Existing chat
+        // history containing the same text must not count as proof of a new send.
+        val messageNeedle = text.trim()
+        fun bubbleSignature(element: UiElement): String =
+            "${element.viewId}\u0001${element.className}\u0001" +
+                "${element.text.trim()}\u0001${element.desc.trim()}"
+        fun matchingBubbleCounts(elements: List<UiElement>): Map<String, Int> =
+            elements.filter { element ->
+                !element.editable && messageNeedle.isNotEmpty() &&
+                    (element.text.contains(messageNeedle) || element.label.contains(messageNeedle))
+            }.groupingBy(::bubbleSignature).eachCount()
+        val existingBubbleCounts = matchingBubbleCounts(snapshot)
+
         TaskState.throwIfStopRequested() // #61: before final tap
-        val click = HandsActions.clickElement(send.index)
+        // Permit exactly the package containing this confirmed composer.
+        // It expires quickly and is revoked after the tap even on failure.
+        HandsActions.grantSendPermit(activePackage, ttlMs = 5_000L)
+        val click = try {
+            HandsActions.clickElement(confirmedSend.index)
+        } finally {
+            HandsActions.revokeSendPermit(activePackage)
+        }
         if (!click.success) {
-            AppLog.w("Send", "stage FAILED: send tap failed — ${click.message}")
+            AppLog.w("Send", "stage FAILED: Send tap was not accepted")
             return ActionResult(false, "WhatsApp opened, but Send could not be pressed: ${click.message}")
         }
         AppLog.i("Send", "stage: send tapped")
 
-        // F7 verification (Part A3): BOTH proofs required — the
-        // entry cleared AND an outgoing bubble carrying the message
-        // text appeared. (Entry-clear alone was the old rule; the
-        // bubble check ignores the editable entry itself, which of
-        // course still contains the text until the send lands.)
-        val needle = text.trim().take(30)
+        // Require both a cleared composer and a matching non-editable message
+        // element that was NOT in the pre-tap snapshot. Old history with the
+        // same text must not count as proof that this send happened. A delivery
+        // or read receipt remains outside what the accessibility tree can prove.
         var entryCleared = false
         var bubbleFound = false
         val deadline = System.currentTimeMillis() + 2_000
@@ -137,12 +243,9 @@ class DeepIntents(context: Context) {
             if (currentEntry == null && snapshot.none { it.viewId.endsWith("/entry") }) {
                 entryCleared = true
             }
-            if (needle.isNotEmpty() && snapshot.any { element ->
-                    !element.editable &&
-                        (element.text.contains(needle) || element.label.contains(needle))
-                }
-            ) {
-                bubbleFound = true
+            val currentBubbleCounts = matchingBubbleCounts(snapshot)
+            bubbleFound = currentBubbleCounts.any { (signature, count) ->
+                count > existingBubbleCounts.getOrDefault(signature, 0)
             }
         }
         AppLog.i(
@@ -151,17 +254,14 @@ class DeepIntents(context: Context) {
         )
         return when {
             entryCleared && bubbleFound -> ActionResult(
-                true, "Message sent and verified."
-            )
-            entryCleared -> ActionResult(
                 false,
-                "Send was pressed and the message field cleared, but the sent " +
-                    "message bubble was not found, so sending is unverified."
+                "A new matching chat message appeared after Send and the composer cleared. The submission looks successful, but WhatsApp delivery/read status is not verified. Do not retry unless you check the chat first.",
+                ActionOutcome.SUBMITTED_UNVERIFIED
             )
             else -> ActionResult(
                 false,
-                "Send was pressed, but the message field did not clear within " +
-                    "2 seconds, so sending is unverified."
+                "Send was tapped, but Jarvis could not prove that a new matching chat message appeared and the composer cleared. The result is uncertain; check the conversation before retrying to avoid a duplicate.",
+                ActionOutcome.OUTCOME_UNKNOWN
             )
         }
     }
@@ -244,8 +344,7 @@ class DeepIntents(context: Context) {
                 // the user-facing sentence stays clean and complete.
                 AppLog.w(
                     "Hands",
-                    "youtube_play: no result after $attempt snapshots " +
-                        "($lastSnapshotSize nodes). Screen: ${reader.serialize(25)}"
+                    "youtube_play: no result after $attempt snapshots ($lastSnapshotSize nodes); screen contents omitted"
                 )
                 return ActionResult(
                     false,
@@ -297,13 +396,13 @@ class DeepIntents(context: Context) {
     suspend fun spotifyPlay(query: String): ActionResult {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return ActionResult(false, "The Spotify search query is blank.")
-        AppLog.i("Hands", "spotify_play: start query='$cleanQuery'")
+        AppLog.i("Hands", "spotify_play: start search (${cleanQuery.length} chars)")
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Opening Spotify…")
         // F7 plan phases: 1 Open Spotify → 2 Search → 3 Play.
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(1)
         val opened = openApp("Spotify")
         if (!opened.success) {
-            AppLog.w("Hands", "spotify_play: step=open FAILED: ${opened.message}")
+            AppLog.w("Hands", "spotify_play: step=open FAILED")
             return opened
         }
         TaskState.throwIfStopRequested() // #61: after open-app
@@ -346,7 +445,7 @@ class DeepIntents(context: Context) {
             )
         val tabClick = HandsActions.clickElement(tab.index)
         if (!tabClick.success) {
-            AppLog.w("Hands", "spotify_play: step=search-tab tap FAILED: ${tabClick.message}")
+            AppLog.w("Hands", "spotify_play: step=search-tab tap FAILED")
             return ActionResult(false, "Spotify opened, but the Search tab could not be tapped: ${tabClick.message}")
         }
         AppLog.i("Hands", "spotify_play: step=search-tab tapped")
@@ -409,7 +508,7 @@ class DeepIntents(context: Context) {
                 }
                 val barClick = HandsActions.clickElement(bar.index)
                 if (!barClick.success) {
-                    AppLog.w("Hands", "spotify_play: step=search-bar tap FAILED: ${barClick.message}")
+                    AppLog.w("Hands", "spotify_play: step=search-bar tap FAILED")
                     return ActionResult(false, "Spotify's search bar could not be tapped: ${barClick.message}")
                 }
                 if (!HandsActions.waitForEditable(SEARCH_INPUT_WAIT_MS)) {
@@ -422,7 +521,7 @@ class DeepIntents(context: Context) {
             // tap is logged, not fatal — the field may already be focused).
             val focusClick = HandsActions.clickElement(field.index)
             if (!focusClick.success) {
-                AppLog.w("Hands", "spotify_play: step=search-field focus tap FAILED: ${focusClick.message}")
+                AppLog.w("Hands", "spotify_play: step=search-field focus tap FAILED")
             }
         }
         var typed = HandsActions.setTextOnFocused(cleanQuery)
@@ -431,17 +530,17 @@ class DeepIntents(context: Context) {
             // against a fresh snapshot before reporting failure.
             AppLog.w(
                 "Hands",
-                "spotify_play: step=type SET_TEXT FAILED (${typed.message}) — retrying tap-then-type"
+                "spotify_play: step=type SET_TEXT failed — retrying tap-then-type"
             )
             val freshField = reader.snapshot().firstOrNull { it.editable }
             if (freshField != null) HandsActions.clickElement(freshField.index)
             typed = HandsActions.setTextOnFocused(cleanQuery)
         }
         if (!typed.success) {
-            AppLog.w("Hands", "spotify_play: step=type FAILED after retry: ${typed.message}")
+            AppLog.w("Hands", "spotify_play: step=type FAILED after retry")
             return ActionResult(false, "Spotify search opened, but the query could not be typed: ${typed.message}")
         }
-        AppLog.i("Hands", "spotify_play: step=type done query='$cleanQuery'")
+        AppLog.i("Hands", "spotify_play: step=type done (${cleanQuery.length} chars)")
         TaskState.throwIfStopRequested() // #61: after search-field set
 
         // 3) First song row — poll results until a pick exists.
@@ -453,7 +552,7 @@ class DeepIntents(context: Context) {
         val chosen = rows.firstOrNull() ?: run {
             AppLog.w(
                 "Hands",
-                "spotify_play: no song row after waiting. Screen: ${reader.serialize(25)}"
+                "spotify_play: no song row after waiting; screen contents omitted"
             )
             return ActionResult(
                 false,
@@ -462,19 +561,19 @@ class DeepIntents(context: Context) {
                     "Spotify is showing a different layout."
             )
         }
-        AppLog.i("Hands", "spotify_play: step=results picked '${chosen.title}' (${rows.size} rows)")
+        AppLog.i("Hands", "spotify_play: step=results picked row 1 of ${rows.size}")
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Playing…")
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
         TaskState.throwIfStopRequested() // #61: before final tap
         val rowClick = HandsActions.clickElement(chosen.element.index)
         if (!rowClick.success) {
-            AppLog.w("Hands", "spotify_play: step=row-tap FAILED: ${rowClick.message}")
+            AppLog.w("Hands", "spotify_play: step=row-tap FAILED")
             return ActionResult(
                 false,
                 "Spotify results were shown, but the song could not be tapped: ${rowClick.message}"
             )
         }
-        AppLog.i("Hands", "spotify_play: step=row-tap done '${chosen.title}'")
+        AppLog.i("Hands", "spotify_play: step=row-tap done")
 
         // 4) Verify playback: a Pause affordance means audio is
         // playing. If a track/album page opened instead of playing,
@@ -486,7 +585,7 @@ class DeepIntents(context: Context) {
         TaskState.throwIfStopRequested() // #61: before playback verify
         if (awaitPauseAffordance(PAUSE_VERIFY_MS)) {
             markWarm(SPOTIFY_PACKAGE) // #23
-            AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED '${chosen.title}'")
+            AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED")
             return ActionResult(true, "Playing '${chosen.title}' on Spotify.")
         }
         val nextRow = rows.getOrNull(1)
@@ -494,12 +593,12 @@ class DeepIntents(context: Context) {
             AppLog.w(
                 "Hands",
                 "spotify_play: step=verify no Pause after first row — " +
-                    "retrying tap once on next row '${nextRow.title}'"
+                    "retrying tap once on next candidate row"
             )
             val retryClick = HandsActions.clickElement(nextRow.element.index)
             if (retryClick.success && awaitPauseAffordance(PAUSE_VERIFY_MS)) {
                 markWarm(SPOTIFY_PACKAGE) // #23
-                AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED on retry '${nextRow.title}'")
+                AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED on retry")
                 return ActionResult(true, "Playing '${nextRow.title}' on Spotify.")
             }
             AppLog.w(
@@ -612,7 +711,7 @@ class DeepIntents(context: Context) {
         AppLog.d(
             "Hands",
             "spotify_play pick: ${rows.size} rows considered (ads skipped=$skippedAds), " +
-                "first index=${rows.first().index} label='${rows.first().label.take(60)}'"
+                "first index=${rows.first().index}; labels omitted"
         )
         return rows.map { SpotifyPick(it, spotifyTitle(it.label)) }
     }
@@ -695,7 +794,7 @@ class DeepIntents(context: Context) {
                 "Hands",
                 "youtube_play pick: ${cards.size} cards considered " +
                     "(skipped ads=$skippedAds shorts=$skippedShorts chrome=$skippedChrome), " +
-                    "tapped index=${primary.index} label='${primary.label.take(60)}'"
+                    "tapped index=${primary.index}; label omitted"
             )
             return YoutubePick(primary, youtubeTitle(primary.label), viaFallback = false)
         }
@@ -823,7 +922,7 @@ class DeepIntents(context: Context) {
         val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val activities = try {
             appContext.packageManager.queryIntentActivities(launcherIntent, 0)
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             emptyList()
         }
         val wantedTokens = tokenize(name)
@@ -902,14 +1001,19 @@ class DeepIntents(context: Context) {
             Uri.parse("tel:$digits")
         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val launched = launch(intent)
-        return ActionResult(
-            launched,
-            when {
-                !launched -> "The phone app could not be opened for $displayName."
-                hasCallPermission -> "Calling $displayName."
-                else -> "Opened the dialer for $displayName — grant Phone Calls permission to place calls directly."
-            }
-        )
+        return when {
+            !launched -> ActionResult(false, "The phone app could not be opened.")
+            hasCallPermission -> ActionResult(
+                false,
+                "The call request was issued for the approved contact, but Jarvis cannot verify that the call connected. Check the phone screen before retrying.",
+                ActionOutcome.SUBMITTED_UNVERIFIED
+            )
+            else -> ActionResult(
+                false,
+                "The dialer is open for the approved contact. Jarvis did not place the call; review the number and tap Call yourself.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        }
     }
 
     // ── Hardware ───────────────────────────────────────────────────────
@@ -923,7 +1027,7 @@ class DeepIntents(context: Context) {
         return try {
             audio.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
             ActionResult(true, "Media volume set to $safePercent%.")
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             ActionResult(false, "Volume could not be changed: ${e.message ?: "system denied it"}")
         }
     }
@@ -949,7 +1053,7 @@ class DeepIntents(context: Context) {
             ?: return ActionResult(false, "No camera is available for the torch.")
             cameraManager.setTorchMode(backCameraId, on)
             ActionResult(true, "Torch turned ${if (on) "on" else "off"}.")
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             ActionResult(false, "Torch could not be changed: ${e.message ?: "camera busy or denied"}")
         }
     }
@@ -977,7 +1081,7 @@ class DeepIntents(context: Context) {
             val value = (255 * safePercent / 100.0).toInt().coerceIn(0, 255)
             Settings.System.putInt(resolver, Settings.System.SCREEN_BRIGHTNESS, value)
             ActionResult(true, "Brightness set to $safePercent%.")
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             ActionResult(false, "Brightness could not be changed: ${e.message ?: "system denied it"}")
         }
     }
@@ -1014,7 +1118,7 @@ class DeepIntents(context: Context) {
             audio.dispatchMediaKeyEvent(up)
             AppLog.i("Hands", "media key dispatched: $action")
             ActionResult(true, "Media ${action.replace('_', ' ')} sent.")
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             ActionResult(false, "Media key could not be sent: ${e.message ?: "system denied it"}")
         }
     }
@@ -1084,7 +1188,7 @@ class DeepIntents(context: Context) {
                 true,
                 if (on) "Silent mode on." else "Silent mode off — ringer back to normal."
             )
-        } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+        } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
             ActionResult(false, "Silent mode could not be changed: ${e.message ?: "system denied it"}")
         }
     }
@@ -1097,7 +1201,7 @@ class DeepIntents(context: Context) {
             128
         )
         (value * 100 / 255).coerceIn(0, 100)
-    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
         0
     }
 
@@ -1121,7 +1225,8 @@ class DeepIntents(context: Context) {
      */
     suspend fun whatsappShareLatestPhoto(
         phone: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        expectedContactName: String,
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val digits = ContactsResolver.normalizePhone(phone)
         if (digits.length < 10) {
@@ -1145,48 +1250,99 @@ class DeepIntents(context: Context) {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        try {
-            appContext.grantUriPermission(
-                pkg, photo, Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
-        } catch (e: Exception) {
-            // The intent flag usually suffices; the explicit grant is a bonus.
-        }
+        // FLAG_GRANT_READ_URI_PERMISSION scopes access to this share intent.
+        // Avoid a separate explicit grant, which would require extra revocation
+        // bookkeeping on every early return from the consent flow.
         if (!launch(intent)) {
             return ActionResult(false, "WhatsApp could not be opened for the photo share.")
         }
-        AppLog.i("Send", "stage: photo share opened for $digits")
+        AppLog.i("Send", "stage: WhatsApp photo share opened")
         HandsActions.waitForPackage(pkg, 3_000)
         HandsActions.waitForSettle(1_500)
         TaskState.throwIfStopRequested()
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
-                true,
-                "WhatsApp opened with the photo ready — tap Send to send it."
+                false,
+                "WhatsApp opened with the photo ready, but Jarvis did not send it. Tap Send yourself; do not treat this as sent.",
+                ActionOutcome.STAGED_FOR_USER
             )
         val reader = service.screenReader()
-        val snapshot = reader.snapshot()
+        var snapshot = reader.snapshot()
+        val visibleRecipient = currentChatTitle(pkg)
+        if (
+            visibleRecipient == null ||
+            !WhatsAppRecipientGuard.matchesApprovedChat(visibleRecipient, expectedContactName, digits)
+        ) {
+            AppLog.w("Send", "photo share aborted: approved recipient could not be verified")
+            return ActionResult(
+                false,
+                "Aborted: the visible WhatsApp recipient could not be verified against the approved contact. The photo was not sent; close this share flow and select the correct chat.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        }
         val send = Playbooks.find(snapshot, pkg, Playbooks.ROLE_SEND_BUTTON)
             ?: reader.findByText("Send", snapshot)
-                ?.takeIf { it.clickable || it.desc.contains("send", true) }
+                ?.takeIf { it.enabled && (it.clickable || it.desc.contains("send", true)) }
             ?: return ActionResult(
-                true,
-                "WhatsApp opened with the photo attached — tap Send to send it " +
-                    "(the Send button was not found automatically)."
+                false,
+                "WhatsApp opened with the photo attached, but the Send control could not be verified. The draft remains open; nothing was sent.",
+                ActionOutcome.STAGED_FOR_USER
             )
-        // v2.0.2 JIT ask: photo attached + Send button found, send
-        // NOT yet tapped. A decline leaves the share screen untouched.
-        if (askBeforeSend != null && !askBeforeSend()) {
-            return ActionResult(false, "Not sent.")
+        // Photo attached + Send target identified; approval must be given now.
+        if (!askBeforeSend()) return ActionResult(false, "Not sent.")
+        TaskState.throwIfStopRequested()
+        snapshot = reader.snapshot()
+        if (reader.currentPackage() != pkg ||
+            JarvisAccessibilityService.lastPackageName?.let { it != pkg } == true
+        ) {
+            return ActionResult(
+                false,
+                "The active app changed after confirmation. The photo was not sent."
+            )
         }
-        val click = HandsActions.clickElement(send.index)
+        val confirmedRecipient = currentChatTitle(pkg)
+        if (
+            confirmedRecipient == null ||
+            !WhatsAppRecipientGuard.matchesApprovedChat(confirmedRecipient, expectedContactName, digits) ||
+            WhatsAppRecipientGuard.normalizedChatKey(confirmedRecipient) != WhatsAppRecipientGuard.normalizedChatKey(visibleRecipient)
+        ) {
+            AppLog.w("Send", "photo share aborted: recipient changed or no longer verifies")
+            return ActionResult(
+                false,
+                "Aborted: the WhatsApp recipient changed or could not be re-verified after confirmation. The photo was not sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        }
+        val refreshedSend = Playbooks.find(snapshot, pkg, Playbooks.ROLE_SEND_BUTTON)
+            ?: reader.findByText("Send", snapshot)
+                ?.takeIf { it.enabled && (it.clickable || it.desc.contains("send", true)) }
+            ?: return ActionResult(
+                false,
+                "The Send control disappeared after confirmation. The photo remains staged and was not sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+
+        // Exact package-scoped permit is issued only for the final fresh target.
+        TaskState.throwIfStopRequested()
+        HandsActions.grantSendPermit(pkg, ttlMs = 5_000L)
+        val click = try {
+            HandsActions.clickElement(refreshedSend.index)
+        } finally {
+            HandsActions.revokeSendPermit(pkg)
+        }
         if (!click.success) {
             return ActionResult(
-                false, "The photo share opened, but Send could not be pressed: ${click.message}"
+                false,
+                "The photo Send action could not be confirmed; check the chat before retrying because the outcome may be uncertain.",
+                ActionOutcome.OUTCOME_UNKNOWN
             )
         }
-        AppLog.i("Send", "stage: photo send tapped for $digits")
-        return ActionResult(true, "Photo sent to the WhatsApp chat.")
+        AppLog.i("Send", "stage: WhatsApp photo send control tapped")
+        return ActionResult(
+            false,
+            "The photo Send control was tapped, but delivery is not verified. Check the chat before retrying to avoid a duplicate.",
+            ActionOutcome.SUBMITTED_UNVERIFIED
+        )
     }
 
     /** The newest image in the device gallery, or null. */
@@ -1206,7 +1362,7 @@ class DeepIntents(context: Context) {
             }
         }
     } catch (e: Exception) {
-        AppLog.w("Hands", "latest photo lookup failed: ${e.message}")
+        AppLog.w("Hands", "latest photo lookup failed (${e.javaClass.simpleName})")
         null
     }
 
@@ -1243,7 +1399,7 @@ class DeepIntents(context: Context) {
     suspend fun typeAndSendInOpenChat(
         packageName: String,
         message: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
@@ -1255,8 +1411,8 @@ class DeepIntents(context: Context) {
             return ActionResult(false, "The chat is no longer open in the foreground.")
         }
         var snapshot = reader.snapshot()
-        val entry = snapshot.firstOrNull { it.editable }
-            ?: return ActionResult(false, "No message field was found in the open chat.")
+        val entry = snapshot.firstOrNull { it.editable && it.enabled }
+            ?: return ActionResult(false, "No enabled message field was found in the open chat.")
         val tapped = HandsActions.clickElement(entry.index)
         if (!tapped.success) {
             return ActionResult(false, "The message field could not be focused: ${tapped.message}")
@@ -1267,38 +1423,110 @@ class DeepIntents(context: Context) {
         }
         TaskState.throwIfStopRequested()
         HandsActions.waitForSettle(600)
-        // v2.0.2 JIT ask: text typed, send NOT yet tapped. A decline
-        // leaves the typed text in the open chat, untouched.
-        if (askBeforeSend != null && !askBeforeSend()) {
+
+        // Just-in-time approval is mandatory for every send path.
+        if (!askBeforeSend()) {
             return ActionResult(false, "Not sent.")
         }
+        TaskState.throwIfStopRequested()
+
+        // The user may have switched apps or changed the draft while answering.
         snapshot = reader.snapshot()
+        if (reader.currentPackage() != packageName ||
+            JarvisAccessibilityService.lastPackageName?.let { it != packageName } == true
+        ) {
+            HandsActions.revokeSendPermit(packageName)
+            return ActionResult(
+                false,
+                "The active app changed after confirmation. Nothing was sent."
+            )
+        }
+        if (snapshot.none { it.editable && it.text == message }) {
+            HandsActions.revokeSendPermit(packageName)
+            return ActionResult(
+                false,
+                "The message draft changed after confirmation. Nothing was sent."
+            )
+        }
+
+        // Existing chat history with identical text is not evidence of a new send.
+        fun bubbleSignature(element: UiElement): String =
+            "${element.viewId}\u0001${element.className}\u0001" +
+                "${element.text.trim()}\u0001${element.desc.trim()}"
+        fun bubbleCounts(elements: List<UiElement>): Map<String, Int> =
+            elements.filter { element ->
+                !element.editable && message.isNotEmpty() &&
+                    (element.text.contains(message) || element.label.contains(message))
+            }.groupingBy(::bubbleSignature).eachCount()
+        val previousBubbleCounts = bubbleCounts(snapshot)
+
         val send = Playbooks.find(snapshot, packageName, Playbooks.ROLE_SEND_BUTTON)
             ?: reader.findByText("Send", snapshot)
-                ?.takeIf { it.clickable || it.desc.contains("send", true) }
-            ?: return ActionResult(
-                true,
-                "The message was typed into the chat — tap Send to send it " +
-                    "(the Send button was not found automatically)."
+                ?.takeIf { it.enabled && (it.clickable || it.desc.contains("send", true)) }
+            ?: run {
+                HandsActions.revokeSendPermit(packageName)
+                return ActionResult(
+                    false,
+                    "The message is typed, but the Send button could not be verified. The draft remains open; nothing was sent.",
+                    ActionOutcome.STAGED_FOR_USER
+                )
+            }
+
+        // Final guard immediately before consuming the one-shot permit.
+        TaskState.throwIfStopRequested()
+        if (reader.currentPackage() != packageName) {
+            HandsActions.revokeSendPermit(packageName)
+            return ActionResult(
+                false,
+                "The active app changed before Send. Nothing was sent."
             )
-        val click = HandsActions.clickElement(send.index)
+        }
+
+        // Grant only after all post-confirmation checks, immediately before
+        // the single Send tap; revoke even if the tap suspends or is cancelled.
+        HandsActions.grantSendPermit(packageName, ttlMs = 5_000L)
+        val click = try {
+            HandsActions.clickElement(send.index)
+        } finally {
+            HandsActions.revokeSendPermit(packageName)
+        }
         if (!click.success) {
-            return ActionResult(false, "Send could not be pressed: ${click.message}")
+            return ActionResult(
+                false,
+                "The Send action could not be confirmed; check the chat before retrying because the outcome may be uncertain.",
+                ActionOutcome.OUTCOME_UNKNOWN
+            )
         }
-        // Verify like whatsapp_message: the entry must clear.
+
+        // Composer clear + a newly appearing matching non-editable message
+        // are useful submission signals, but neither proves delivery/read status.
+        var composerCleared = false
+        var newMessageObserved = false
         val deadline = System.currentTimeMillis() + 2_000
-        var cleared = false
-        while (System.currentTimeMillis() < deadline && !cleared) {
+        while (System.currentTimeMillis() < deadline &&
+            !(composerCleared && newMessageObserved)
+        ) {
+            TaskState.throwIfStopRequested()
             delay(200)
-            val current = reader.snapshot().firstOrNull { it.editable }
-            if (current == null || current.text.isBlank()) cleared = true
+            snapshot = reader.snapshot()
+            val currentEntry = snapshot.firstOrNull { it.editable }
+            if (currentEntry == null || currentEntry.text.isBlank()) composerCleared = true
+            val nextCounts = bubbleCounts(snapshot)
+            newMessageObserved = nextCounts.any { (signature, count) ->
+                count > previousBubbleCounts.getOrDefault(signature, 0)
+            }
         }
-        return if (cleared) {
-            ActionResult(true, "Message sent and verified.")
+        return if (composerCleared && newMessageObserved) {
+            ActionResult(
+                false,
+                "A new matching chat message appeared and the composer cleared. Submission looks successful, but delivery is unverified. Check the chat before retrying to avoid a duplicate.",
+                ActionOutcome.SUBMITTED_UNVERIFIED
+            )
         } else {
             ActionResult(
                 false,
-                "Send was pressed, but the message field did not clear, so sending is unverified."
+                "Send was tapped, but Jarvis could not confirm both a cleared composer and a newly appearing message. The outcome is uncertain; check the chat before retrying.",
+                ActionOutcome.OUTCOME_UNKNOWN
             )
         }
     }
@@ -1312,7 +1540,7 @@ class DeepIntents(context: Context) {
     suspend fun whatsappGroupMessage(
         groupName: String,
         message: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val pkg = "com.whatsapp"
         if (!isPackageInstalled(pkg)) {
@@ -1366,7 +1594,7 @@ class DeepIntents(context: Context) {
     suspend fun instagramDm(
         contactQuery: String,
         message: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val pkg = Playbooks.INSTAGRAM_PACKAGE
         if (!isPackageInstalled(pkg)) {
@@ -1415,7 +1643,7 @@ class DeepIntents(context: Context) {
     suspend fun telegramMessage(
         contactQuery: String,
         message: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val pkg = "org.telegram.messenger"
         if (!isPackageInstalled(pkg)) {
@@ -1464,7 +1692,7 @@ class DeepIntents(context: Context) {
     suspend fun smsSend(
         phone: String,
         message: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val digits = ContactsResolver.normalizePhone(phone)
         if (digits.length < 7) {
@@ -1480,24 +1708,63 @@ class DeepIntents(context: Context) {
         HandsActions.waitForSettle(1_500)
         val service = JarvisAccessibilityService.instance
             ?: return ActionResult(
-                true,
-                "The SMS composer is open with the message ready — tap Send there."
+                false,
+                "The SMS composer is open with the message ready, but Jarvis did not send it. Tap Send yourself; do not treat this as sent.",
+                ActionOutcome.STAGED_FOR_USER
             )
-        // v2.0.2 JIT ask: composer filled, Send NOT yet tapped. A
-        // decline leaves the composer open with the text untouched.
-        if (askBeforeSend != null && !askBeforeSend()) {
-            return ActionResult(false, "Not sent.")
+        // Just-in-time confirmation occurs before the final Send tap.
+        if (!askBeforeSend()) return ActionResult(false, "Not sent.")
+        val reader = service.screenReader()
+        val pkg = reader.currentPackage()
+            ?: return ActionResult(false, "The SMS app could not be identified; nothing was sent.")
+        if (JarvisAccessibilityService.lastPackageName != null &&
+            JarvisAccessibilityService.lastPackageName != pkg
+        ) {
+            return ActionResult(false, "The active app changed before Send; nothing was sent.")
         }
-        val pkg = service.screenReader().currentPackage()
-        if (pkg != null) HandsActions.grantSendPermit(pkg)
-        val tapped = HandsActions.clickText("Send")
+        var snapshot = reader.snapshot()
+        if (snapshot.none { it.editable && it.text == message }) {
+            return ActionResult(
+                false,
+                "The SMS draft could not be verified exactly. Nothing was sent."
+            )
+        }
+        // Approval can take time. Re-check package and draft before tapping.
+        TaskState.throwIfStopRequested()
+        snapshot = reader.snapshot()
+        if (reader.currentPackage() != pkg ||
+            snapshot.none { it.editable && it.text == message }
+        ) {
+            return ActionResult(
+                false,
+                "The SMS app or draft changed after confirmation. Nothing was sent."
+            )
+        }
+        val send = reader.findByText("Send", snapshot)
+            ?.takeIf { it.enabled && (it.clickable || it.desc.contains("send", true)) }
+            ?: return ActionResult(
+                false,
+                "The SMS Send control could not be verified. The draft remains open and was not sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        TaskState.throwIfStopRequested()
+        HandsActions.grantSendPermit(pkg)
+        val tapped = try {
+            HandsActions.clickElement(send.index)
+        } finally {
+            HandsActions.revokeSendPermit(pkg)
+        }
         return if (tapped.success) {
-            ActionResult(true, "SMS sent via the default SMS app.")
+            ActionResult(
+                false,
+                "The SMS Send control was tapped, but delivery is not verified. Check the conversation before retrying to avoid a duplicate.",
+                ActionOutcome.OUTCOME_UNKNOWN
+            )
         } else {
             ActionResult(
-                true,
-                "The SMS composer is open with the message typed — tap Send " +
-                    "in the SMS app to send it."
+                false,
+                "The SMS send action could not be confirmed. Check the SMS app before retrying because the outcome may be uncertain.",
+                ActionOutcome.OUTCOME_UNKNOWN
             )
         }
     }
@@ -1511,7 +1778,7 @@ class DeepIntents(context: Context) {
         to: String,
         subject: String,
         body: String,
-        askBeforeSend: (suspend () -> Boolean)? = null
+        askBeforeSend: suspend () -> Boolean
     ): ActionResult {
         val pkg = Playbooks.GMAIL_PACKAGE
         if (!isPackageInstalled(pkg)) {
@@ -1529,20 +1796,72 @@ class DeepIntents(context: Context) {
         }
         HandsActions.waitForPackage(pkg, 3_000)
         HandsActions.waitForSettle(1_500)
-        // v2.0.2 JIT ask: compose filled, Send NOT yet tapped. A
-        // decline leaves the compose screen open with text untouched.
-        if (askBeforeSend != null && !askBeforeSend()) {
-            return ActionResult(false, "Not sent.")
+        if (!askBeforeSend()) return ActionResult(false, "Not sent.")
+        val service = JarvisAccessibilityService.instance
+            ?: return ActionResult(
+                false,
+                "Gmail compose is open, but Jarvis did not send the email. Tap Send yourself; do not treat this as sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        val reader = service.screenReader()
+        var snapshot = reader.snapshot()
+        if (reader.currentPackage() != pkg) {
+            return ActionResult(false, "Gmail is not the active app; nothing was sent.")
         }
+        // Gmail may hide individual compose fields from accessibility. Fail
+        // closed rather than tapping Send unless recipient and body match.
+        val editableTexts = snapshot.filter { it.editable }.map { it.text }
+        if (editableTexts.none { it.contains(to, ignoreCase = true) } ||
+            editableTexts.none { it.contains(body) }
+        ) {
+            return ActionResult(
+                false,
+                "Gmail's recipient/body could not be verified in the compose screen. The draft remains open and was not sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        }
+        TaskState.throwIfStopRequested()
+        snapshot = reader.snapshot()
+        if (reader.currentPackage() != pkg) {
+            return ActionResult(
+                false,
+                "The active app changed after confirmation. The email was not sent."
+            )
+        }
+        val refreshedTexts = snapshot.filter { it.editable }.map { it.text }
+        if (refreshedTexts.none { it.contains(to, ignoreCase = true) } ||
+            refreshedTexts.none { it.contains(body) }
+        ) {
+            return ActionResult(
+                false,
+                "The Gmail draft changed after confirmation. The email was not sent."
+            )
+        }
+        val send = reader.findByText("Send", snapshot)
+            ?.takeIf { it.enabled && (it.clickable || it.desc.contains("send", true)) }
+            ?: return ActionResult(
+                false,
+                "The Gmail Send control could not be verified. The draft remains open and was not sent.",
+                ActionOutcome.STAGED_FOR_USER
+            )
+        TaskState.throwIfStopRequested()
         HandsActions.grantSendPermit(pkg)
-        val tapped = HandsActions.clickText("Send")
+        val tapped = try {
+            HandsActions.clickElement(send.index)
+        } finally {
+            HandsActions.revokeSendPermit(pkg)
+        }
         return if (tapped.success) {
-            ActionResult(true, "Email sent via Gmail.")
+            ActionResult(
+                false,
+                "Gmail's Send control was tapped, but delivery is not verified. Check Gmail's Sent folder before retrying to avoid a duplicate.",
+                ActionOutcome.OUTCOME_UNKNOWN
+            )
         } else {
             ActionResult(
-                true,
-                "Gmail compose is open with the email filled in — tap Send " +
-                    "in Gmail to send it."
+                false,
+                "The Gmail send action could not be confirmed. Check the draft/Sent folder before retrying because the outcome may be uncertain.",
+                ActionOutcome.OUTCOME_UNKNOWN
             )
         }
     }
@@ -1566,7 +1885,11 @@ class DeepIntents(context: Context) {
                 hour > 12 -> hour - 12
                 else -> hour
             }
-            ActionResult(true, "Alarm set for $h12:${minute.toString().padStart(2, '0')} $ampm.")
+            ActionResult(
+                false,
+                "The Clock app accepted the request for $h12:${minute.toString().padStart(2, '0')} $ampm, but Jarvis cannot verify the alarm exists. Check the alarm list before retrying to avoid a duplicate.",
+                ActionOutcome.SUBMITTED_UNVERIFIED
+            )
         } else {
             ActionResult(false, "No clock app accepted the alarm.")
         }
@@ -1582,7 +1905,11 @@ class DeepIntents(context: Context) {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         return if (launch(intent)) {
-            ActionResult(true, "Timer started for ${formatDuration(seconds)}.")
+            ActionResult(
+                false,
+                "The Clock app accepted the timer request for ${formatDuration(seconds)}, but Jarvis cannot verify the countdown is active. Check the Clock app before retrying.",
+                ActionOutcome.SUBMITTED_UNVERIFIED
+            )
         } else {
             ActionResult(false, "No clock app accepted the timer.")
         }
@@ -1610,8 +1937,9 @@ class DeepIntents(context: Context) {
         }
         return if (launch(intent)) {
             ActionResult(
-                true,
-                "Calendar opened with the event draft \"$title\" — review it and tap Save there."
+                false,
+                "Calendar opened with the event draft \"$title\" — review it and tap Save there.",
+                ActionOutcome.STAGED_FOR_USER
             )
         } else {
             ActionResult(false, "No calendar app could be opened.")
@@ -1631,6 +1959,8 @@ class DeepIntents(context: Context) {
         if (latest == null) {
             val encoded = try {
                 service?.captureScreenshotBase64()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 null
             } ?: return ActionResult(
@@ -1660,7 +1990,11 @@ class DeepIntents(context: Context) {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         return if (launch(chooser)) {
-            ActionResult(true, "Share sheet opened with the screenshot — pick where to send it.")
+            ActionResult(
+                false,
+                "Share sheet opened with the screenshot — choose a destination to complete sharing.",
+                ActionOutcome.STAGED_FOR_USER
+            )
         } else {
             ActionResult(false, "The share sheet could not be opened.")
         }
@@ -1676,20 +2010,20 @@ class DeepIntents(context: Context) {
     private fun launch(intent: Intent): Boolean = try {
         appContext.startActivity(intent)
         true
-    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
         false
     }
 
     private fun canResolve(intent: Intent): Boolean = try {
         appContext.packageManager.resolveActivity(intent, 0) != null
-    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
         false
     }
 
     private fun isPackageInstalled(packageName: String): Boolean = try {
         appContext.packageManager.getPackageInfo(packageName, 0)
         true
-    } catch (e: TaskStoppedException) { throw e } catch (e: Exception) {
+    } catch (e: TaskStoppedException) { throw e } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) {
         false
     }
 

@@ -290,9 +290,28 @@ private fun CodeCanvas(lang: String, code: String) {
                     androidx.compose.ui.viewinterop.AndroidView(
                         factory = { android.webkit.WebView(it) },
                         update = { webView ->
-                            webView.settings.javaScriptEnabled = true
+                            // AI/provider HTML is untrusted. Render markup and CSS
+                            // only: no script execution, file/content access, network
+                            // fetches, or navigation out of the preview.
+                            webView.settings.apply {
+                                javaScriptEnabled = false
+                                allowFileAccess = false
+                                allowContentAccess = false
+                                blockNetworkLoads = true
+                                domStorageEnabled = false
+                            }
+                            webView.webViewClient = object : android.webkit.WebViewClient() {
+                                override fun shouldOverrideUrlLoading(
+                                    view: android.webkit.WebView?,
+                                    request: android.webkit.WebResourceRequest?
+                                ): Boolean = true
+                            }
                             webView.loadDataWithBaseURL(
-                                null, code, "text/html", "utf-8", null
+                                "https://jarvis-preview.invalid/",
+                                code,
+                                "text/html",
+                                "utf-8",
+                                null
                             )
                         },
                         modifier = Modifier

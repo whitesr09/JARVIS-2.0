@@ -29,7 +29,24 @@ import java.util.ArrayDeque
 import kotlin.coroutines.resume
 import kotlin.math.abs
 
-data class ActionResult(val success: Boolean, val message: String)
+enum class ActionOutcome {
+    /** The requested action was completed to the level stated in its result. */
+    COMPLETED,
+    /** The relevant composer/draft is open, but Jarvis did not submit it. */
+    STAGED_FOR_USER,
+    /** A send was submitted and visible UI evidence appeared; delivery is not confirmed. */
+    SUBMITTED_UNVERIFIED,
+    /** The action may have happened, but the app cannot prove its final state. */
+    OUTCOME_UNKNOWN,
+    /** The action did not complete and there is no evidence it was submitted. */
+    FAILED
+}
+
+data class ActionResult(
+    val success: Boolean,
+    val message: String,
+    val outcome: ActionOutcome = if (success) ActionOutcome.COMPLETED else ActionOutcome.FAILED
+)
 
 /** Resolved editable target + everything the edit/insert paths need (F6). */
 private class EditableTarget(
@@ -50,6 +67,8 @@ private class EditableTarget(
  * gesture is used only when no clickable node accepts the action.
  */
 object HandsActions {
+    private const val MAX_SEND_PERMIT_TTL_MS = 5_000L
+
     private val mutex = Mutex()
 
     // F6 speed pass constants: settle polling cadence and the short
@@ -99,39 +118,58 @@ object HandsActions {
     // sending messages"). The fix: after the tool's gate approves,
     // ToolExecutor issues ONE permit; the guard consumes it for
     // exactly one SEND-class tap in the permitted package. Permits
-    // never cover SOCIAL/DESTRUCTIVE phrases, expire in ~30 s, and a
-    // second send tap gates again as usual.
+    // never cover SOCIAL/DESTRUCTIVE phrases, expire within 5 seconds,
+    // and a second send tap gates again as usual.
 
-    /** Packages with a live permit (both WhatsApp variants are granted together). */
-    private val sendPermitPackages = mutableSetOf<String>()
+    /** Exactly one confirmed package may consume the next send permit. */
+    private var sendPermitPackage: String? = null
 
     @Volatile
     private var sendPermitExpiresAtMs: Long = 0L
 
-    /** Issue the one-shot permit for [packageName] (called post-gate). */
+    /** Issue a one-shot permit for the exact app containing the confirmed composer. */
     @Synchronized
-    fun grantSendPermit(packageName: String, ttlMs: Long = 30_000L) {
-        sendPermitPackages += packageName
-        sendPermitExpiresAtMs = System.currentTimeMillis() + ttlMs
+    fun grantSendPermit(packageName: String, ttlMs: Long = 5_000L) {
+        if (packageName.isBlank() || ttlMs <= 0L) {
+            sendPermitPackage = null
+            sendPermitExpiresAtMs = 0L
+            return
+        }
+        // Callers may request less time, but never extend a sensitive
+        // one-shot consent beyond the five-second upper bound.
+        val boundedTtlMs = ttlMs.coerceAtMost(MAX_SEND_PERMIT_TTL_MS)
+        sendPermitPackage = packageName
+        sendPermitExpiresAtMs = System.currentTimeMillis() + boundedTtlMs
         com.nshd.jarvis2.core.AppLog.i(
             "Send",
-            "permit granted for $packageName (one send tap, ${ttlMs / 1000}s)"
+            "one-shot permit granted (${boundedTtlMs}ms, package-scoped)"
         )
     }
 
-    /** Consume the permit iff it matches [packageName] and is unexpired. */
+    /** Revoke an unused permit when the associated tap exits without consuming it. */
+    @Synchronized
+    fun revokeSendPermit(packageName: String? = null) {
+        if (packageName == null || sendPermitPackage == packageName) {
+            sendPermitPackage = null
+            sendPermitExpiresAtMs = 0L
+        }
+    }
+
+    /** Consume the permit once, and only in the exact confirmed package. */
     @Synchronized
     private fun consumeSendPermit(packageName: String?): Boolean {
-        if (packageName == null || packageName !in sendPermitPackages) return false
-        if (System.currentTimeMillis() > sendPermitExpiresAtMs) {
-            sendPermitPackages.clear()
-            com.nshd.jarvis2.core.AppLog.d("Send", "permit expired unused for $packageName")
+        val permittedPackage = sendPermitPackage ?: return false
+        if (System.currentTimeMillis() > sendPermitExpiresAtMs ||
+            packageName == null || packageName != permittedPackage
+        ) {
+            // Do not allow an unused permit to survive an app/package switch.
+            sendPermitPackage = null
+            sendPermitExpiresAtMs = 0L
+            com.nshd.jarvis2.core.AppLog.d("Send", "one-shot permit expired or package mismatch")
             return false
         }
-        // One-shot per package: the tap that consumes it is the only
-        // one the permit ever covers.
-        sendPermitPackages -= packageName
-        if (sendPermitPackages.isEmpty()) sendPermitExpiresAtMs = 0L
+        sendPermitPackage = null
+        sendPermitExpiresAtMs = 0L
         return true
     }
 
@@ -167,14 +205,14 @@ object HandsActions {
         if (scrollsUsed > 0) {
             com.nshd.jarvis2.core.AppLog.i(
                 "Hands",
-                "scroll-search for \"$text\": $scrollsUsed scroll(s) used, " +
+                "scroll-search (query ${text.length} chars): $scrollsUsed scroll(s) used, " +
                     if (found != null) "found" else "still not found"
             )
         }
         val element = found?.element
             ?: return@serializedLong ActionResult(false, "No visible element matched \"$text\".")
         com.nshd.jarvis2.core.AppLog.d(
-            "Hands", "find strategy=${found?.strategy ?: "none"} for \"$text\""
+            "Hands", "find strategy=${found?.strategy ?: "none"} (query ${text.length} chars)"
         )
         sensitiveTapDenial(service, element, text)?.let { return@serializedLong it }
         clickResolved(service, element, "\"${element.label.ifBlank { text }}\"")
@@ -793,7 +831,7 @@ object HandsActions {
     fun pushUndo(entry: UndoEntry) {
         undoStack.addLast(entry)
         while (undoStack.size > 10) undoStack.removeFirst()
-        com.nshd.jarvis2.core.AppLog.d("Hands", "undo recorded: ${entry.label}")
+        com.nshd.jarvis2.core.AppLog.d("Hands", "undo recorded (kind=${entry.kind})")
     }
 
     @Synchronized
@@ -807,7 +845,7 @@ object HandsActions {
             false,
             "Nothing to undo — no reversible action was recorded this session."
         )
-        com.nshd.jarvis2.core.AppLog.i("Hands", "undo: ${entry.label} (kind=${entry.kind})")
+        com.nshd.jarvis2.core.AppLog.i("Hands", "undo started (kind=${entry.kind})")
         return when (entry.kind) {
             "restore_text" -> restoreFocusedText(entry.payload)
             "delete_chars" -> editTextOnFocused(
@@ -1122,8 +1160,7 @@ object HandsActions {
         // own ask + decision under the "SendAsk" tag).
         com.nshd.jarvis2.core.AppLog.w(
             "Hands",
-            "SensitiveTapGuard triggered ('$phrase') on " +
-                "'${displayLabel.trim().take(50)}' in ${packageName ?: "unknown app"}"
+            "SensitiveTapGuard triggered (phrase pattern matched) in ${packageName ?: "unknown app"}"
         )
         if (phrase in SEND_PHRASES) {
             // v2.0.3: the surviving send card lived HERE. A generic
@@ -1243,7 +1280,7 @@ object HandsActions {
             while (candidate != null && steps <= 8) {
                 if (candidate.isClickable && candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                     com.nshd.jarvis2.core.AppLog.i(
-                        "Hands", "click strategy=a11y-click succeeded for ${targetDescription.take(60)}"
+                        "Hands", "click strategy=a11y-click succeeded"
                     )
                     return ActionResult(true, "Clicked $targetDescription.")
                 }
@@ -1252,14 +1289,14 @@ object HandsActions {
             }
         } else {
             com.nshd.jarvis2.core.AppLog.w(
-                "Hands", "click target vanished, using snapshot bounds for ${targetDescription.take(60)}"
+                "Hands", "click target vanished, using snapshot bounds"
             )
         }
 
         // Primary coordinate tap: centre of the node bounds.
         if (dispatchSwipe(service, centerX, centerY, centerX, centerY, durationMs = 60)) {
             com.nshd.jarvis2.core.AppLog.i(
-                "Hands", "click strategy=centre succeeded for ${targetDescription.take(60)}"
+                "Hands", "click strategy=centre succeeded"
             )
             return ActionResult(true, "Clicked $targetDescription with a coordinate tap fallback.")
         }
@@ -1275,7 +1312,7 @@ object HandsActions {
                 lastY = parentY
                 if (dispatchSwipe(service, parentX, parentY, parentX, parentY, durationMs = 60)) {
                     com.nshd.jarvis2.core.AppLog.i(
-                        "Hands", "click strategy=parent-centre succeeded for ${targetDescription.take(60)}"
+                        "Hands", "click strategy=parent-centre succeeded"
                     )
                     return ActionResult(true, "Clicked $targetDescription with a coordinate tap fallback.")
                 }
@@ -1289,7 +1326,7 @@ object HandsActions {
         lastY = edgeY
         if (dispatchSwipe(service, edgeX, edgeY, edgeX, edgeY, durationMs = 60)) {
             com.nshd.jarvis2.core.AppLog.i(
-                "Hands", "click strategy=edge-25 succeeded for ${targetDescription.take(60)}"
+                "Hands", "click strategy=edge-25 succeeded"
             )
             return ActionResult(true, "Clicked $targetDescription with a coordinate tap fallback.")
         }
@@ -1317,7 +1354,7 @@ object HandsActions {
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            com.nshd.jarvis2.core.AppLog.w("Hands", "Tap failed — screenshot capture failed: ${e.message}")
+            com.nshd.jarvis2.core.AppLog.w("Hands", "Tap failed — screenshot capture failed (${e.javaClass.simpleName})")
             null
         }
         if (encoded == null) {
@@ -1361,14 +1398,14 @@ object HandsActions {
                     ?.drop(10)
                     ?.forEach { stale -> runCatching { stale.delete() } }
                 com.nshd.jarvis2.core.AppLog.i(
-                    "Hands", "Tap failed — annotated screenshot saved: ${file.absolutePath}"
+                    "Hands", "Tap failed — annotated screenshot saved"
                 )
             } finally {
                 bitmap.recycle()
                 if (decoded !== bitmap) decoded.recycle()
             }
         }.onFailure { e ->
-            com.nshd.jarvis2.core.AppLog.w("Hands", "Tap failed — annotated screenshot failed: ${e.message}")
+            com.nshd.jarvis2.core.AppLog.w("Hands", "Tap failed — annotated screenshot failed (${e.javaClass.simpleName})")
         }
     }
 

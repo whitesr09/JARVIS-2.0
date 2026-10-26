@@ -5,8 +5,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
-import java.io.PrintWriter
-import java.io.StringWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -108,12 +106,31 @@ object AppLog {
     fun e(tag: String, msg: String) = add(Level.E, tag, msg, null)
 
     fun e(tag: String, msg: String, throwable: Throwable?) {
-        val stack = throwable?.let { t ->
-            runCatching {
-                StringWriter().also { sw -> t.printStackTrace(PrintWriter(sw)) }.toString()
-            }.getOrNull()
+        // Exception messages may contain URLs, submitted text, or provider
+        // payload fragments. Keep class names and stack frames, not messages.
+        add(Level.E, tag, msg, throwable?.let(::formatThrowableForLog))
+    }
+
+    internal fun formatThrowableForLog(throwable: Throwable): String {
+        val out = StringBuilder()
+        val seen = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<Throwable, Boolean>()
+        )
+        var current: Throwable? = throwable
+        var depth = 0
+        while (current != null && seen.add(current) && depth < 5) {
+            if (depth == 0) {
+                out.append(current.javaClass.name)
+            } else {
+                out.append("\nCaused by: ").append(current.javaClass.name)
+            }
+            current.stackTrace.take(20).forEach { frame ->
+                out.append("\n    at ").append(frame.toString())
+            }
+            current = current.cause
+            depth++
         }
-        add(Level.E, tag, msg, stack)
+        return out.toString()
     }
 
     /** Wipe memory + both log files. The separate crash report is NOT touched. */

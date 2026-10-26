@@ -14,14 +14,10 @@ android {
         targetSdk = 35
         versionCode = 26
         versionName = "2.0.3"
+        // GitHub Actions injects GITHUB_SHA. Local builds remain explicitly unknown.
+        buildConfigField("String", "GIT_COMMIT_SHA", "\"${System.getenv("GITHUB_SHA") ?: "unknown"}\"")
     }
 
-    // ── Permanent signing (Level 2) ────────────────────────────────────
-    // One keystore signs every build (debug + release) so new versions
-    // install OVER old ones — no uninstall needed. The keystore itself is
-    // never committed: CI decodes it from the JARVIS_KEYSTORE_BASE64
-    // secret and passes its location via JARVIS_KEYSTORE_PATH. Local
-    // builds without the env vars keep the AGP default (debug) signing.
     signingConfigs {
         val ksPath = System.getenv("JARVIS_KEYSTORE_PATH")
         if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
@@ -49,7 +45,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 }
 
 kotlin {
@@ -69,13 +68,11 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.9.3")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.3")
     implementation("com.squareup.okhttp3:okhttp:5.1.0")
-    // Level 2: encrypted API-key storage + explicit coroutines
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    // Level 6: offline wake word — Vosk Android AAR (JNI recognizer + model
-    // downloaded on demand, never bundled). Version 0.3.75 is the newest
-    // 0.3.x published to Maven Central (com.alphacephei:vosk-android).
     implementation("com.alphacephei:vosk-android:0.3.75")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    // Android's platform org.json methods are stubbed in local JVM tests; use the real implementation.
+    testImplementation("org.json:json:20240303")
 }

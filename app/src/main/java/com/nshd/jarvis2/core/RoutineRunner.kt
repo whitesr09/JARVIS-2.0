@@ -47,15 +47,11 @@ object RoutineRunner {
                     appContext, routine.name, BrainStore.todayKey()
                 )
                 BrainStore.setPendingSummary(appContext, summary)
-                AppLog.i(
-                    "Brain",
-                    "routine '${routine.name}' finished on $surface"
-                )
+                AppLog.i("Brain", "routine finished on $surface")
             }.onFailure { e ->
                 AppLog.e(
                     "Brain",
-                    "routine '${routine.name}' failed on $surface: " +
-                        (e.message ?: "error")
+                    "routine failed on $surface (${e.javaClass.simpleName})"
                 )
             }
         }

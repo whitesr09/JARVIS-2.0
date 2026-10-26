@@ -7,6 +7,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.ResponseBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -121,14 +122,33 @@ class OpenAiCompatibleProvider(
 
     private fun endpoint(path: String): String = baseUrl.trimEnd('/') + path
 
-    /** "host/path" for AppLog lines (F5) — never contains the API key. */
+    /** Host and fixed API path only; never logs custom URL path segments or query values. */
     private fun logTarget(path: String): String = try {
         val uri = java.net.URI(baseUrl.trimEnd('/'))
-        val host = uri.host ?: "endpoint"
-        val base = uri.path.orEmpty().trimEnd('/')
-        "$host$base$path"
+        "${uri.host ?: "endpoint"}$path"
     } catch (e: Exception) {
         "endpoint$path"
+    }
+
+    private fun httpFailureSummary(code: Int): String = when (code) {
+        400 -> "The request was rejected; check provider/model compatibility."
+        401, 403 -> "Authentication was rejected by the provider."
+        404 -> "The endpoint or model was not found."
+        405 -> "The endpoint does not support this request method."
+        408 -> "The provider timed out."
+        413 -> "The request was too large."
+        429 -> "The provider rate limit was reached."
+        in 500..599 -> "The provider reported a server error."
+        else -> "The provider returned an HTTP error."
+    }
+
+    /** Map transport errors to safe, actionable text without exposing a custom URL. */
+    private fun networkFailureSummary(error: Throwable): String = when (error) {
+        is java.net.SocketTimeoutException -> "Request timed out."
+        is java.net.UnknownHostException -> "Provider host could not be resolved."
+        is java.net.ConnectException -> "Could not connect to the provider."
+        is javax.net.ssl.SSLException -> "Secure connection to the provider failed."
+        else -> "Network connection failed."
     }
 
     private fun authed(builder: Request.Builder): Request.Builder =
@@ -169,22 +189,20 @@ class OpenAiCompatibleProvider(
             AppLog.e(
                 "API",
                 "$id model=$model POST ${logTarget("/chat/completions")} " +
-                    "network error: ${e.message ?: "unreachable"}"
+                    "network error: ${networkFailureSummary(e)}"
             )
-            throw AiException("Network error: ${e.message ?: "unreachable"}")
+            throw AiException("Network error: ${networkFailureSummary(e)}")
         }
         response.use {
-            val bodyText = it.body?.string().orEmpty()
+            val bodyText = readLimitedBody(it.body, MAX_RESPONSE_BYTES)
             val latencyMs = System.currentTimeMillis() - startedAt
             if (!it.isSuccessful) {
-                AppLog.e(
+                AppLog.w(
                     "API",
                     "$id model=$model POST ${logTarget("/chat/completions")} " +
-                        "→ HTTP ${it.code} in ${latencyMs}ms: " +
-                        bodyText.replace('\n', ' ').take(300)
+                        "→ HTTP ${it.code} in ${latencyMs}ms"
                 )
-                val brief = bodyText.replace('\n', ' ').take(160)
-                throw AiException("HTTP ${it.code}${if (brief.isNotBlank()) ": $brief" else ""}")
+                throw AiException("HTTP ${it.code}: ${httpFailureSummary(it.code)}")
             }
             AppLog.d(
                 "API",
@@ -279,14 +297,14 @@ class OpenAiCompatibleProvider(
         } catch (e: IOException) {
             AppLog.e(
                 "API",
-                "$id model=$model stream network error: ${e.message ?: "unreachable"}"
+                "$id model=$model stream network error: ${networkFailureSummary(e)}"
             )
-            throw AiException("Network error: ${e.message ?: "unreachable"}")
+            throw AiException("Network error: ${networkFailureSummary(e)}")
         }
 
         response.use {
             if (!it.isSuccessful) {
-                val bodyText = it.body?.string().orEmpty()
+                val bodyText = readLimitedBody(it.body, MAX_RESPONSE_BYTES)
                 if (it.code == 400 && bodyText.contains("stream", ignoreCase = true)) {
                     AppLog.i(
                         "API",
@@ -297,13 +315,12 @@ class OpenAiCompatibleProvider(
                     if (reply.content.isNotBlank()) onDelta(reply.content)
                     return@withContext reply
                 }
-                AppLog.e(
+                AppLog.w(
                     "API",
                     "$id model=$model POST ${logTarget("/chat/completions")} " +
-                        "→ HTTP ${it.code}: " + bodyText.replace('\n', ' ').take(300)
+                        "→ HTTP ${it.code}"
                 )
-                val brief = bodyText.replace('\n', ' ').take(160)
-                throw AiException("HTTP ${it.code}${if (brief.isNotBlank()) ": $brief" else ""}")
+                throw AiException("HTTP ${it.code}: ${httpFailureSummary(it.code)}")
             }
             val source = it.body?.source()
                 ?: throw AiException("Empty streaming response")
@@ -314,9 +331,14 @@ class OpenAiCompatibleProvider(
             val readyAnnounced = mutableSetOf<Int>()
             var emittedAny = false
             var sawDone = false
+            var streamedChars = 0L
             try {
                 while (true) {
                     val line = source.readUtf8Line() ?: break
+                    streamedChars += line.length.toLong()
+                    if (streamedChars > MAX_STREAM_CHARS) {
+                        throw AiException("Streaming response exceeded the size limit")
+                    }
                     val trimmed = line.trim()
                     if (!trimmed.startsWith("data:")) continue
                     val data = trimmed.removePrefix("data:").trim()
@@ -388,9 +410,9 @@ class OpenAiCompatibleProvider(
                 AppLog.e(
                     "API",
                     "$id model=$model stream died before any delta: " +
-                        (e.message ?: "interrupted")
+                        networkFailureSummary(e)
                 )
-                throw AiException("Network error: ${e.message ?: "stream interrupted"}")
+                throw AiException("Network error: ${networkFailureSummary(e)}")
             }
             if (!sawDone && !emittedAny && toolBuilders.isEmpty()) {
                 throw AiException("Empty reply from model")
@@ -418,6 +440,37 @@ class OpenAiCompatibleProvider(
             )
             ModelReply(content = content.toString(), toolCalls = calls)
         }
+    }
+
+    /**
+     * Read a non-streaming response with a strict byte ceiling. Content-Length
+     * alone is not sufficient because chunked responses may omit it.
+     */
+    private fun readLimitedBody(body: ResponseBody?, maxBytes: Int): String {
+        if (body == null) return ""
+        if (body.contentLength() > maxBytes) {
+            throw AiException("Provider response exceeded the size limit")
+        }
+        val output = java.io.ByteArrayOutputStream()
+        body.byteStream().use { input ->
+            val buffer = ByteArray(8_192)
+            while (true) {
+                val remaining = maxBytes + 1 - output.size()
+                if (remaining <= 0) throw AiException("Provider response exceeded the size limit")
+                val count = input.read(buffer, 0, minOf(buffer.size, remaining))
+                if (count < 0) break
+                output.write(buffer, 0, count)
+                if (output.size() > maxBytes) {
+                    throw AiException("Provider response exceeded the size limit")
+                }
+            }
+        }
+        return output.toString(Charsets.UTF_8.name())
+    }
+
+    private companion object {
+        const val MAX_RESPONSE_BYTES = 1_048_576
+        const val MAX_STREAM_CHARS = 2_097_152L
     }
 
     /** Accumulates one streamed tool call (id + name + argument fragments). */
@@ -513,22 +566,20 @@ class OpenAiCompatibleProvider(
                     )
                     TestResult(true, elapsed(), "OK")
                 } else {
-                    val brief = resp.body?.string().orEmpty()
-                        .replace('\n', ' ').trim().take(120)
                     AppLog.w(
                         "API",
-                        "$id probe model=$model → HTTP ${resp.code}: $brief"
+                        "$id probe model=$model → HTTP ${resp.code}"
                     )
                     TestResult(
                         false, elapsed(),
-                        "HTTP ${resp.code}" + if (brief.isNotBlank()) ": $brief" else ""
+                        "HTTP ${resp.code}: ${httpFailureSummary(resp.code)}"
                     )
                 }
             }
         } catch (e: IOException) {
-            TestResult(false, elapsed(), "Network error: ${e.message ?: "unreachable"}")
+            TestResult(false, elapsed(), "Network error: ${networkFailureSummary(e)}")
         } catch (e: Exception) {
-            TestResult(false, elapsed(), e.message?.take(120) ?: "Probe failed")
+            TestResult(false, elapsed(), "Probe failed (${e.javaClass.simpleName})")
         }
     }
 
@@ -543,7 +594,7 @@ class OpenAiCompatibleProvider(
         val modelsResp = try {
             client.newCall(modelsReq).execute()
         } catch (e: IOException) {
-            return@withContext TestResult(false, elapsed(), "Network error: ${e.message ?: "unreachable"}")
+            return@withContext TestResult(false, elapsed(), "Network error: ${networkFailureSummary(e)}")
         }
         val modelsCode = modelsResp.code
         modelsResp.close()
@@ -574,16 +625,18 @@ class OpenAiCompatibleProvider(
                     .post(payload.toString().toRequestBody("application/json".toMediaType()))
                     .build()
                 client.newCall(req).execute().use { resp ->
-                    val brief = if (resp.isSuccessful) "" else
-                        " — " + resp.body?.string().orEmpty().replace('\n', ' ').take(120)
                     if (resp.isSuccessful) {
                         TestResult(true, elapsed(), "Connected — test completion succeeded")
                     } else {
-                        TestResult(false, elapsed(), "HTTP ${resp.code}$brief")
+                        TestResult(
+                            false,
+                            elapsed(),
+                            "HTTP ${resp.code}: ${httpFailureSummary(resp.code)}"
+                        )
                     }
                 }
             } catch (e: IOException) {
-                TestResult(false, elapsed(), "Network error: ${e.message ?: "unreachable"}")
+                TestResult(false, elapsed(), "Network error: ${networkFailureSummary(e)}")
             }
         }
         TestResult(false, elapsed(), "HTTP $modelsCode from /models")

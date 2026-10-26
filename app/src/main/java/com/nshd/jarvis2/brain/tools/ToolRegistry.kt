@@ -410,6 +410,108 @@ object ToolRegistry {
         )
     )
 
+
+    /**
+     * Validate model-supplied tool arguments locally before dispatch. Provider
+     * JSON schemas are guidance, not a security boundary: some endpoints emit
+     * malformed types, missing required fields, or invented tool names.
+     * Returns a short validation error, or null when the call is acceptable.
+     */
+    fun validateArguments(name: String, args: JSONObject): String? {
+        if (args.toString().length > MAX_ARGUMENT_JSON_CHARS) {
+            return "Tool arguments are too large"
+        }
+        val tool = spec(name) ?: return "Unknown tool: $name"
+        val schema = tool.paramsJsonSchema
+        val properties = schema.optJSONObject("properties") ?: JSONObject()
+        val required = schema.optJSONArray("required") ?: JSONArray()
+
+        for (index in 0 until required.length()) {
+            val key = required.optString(index)
+            if (!args.has(key) || args.isNull(key)) {
+                return "Missing required argument: $key"
+            }
+        }
+
+        val keys = args.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val property = properties.optJSONObject(key)
+                ?: return "Unexpected argument: $key"
+            val value = args.opt(key)
+            if (value == null || value === JSONObject.NULL) {
+                return "Argument '$key' cannot be null"
+            }
+            val expectedType = property.optString("type")
+            val validType = when (expectedType) {
+                "string" -> value is String
+                "integer" -> value is Int || value is Long ||
+                    (value is Number && value.toDouble().isFinite() &&
+                        value.toDouble() % 1.0 == 0.0)
+                "number" -> value is Number && value.toDouble().isFinite()
+                "boolean" -> value is Boolean
+                "object" -> value is JSONObject
+                "array" -> value is JSONArray
+                else -> true
+            }
+            if (!validType) return "Argument '$key' must be $expectedType"
+
+            val enumValues = property.optJSONArray("enum")
+            if (enumValues != null) {
+                var found = false
+                for (i in 0 until enumValues.length()) {
+                    if (enumValues.opt(i) == value) {
+                        found = true
+                        break
+                    }
+                }
+                if (!found) return "Argument '$key' has an unsupported value"
+            }
+
+            if (value is String && value.length > MAX_ARGUMENT_STRING_CHARS) {
+                return "Argument '$key' is too long"
+            }
+            validateNumericBounds(name, key, value)?.let { return it }
+        }
+
+        // Conditional arguments are validated here as well as by the schema:
+        // some compatible providers ignore schema-required details.
+        if (name == "edit_text" && args.optString("action") == "delete_last_chars" &&
+            (!args.has("count") || args.isNull("count"))
+        ) {
+            return "Argument 'count' is required for delete_last_chars"
+        }
+        return null
+    }
+
+    /** Domain limits for tool values that can drive device actions. */
+    private fun validateNumericBounds(toolName: String, key: String, value: Any): String? {
+        if (value !is Number) return null
+        val number = value.toDouble()
+        val range = when {
+            key in setOf("x", "y", "from_x", "from_y", "to_x", "to_y") &&
+                toolName in setOf("tap_percent", "long_press", "double_tap", "drag") ->
+                0.0..100.0
+            key == "percent" && toolName in setOf("set_volume", "set_brightness", "set_slider") ->
+                0.0..100.0
+            toolName == "set_alarm" && key == "hour" -> 0.0..23.0
+            toolName == "set_alarm" && key == "minute" -> 0.0..59.0
+            toolName == "set_timer" && key == "seconds" -> 1.0..86_400.0
+            toolName == "wait_for_text" && key == "timeout_seconds" -> 1.0..30.0
+            toolName == "calendar_event" && key == "start_in_minutes" -> 0.0..525_600.0
+            toolName == "calendar_event" && key == "duration_minutes" -> 1.0..10_080.0
+            toolName == "edit_text" && key == "count" -> 1.0..MAX_ARGUMENT_STRING_CHARS.toDouble()
+            else -> null
+        } ?: return null
+        if (number !in range) {
+            return "Argument '$key' must be between ${range.start.toInt()} and ${range.endInclusive.toInt()}"
+        }
+        return null
+    }
+
+    private const val MAX_ARGUMENT_JSON_CHARS = 32_768
+    private const val MAX_ARGUMENT_STRING_CHARS = 16_384
+
     fun spec(name: String): ToolSpec? = specs.firstOrNull { it.name == name }
 
     /**

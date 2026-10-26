@@ -198,8 +198,7 @@ class WakeWordService : Service(), RecognitionListener {
                     } catch (e: Exception) {
                         com.nshd.jarvis2.core.AppLog.w(
                             "Wake",
-                            "custom wake phrase grammar failed " +
-                                "(${e.message}) — using built-in phrases"
+                            "custom wake phrase grammar failed (${e.javaClass.simpleName}); using built-in phrases"
                         )
                         Recognizer(loadedModel, SAMPLE_RATE, GRAMMAR)
                     }
@@ -574,7 +573,7 @@ class WakeWordService : Service(), RecognitionListener {
             )
         }.onFailure {
             com.nshd.jarvis2.core.AppLog.w(
-                "Wake", "media session setup failed: ${it.message}"
+                "Wake", "media session setup failed (${it.javaClass.simpleName})"
             )
         }
     }

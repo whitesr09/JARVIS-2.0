@@ -197,16 +197,28 @@ fun SettingsScreen(
     // ── Plan #101: full backup / restore ───────────────────────────────
     fun exportBackup() {
         settingsScope.launch {
-            val json = withContext(Dispatchers.IO) {
-                com.nshd.jarvis2.core.BackupManager.exportJson(context)
+            val result = withContext(Dispatchers.IO) {
+                runCatching { com.nshd.jarvis2.core.BackupManager.exportJson(context) }
             }
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/json"
-                putExtra(Intent.EXTRA_SUBJECT, "Jarvis full backup")
-                putExtra(Intent.EXTRA_TEXT, json)
-            }
-            runCatching {
-                context.startActivity(Intent.createChooser(intent, "Export Jarvis backup"))
+            result.onSuccess { json ->
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "application/json"
+                    putExtra(Intent.EXTRA_SUBJECT, "Jarvis full backup")
+                    putExtra(Intent.EXTRA_TEXT, json)
+                }
+                runCatching {
+                    context.startActivity(Intent.createChooser(intent, "Export Jarvis backup"))
+                }.onFailure { error ->
+                    info = InfoDialog(
+                        "Backup export failed",
+                        error.message ?: "The system share sheet could not be opened."
+                    )
+                }
+            }.onFailure { error ->
+                info = InfoDialog(
+                    "Backup export failed",
+                    error.message ?: "The backup could not be validated or created."
+                )
             }
         }
     }
@@ -288,6 +300,15 @@ fun SettingsScreen(
     }
 
     fun recordBioSample(index: Int) {
+        // Permissions can be revoked while Settings remains open. Re-request
+        // before entering the recorder instead of treating this as a bad WAV
+        // and clearing enrollment state.
+        if (!hasMicPermission(context)) {
+            bioMicGranted = false
+            bioError = "Microphone permission is required to record a sample."
+            bioMicLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
         settingsScope.launch {
             bioRecordingIndex = index
             bioError = null
@@ -296,6 +317,15 @@ fun SettingsScreen(
             bioCount = BiometricsRecorder.countSamples(context)
             if (!ok) {
                 bioError = "Recording failed — check the microphone and try again."
+                // A failed re-record may have deleted an older sample. Keep
+                // persisted enrollment state consistent with the valid files.
+                onSettingsChange(
+                    settings.copy(
+                        biometricsEnrolled = false,
+                        biometricsSampleCount = bioCount,
+                        biometricsEnrolledDate = ""
+                    )
+                )
             } else if (bioCount >= BiometricsRecorder.TOTAL_SAMPLES) {
                 val date = SimpleDateFormat("d MMM yyyy", Locale.ENGLISH).format(Date())
                 onSettingsChange(
@@ -615,7 +645,7 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }
-                } else if (!settings.biometricsEnrolled) {
+                } else if (!settings.biometricsEnrolled || bioCount < BiometricsRecorder.TOTAL_SAMPLES) {
                     Text(
                         text = "When you tap record, say the wake phrase clearly: " +
                             "\"${BiometricsRecorder.WAKE_PHRASE}\" " +
@@ -626,13 +656,13 @@ fun SettingsScreen(
                     Button(
                         onClick = {
                             recordBioSample(
-                                (bioCount + 1).coerceAtMost(BiometricsRecorder.TOTAL_SAMPLES)
+                                BiometricsRecorder.nextMissingSampleIndex(context)
                             )
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            "Record sample ${(bioCount + 1).coerceAtMost(BiometricsRecorder.TOTAL_SAMPLES)} " +
+                            "Record sample ${BiometricsRecorder.nextMissingSampleIndex(context)} " +
                                 "of ${BiometricsRecorder.TOTAL_SAMPLES}"
                         )
                     }

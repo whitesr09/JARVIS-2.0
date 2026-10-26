@@ -153,7 +153,7 @@ object VoskModelManager {
                 // displayed verbatim in Settings. Raw → AppLog; the
                 // state carries a complete friendly sentence.
                 com.nshd.jarvis2.core.AppLog.e(
-                    "Wake", "wake model download failed: ${e.message}", e
+                    "Wake", "wake model download failed (${e.javaClass.simpleName})"
                 )
                 _downloadState.value = DownloadState.Error(
                     "Download failed — " +

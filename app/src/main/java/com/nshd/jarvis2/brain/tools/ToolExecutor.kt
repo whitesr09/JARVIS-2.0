@@ -5,20 +5,24 @@ import android.app.DownloadManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.telecom.TelecomManager
 import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.brain.ExecutionLedger
 import com.nshd.jarvis2.core.MacroRecorder
+import com.nshd.jarvis2.hands.ActionOutcome
 import com.nshd.jarvis2.hands.ActionResult
 import com.nshd.jarvis2.hands.ContactResolution
 import com.nshd.jarvis2.hands.ContactsResolver
 import com.nshd.jarvis2.hands.DeepIntents
 import com.nshd.jarvis2.hands.GroundingResult
 import com.nshd.jarvis2.hands.HandsActions
+import com.nshd.jarvis2.hands.TaskStoppedException
 import com.nshd.jarvis2.hands.VisionGrounder
 import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.service.JarvisAccessibilityService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 
@@ -26,7 +30,8 @@ data class ToolResult(
     val success: Boolean,
     val message: String,
     /** Optional Base64 JPEG the agent loop forwards to the model as vision input. */
-    val imageBase64: String? = null
+    val imageBase64: String? = null,
+    val outcome: ActionOutcome = if (success) ActionOutcome.COMPLETED else ActionOutcome.FAILED
 )
 
 /**
@@ -70,6 +75,15 @@ class ToolExecutor(
         args: JSONObject,
         includeScreenSummary: Boolean
     ): ToolResult {
+        // Model-provided tool calls are untrusted input. Validate the name,
+        // required fields, JSON types, enums and payload bounds before task
+        // bookkeeping, dedupe-ledger access, or any phone-side effect.
+        ToolRegistry.validateArguments(name, args)?.let { validationError ->
+            com.nshd.jarvis2.core.AppLog.w(
+                "Agent", "rejected invalid tool call '$name': $validationError"
+            )
+            return ToolResult(false, "I didn't run that action: $validationError.")
+        }
         // F6: the running queue item's live step line follows the
         // tool (friendly label + argument gist — never typed content).
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning(stepTextFor(name, args))
@@ -113,11 +127,47 @@ class ToolExecutor(
         } else {
             null
         }
-        val raw = try {
+        val dispatched = try {
             dispatch(name, args)
+        } catch (e: CancellationException) {
+            // Coroutine cancellation must stop device actions immediately.
+            throw e
+        } catch (e: TaskStoppedException) {
+            // The explicit user stop control is not an ordinary tool failure.
+            throw e
         } catch (e: Exception) {
-            ToolResult(false, "Tool $name failed safely: ${e.message ?: "unexpected error"}")
+            // An exception can happen after a tap or send has already reached
+            // the target app. Conservatively make mutations terminal for this
+            // turn, so neither the ledger nor the model retries an uncertain
+            // side effect. Read-only failures remain ordinary retryable errors.
+            if (name in UI_MUTATION_TOOLS || name in EXTERNAL_SIDE_EFFECT_TOOLS) {
+                ToolResult(
+                    success = false,
+                    message = "OUTCOME_UNKNOWN — Tool $name stopped unexpectedly " +
+                        "(${e.javaClass.simpleName}). Check the app/device before retrying.",
+                    outcome = ActionOutcome.OUTCOME_UNKNOWN
+                )
+            } else {
+                // Never forward exception messages; they can contain private
+                // URLs, contact details, request fragments, or provider data.
+                ToolResult(false, "Tool $name failed safely (${e.javaClass.simpleName}).")
+            }
         }
+        // Keep action status authoritative for every caller, including
+        // direct ToolResult paths that don't pass through ActionResult mapper.
+        // Staged/uncertain outcomes must never enter the success macro recorder,
+        // undo stack, or success-cached ledger.
+        val terminalOutcome = dispatched.outcome in setOf(
+            ActionOutcome.STAGED_FOR_USER,
+            ActionOutcome.SUBMITTED_UNVERIFIED,
+            ActionOutcome.OUTCOME_UNKNOWN
+        )
+        val raw = if (terminalOutcome && dispatched.success) {
+            dispatched.copy(success = false)
+        } else {
+            dispatched
+        }
+
         // v2.0.0 (#16): feed the turn recorder — successful executions
         // only, so a saved macro replays a sequence that worked. The
         // recorder is armed solely by AgentPipeline for its own turns;
@@ -216,7 +266,7 @@ class ToolExecutor(
             val summary = screenSummaryForStep(service)
             withUndoHint(
                 name,
-                ToolResult(raw.success, raw.message + "\nScreen now:\n" + summary)
+                raw.copy(message = raw.message + "\nScreen now:\n" + summary)
             )
         } catch (e: Exception) {
             withUndoHint(name, raw)
@@ -326,8 +376,7 @@ class ToolExecutor(
         if (image == null) {
             com.nshd.jarvis2.core.AppLog.w(
                 "Hands",
-                "vision-fallback wanted for \"$description\" but no " +
-                    "screenshot source is available — degrading to normal targeting"
+                "vision-fallback wanted but no screenshot source is available — degrading to normal targeting"
             )
             return null
         }
@@ -336,7 +385,7 @@ class ToolExecutor(
         com.nshd.jarvis2.core.AppLog.i(
             "Hands",
             "vision-fallback used (assist $visionAssistsUsed/$MAX_VISION_ASSISTS) " +
-                "for \"$description\""
+                "for grounded target selection"
         )
         return when (val grounded = vision.ground(description, image)) {
             is GroundingResult.Failed -> ToolResult(
@@ -522,7 +571,10 @@ class ToolExecutor(
             )
             ToolResult(true, "Screenshot taken via $source and saved as ${file.name}.")
         } catch (e: Exception) {
-            ToolResult(false, "The screenshot was captured but could not be saved: ${e.message ?: "storage error"}")
+            ToolResult(
+                false,
+                "The screenshot was captured but could not be saved (${e.javaClass.simpleName})."
+            )
         }
     }
 
@@ -769,11 +821,12 @@ class ToolExecutor(
         }
         val result = HandsActions.insertCodeIntoFocused(code)
         val lineCount = code.trimEnd('\n').lines().size
+        // Never persist actual source snippets in diagnostics; the
+        // code may contain credentials, internal URLs, or private data.
         com.nshd.jarvis2.core.AppLog.i(
             "Tools",
             "insert_code: $lineCount lines / ${code.length} chars, " +
-                "autoOpened=$autoOpened, success=${result.success}, " +
-                "preview='${code.replace('\n', ' ').take(40)}'"
+                "autoOpened=$autoOpened, success=${result.success}"
         )
         if (!result.success) return ToolResult(false, result.message)
         val note = if (autoOpened) " (QuickEdit was opened automatically.)" else ""
@@ -835,7 +888,7 @@ class ToolExecutor(
         // so a "not sending" report can be traced to the exact stage:
         // routed → resolved → opened → typed → verified → asked → tapped → verified.
         com.nshd.jarvis2.core.AppLog.i(
-            "Send", "routed: whatsapp_message to '$contact' (${message.length} chars)"
+            "Send", "routed: whatsapp_message (${message.length} chars)"
         )
         // F7 plan: the panel walks these steps; "Confirm & send"
         // (step 3) is the RUNNING step while the just-in-time send
@@ -859,7 +912,7 @@ class ToolExecutor(
             is ContactResolution.Found -> {
                 val name = resolution.contact.displayName
                 com.nshd.jarvis2.core.AppLog.i(
-                    "Send", "contact resolved: '$contact' → $name (${resolution.contact.phone})"
+                    "Send", "contact resolved for WhatsApp send (unique match)"
                 )
                 // v2.0.2: NO upfront gate — the old
                 // whatsapp_message-always-ConfirmGate special case is
@@ -879,28 +932,21 @@ class ToolExecutor(
                     )
                 }
                 val result = intents.whatsappMessage(
-                    resolution.contact.phone, message
+                    phone = resolution.contact.phone,
+                    expectedContactName = resolution.contact.displayName,
+                    text = message
                 ) {
                     val approved = SendAsk.ask(
                         "$name (${resolution.contact.phone})", message
                     )
-                    if (approved) {
-                        HandsActions.grantSendPermit("com.whatsapp")
-                        HandsActions.grantSendPermit("com.whatsapp.w4b")
-                    }
+                    // DeepIntents grants a short-lived permit for the
+                    // exact foreground package immediately before the send tap.
                     approved
                 }
-                if (result.success) {
-                    com.nshd.jarvis2.core.AppLog.i(
-                        "Send", "verified: message sent to $name"
-                    )
-                    ToolResult(true, "WhatsApp message to $name: ${result.message}")
-                } else {
-                    com.nshd.jarvis2.core.AppLog.w(
-                        "Send", "FAILED after approval: ${result.message}"
-                    )
-                    ToolResult(false, result.message)
-                }
+                // Preserve staged/unverified/unknown action outcomes from
+                // DeepIntents; converting them to a plain Boolean result would
+                // let the caller misunderstand delivery or retry the send.
+                result.toToolResult()
             }
             is ContactResolution.Ambiguous -> ToolResult(
                 false,
@@ -963,17 +1009,13 @@ class ToolExecutor(
             is ContactResolution.Found -> {
                 val name = resolution.contact.displayName
                 intents.whatsappShareLatestPhoto(
-                    resolution.contact.phone
+                    phone = resolution.contact.phone,
+                    expectedContactName = resolution.contact.displayName
                 ) {
-                    val approved = SendAsk.ask(
+                    SendAsk.ask(
                         "$name (${resolution.contact.phone})",
                         "Your most recent gallery photo"
                     )
-                    if (approved) {
-                        HandsActions.grantSendPermit("com.whatsapp")
-                        HandsActions.grantSendPermit("com.whatsapp.w4b")
-                    }
-                    approved
                 }.toToolResult()
             }
             is ContactResolution.Ambiguous -> ToolResult(
@@ -1010,9 +1052,7 @@ class ToolExecutor(
         // v2.0.2: fill the open chat FIRST, then the just-in-time ask
         // inside typeAndSendInOpenChat, then the send tap.
         return intents.typeAndSendInOpenChat(pkg, message) {
-            val approved = SendAsk.ask(title, message)
-            if (approved) HandsActions.grantSendPermit(pkg)
-            approved
+            SendAsk.ask(title, message)
         }.toToolResult()
     }
 
@@ -1030,9 +1070,7 @@ class ToolExecutor(
             )
         }
         return intents.instagramDm(contact, message) {
-            val approved = SendAsk.ask(contact, message)
-            if (approved) HandsActions.grantSendPermit("com.instagram.android")
-            approved
+            SendAsk.ask(contact, message)
         }.toToolResult()
     }
 
@@ -1049,9 +1087,7 @@ class ToolExecutor(
             )
         }
         return intents.telegramMessage(contact, message) {
-            val approved = SendAsk.ask(contact, message)
-            if (approved) HandsActions.grantSendPermit("org.telegram.messenger")
-            approved
+            SendAsk.ask(contact, message)
         }.toToolResult()
     }
 
@@ -1131,7 +1167,7 @@ class ToolExecutor(
         val group = args.requiredString("group") ?: return missing("group")
         val message = args.requiredString("message") ?: return missing("message")
         com.nshd.jarvis2.core.AppLog.i(
-            "Send", "routed: whatsapp_group_message to group '$group'"
+            "Send", "routed: whatsapp_group_message"
         )
         if (SendAsk.isPending) {
             return ToolResult(
@@ -1144,12 +1180,7 @@ class ToolExecutor(
         // after the group chat opens + the text is typed, before the
         // send tap (the per-group confirm, same substance, new timing).
         return intents.whatsappGroupMessage(group, message) {
-            val approved = SendAsk.ask("the group \"$group\"", message)
-            if (approved) {
-                HandsActions.grantSendPermit("com.whatsapp")
-                HandsActions.grantSendPermit("com.whatsapp.w4b")
-            }
-            approved
+            SendAsk.ask("the group \"$group\"", message)
         }.toToolResult()
     }
 
@@ -1316,7 +1347,7 @@ class ToolExecutor(
             }
             if (found) {
                 com.nshd.jarvis2.core.AppLog.d(
-                    "Tools", "wait_for_text: '$text' appeared after $polls poll(s)"
+                    "Tools", "wait_for_text target matched after $polls poll(s) (${text.length} chars)"
                 )
                 return ToolResult(true, "\"$text\" is now on screen.")
             }
@@ -1352,7 +1383,7 @@ class ToolExecutor(
                 )
             manager.enqueue(request)
             com.nshd.jarvis2.core.AppLog.i(
-                "Tools", "download_url: enqueued $fileName"
+                "Tools", "download_url: request enqueued"
             )
             ToolResult(
                 true,
@@ -1362,7 +1393,7 @@ class ToolExecutor(
         } catch (e: Exception) {
             ToolResult(
                 false,
-                "The download couldn't start: ${e.message ?: "unknown error"}"
+                "The download couldn't start (${e.javaClass.simpleName}). Check the link and available storage."
             )
         }
     }
@@ -1390,8 +1421,18 @@ class ToolExecutor(
             if (answer) {
                 @Suppress("DEPRECATION")
                 telecom.acceptRingingCall()
-                ToolResult(true, "Call answered.")
+                ToolResult(
+                    success = false,
+                    message = "The answer command was issued, but Jarvis cannot verify the call is connected. Check the phone screen before retrying.",
+                    outcome = ActionOutcome.SUBMITTED_UNVERIFIED
+                )
             } else {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+                    return ToolResult(
+                        false,
+                        "Rejecting a call by voice requires Android 9 or newer on this device. Use the phone screen instead."
+                    )
+                }
                 val ended = telecom.endCall()
                 if (ended) {
                     ToolResult(true, "Call rejected.")
@@ -1410,7 +1451,7 @@ class ToolExecutor(
                 if (answer) {
                     "No ringing call to answer right now."
                 } else {
-                    "The call couldn't be rejected: ${e.message ?: "unknown error"}"
+                    "The call couldn't be rejected (${e.javaClass.simpleName})."
                 }
             )
         }
@@ -1480,7 +1521,31 @@ class ToolExecutor(
     private fun missing(name: String): ToolResult =
         ToolResult(false, "Missing required argument: $name")
 
-    private fun ActionResult.toToolResult(): ToolResult = ToolResult(success, message)
+    private fun ActionResult.toToolResult(): ToolResult {
+        val statusPrefix = when (outcome) {
+            ActionOutcome.STAGED_FOR_USER -> "STAGED_FOR_USER"
+            ActionOutcome.SUBMITTED_UNVERIFIED -> "SUBMITTED_UNVERIFIED"
+            ActionOutcome.OUTCOME_UNKNOWN -> "OUTCOME_UNKNOWN"
+            else -> null
+        }
+        val resultMessage = if (statusPrefix != null) {
+            "$statusPrefix — $message"
+        } else {
+            message
+        }
+        val outcomeIsTerminal = outcome in setOf(
+            ActionOutcome.STAGED_FOR_USER,
+            ActionOutcome.SUBMITTED_UNVERIFIED,
+            ActionOutcome.OUTCOME_UNKNOWN
+        )
+        return ToolResult(
+            // A staged/uncertain result can never be promoted to success
+            // merely because an underlying helper returned an optimistic bool.
+            success = success && !outcomeIsTerminal,
+            message = resultMessage,
+            outcome = outcome
+        )
+    }
 
     private fun isPaymentLike(text: String): Boolean =
         PAYMENT_REGEX.containsMatchIn(text.lowercase())
@@ -1528,6 +1593,14 @@ class ToolExecutor(
          * ledgered — the anti-replay protection the ledger exists for.
          */
         private val REPEATABLE_TOOLS = setOf("edit_text", "type_text")
+        // External side effects not already covered by UI_MUTATION_TOOLS.
+        // Exceptions from these actions must not enable same-turn replay.
+        private val EXTERNAL_SIDE_EFFECT_TOOLS = setOf(
+            "call_contact", "answer_call", "reject_call", "set_alarm", "set_timer",
+            "set_volume", "set_brightness", "toggle_torch", "set_silent",
+            "media_control", "download_url", "calendar_event"
+        )
+
         private val UI_MUTATION_TOOLS = setOf(
             "open_app", "click_element", "click_text", "type_text", "scroll",
             "press_key", "tap_percent", "whatsapp_message", "youtube_play",

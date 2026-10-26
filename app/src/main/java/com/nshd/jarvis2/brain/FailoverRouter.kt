@@ -3,8 +3,11 @@ package com.nshd.jarvis2.brain
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.ToolResult
+import com.nshd.jarvis2.hands.ActionOutcome
+import com.nshd.jarvis2.hands.TaskStoppedException
 import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.ui.FriendlyErrors
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
@@ -29,6 +32,18 @@ sealed class ChatOutcome {
  * a 5xx or a dead endpoint never ends the conversation — the next provider
  * gets its turn. Pattern carried over from the Gemini-FreeLLM app.
  */
+private val OUTCOME_UNKNOWN_ON_EXCEPTION_TOOLS = setOf(
+    "open_app", "click_element", "click_text", "tap_percent", "long_press",
+    "double_tap", "drag", "pinch_zoom", "set_slider", "press_key", "type_text",
+    "edit_text", "insert_code", "undo_action", "clipboard_set", "paste_clipboard",
+    "copy_selection", "fill_form", "whatsapp_message", "whatsapp_group_message",
+    "whatsapp_photo", "whatsapp_reply_current", "instagram_message",
+    "telegram_message", "sms_message", "gmail_send", "call_contact",
+    "answer_call", "reject_call", "set_alarm", "set_timer", "set_volume",
+    "set_brightness", "toggle_torch", "set_silent", "media_control",
+    "download_url", "calendar_event", "share_screenshot"
+)
+
 class FailoverRouter(
     private val configsInOrder: List<ProviderConfig>,
     private val toolExecutor: ToolExecutor? = null,
@@ -54,25 +69,32 @@ class FailoverRouter(
                 continue
             }
             try {
-                // Streamed for responsiveness; deltas flow to the caller.
-                // Failover still applies because a provider that dies before
-                // emitting anything throws (see chatStream's rules).
-                val reply = config.toProvider()
-                    .chatStream(messages, model, tools = null, onDelta = onDelta)
+                // Keep each provider's stream private until the provider has
+                // completed successfully. Otherwise partial text from a failed
+                // provider leaks into the UI before the fallback answer.
+                val pendingDelta = StringBuilder()
+                val reply = config.toProvider().chatStream(
+                    messages, model, tools = null,
+                    onDelta = { delta -> pendingDelta.append(delta) }
+                )
                 if (reply.content.isBlank()) throw AiException("Empty reply from model")
+                onDelta(reply.content)
                 return ChatOutcome.Success(reply.content, config.label, model)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: AiException) {
                 failures += config.label to (e.message ?: "failed")
             } catch (e: Exception) {
                 failures += config.label to (e.message ?: "unexpected error")
             }
         }
-        // F5 error hygiene: raw provider text goes to AppLog ONLY; the
-        // returned summary is FriendlyErrors-shortened per provider.
+        // Provider/network error strings may contain private endpoint URLs
+        // or request fragments. The user gets friendly per-provider reasons;
+        // persistent logs retain only which providers failed.
         AppLog.e(
             "API",
-            "chat: all providers failed — " +
-                failures.joinToString(" • ") { (label, raw) -> "$label: $raw" }
+            "chat: all providers failed; providers tried=" +
+                failures.map { it.first }.distinct().joinToString(", ")
         )
         return ChatOutcome.AllFailed(
             failures.joinToString("  •  ") { (label, raw) ->
@@ -143,7 +165,9 @@ class FailoverRouter(
             // v2.0.0: dynamic step budget — a turn that keeps making
             // successful progress earns more steps (up to HARD_CAP);
             // a stalled or failing turn keeps the configured budget.
-            var stepBudget = maxSteps.coerceAtLeast(1)
+            // Keep callers from disabling the loop guard with an excessive
+            // budget. Successful progress can still extend this to HARD_STEP_CAP.
+            var stepBudget = maxSteps.coerceIn(1, HARD_STEP_CAP)
             try {
                 var step = 0
                 while (step < stepBudget) {
@@ -245,11 +269,32 @@ class FailoverRouter(
                                 call.name, args,
                                 includeScreenSummary = isLastCall
                             )
+                        } catch (e: CancellationException) {
+                            // Do not report a cancelled task as a completed tool
+                            // result or let the model continue with another action.
+                            throw e
+                        } catch (e: TaskStoppedException) {
+                            // User stop is control flow, not a retryable tool error.
+                            throw e
                         } catch (e: Exception) {
-                            ToolResult(
-                                false,
-                                "Tool ${call.name} failed safely: ${e.message ?: "unexpected error"}"
-                            )
+                            // A failure outside ToolExecutor may still happen after
+                            // a device action took effect. Mark high-risk/mutating
+                            // actions uncertain so the model cannot submit them again.
+                            val uncertain = call.name in OUTCOME_UNKNOWN_ON_EXCEPTION_TOOLS
+                            if (uncertain) {
+                                ToolResult(
+                                    success = false,
+                                    message = "OUTCOME_UNKNOWN — Tool ${call.name} stopped unexpectedly " +
+                                        "(${e.javaClass.simpleName}). Check the app/device before retrying.",
+                                    outcome = ActionOutcome.OUTCOME_UNKNOWN
+                                )
+                            } else {
+                                ToolResult(
+                                    success = false,
+                                    message = "Tool ${call.name} failed safely (${e.javaClass.simpleName}).",
+                                    outcome = ActionOutcome.FAILED
+                                )
+                            }
                         }
                         val toolMs = System.currentTimeMillis() - toolStartedAt
                         actionMs += toolMs
@@ -284,6 +329,22 @@ class FailoverRouter(
                         // the turn right here — the tool result's first
                         // line is the final summary. No more model round
                         // trips (extra trips were replaying the request).
+                        // Staged/uncertain outcome is authoritative even if a
+                        // helper accidentally sets success=true. Never let the
+                        // terminal-tool shortcut mask retry protection.
+                        if (result.outcome in setOf(
+                                ActionOutcome.STAGED_FOR_USER,
+                                ActionOutcome.SUBMITTED_UNVERIFIED,
+                                ActionOutcome.OUTCOME_UNKNOWN
+                            )
+                        ) {
+                            terminalReply = result.message
+                            AppLog.w(
+                                "Agent",
+                                "turn stopped after " + call.name + " outcome=" + result.outcome
+                            )
+                            break
+                        }
                         if (result.success && call.name in ToolRegistry.TERMINAL_TOOLS) {
                             terminalReply = result.message.lineSequence()
                                 .firstOrNull()?.trim().orEmpty()
@@ -350,18 +411,21 @@ class FailoverRouter(
                 return summary.content.ifBlank {
                     "I reached the tool-step limit. The actions and results above show what was completed."
                 }
+            } catch (e: CancellationException) {
+                // User aborts and lifecycle cancellation must propagate to the
+                // owning coroutine; never turn cancellation into a chat reply.
+                throw e
             } catch (e: Exception) {
                 val detail = e.message ?: "unexpected error"
                 if (executedAnyTool) {
-                    // Raw detail → AppLog only. F5.1 (E3): the user
-                    // text is human — it says what DID happen (the
-                    // last tool result), keeps the "I couldn't"
-                    // failure prefix the UI keys on, and never names
-                    // internal mechanics (providers / replay).
+                    // Keep raw detail only in memory for friendly error
+                    // classification; never persist provider/network strings.
+                    // The user text says what DID happen and warns against
+                    // repeating an action whose final state is uncertain.
                     AppLog.e(
                         "Agent",
-                        "agent loop died mid-task on ${config.id} after tool " +
-                            "execution (no replay): $detail"
+                        "agent loop stopped mid-task on ${config.id} after tool " +
+                            "execution (${e.javaClass.simpleName}); raw error details omitted"
                     )
                     val outcome = lastToolOutcome
                         ?: "I had already taken a step on the phone"
@@ -372,24 +436,23 @@ class FailoverRouter(
                             "(${FriendlyErrors.shortReason(detail)})"
                     }
                     return "I couldn't finish that — $outcome, $cause. " +
-                        "I didn't repeat the phone action on my own; " +
-                        "say the command again and I'll retry it."
+                        "Before retrying, check the relevant app to confirm whether the action already happened. " +
+                        "I won't automatically repeat an action whose final state is uncertain."
                 }
                 failures += config.label to detail
             }
         }
         AppLog.e(
             "Agent",
-            "agent loop: all providers failed — " +
-                failures.joinToString(" • ") { (label, raw) -> "$label: $raw" }
+            "agent loop exhausted configured providers (attempts=${failures.size}); " +
+                "raw provider error details omitted"
         )
         // F5.1 (E3): same human tone — no "provider"/"agent loop"
         // machinery words in the user-facing text.
-        return "I couldn't reach the model — the connection or the API " +
-            "key needs a look. (" +
+        return "I couldn't reach the model — the connection or API key may need a look. (" +
             failures.joinToString("  •  ") { (label, raw) ->
                 "$label: ${FriendlyErrors.shortReason(raw)}"
-            } + ") The full error is in Settings → App Logs."
+            } + ") For privacy, detailed provider errors are not written to persistent logs."
     }
 
     /**
@@ -417,10 +480,19 @@ class FailoverRouter(
     ): ModelReply {
         var retriesUsed = 0
         while (true) {
+            // Deltas are attempt-local. A transiently failed attempt must not
+            // leak partial text or duplicate text when the retry succeeds.
+            val pendingDelta = StringBuilder()
             try {
-                return provider.chatStream(
-                    messages, model, tools, onDelta, onToolCallReady
+                val reply = provider.chatStream(
+                    messages, model, tools,
+                    onDelta = { delta -> pendingDelta.append(delta) },
+                    onToolCallReady = onToolCallReady
                 )
+                if (pendingDelta.isNotEmpty()) onDelta(pendingDelta.toString())
+                return reply
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 val detail = e.message ?: "unexpected error"
                 val maxRetries = if (toolsExecuted()) 2 else 1
@@ -429,7 +501,7 @@ class FailoverRouter(
                 val backoffMs = if (retriesUsed == 1) 800L else 2_000L
                 AppLog.w(
                     "Agent",
-                    "transient model failure on $providerLabel: $detail — " +
+                    "transient model failure on $providerLabel — " +
                         "retry $retriesUsed/$maxRetries on the SAME provider " +
                         "in ${backoffMs}ms (toolsExecuted=${toolsExecuted()})"
                 )

@@ -68,6 +68,9 @@ object SendAsk {
     @Volatile
     private var deferred: CompletableDeferred<SendAnswer>? = null
 
+    /** Owns the entire ask/re-ask flow, including the gap between answers. */
+    private var activeAskId: Long? = null
+
     /** Live-text sink for the ask line (pipeline's onAssistantDelta). */
     @Volatile
     var askSink: ((String) -> Unit)? = null
@@ -102,13 +105,17 @@ object SendAsk {
      * waits for the next message). Returns false when no ask is
      * pending (the text is then routed normally).
      */
-    fun answer(raw: String): SendAnswer {
-        // No ask pending: nothing is consumed (callers check
-        // [pending] first, so this is only a safety net).
-        val current = deferred ?: return SendAnswer.NON_ANSWER
+    fun answer(raw: String): SendAnswer = synchronized(this) {
+        // Bind the answer to the currently visible pending ask. Old UI or
+        // transcript callbacks cannot answer an ask that has already ended.
+        val item = _pending.value ?: return@synchronized SendAnswer.NON_ANSWER
+        val current = deferred ?: return@synchronized SendAnswer.NON_ANSWER
+        if (activeAskId != item.id || !current.isActive) {
+            return@synchronized SendAnswer.NON_ANSWER
+        }
         val parsed = parseAnswer(raw)
         current.complete(parsed)
-        return parsed
+        parsed
     }
 
     /**
@@ -117,55 +124,74 @@ object SendAsk {
      * stacking a second ask.
      */
     suspend fun ask(recipient: String, text: String): Boolean {
+        val id: Long
         synchronized(this) {
-            if (deferred?.isActive == true) {
-                AppLog.w("SendAsk", "ask suppressed (another ask pending) for $recipient")
+            if (activeAskId != null) {
+                AppLog.w("SendAsk", "ask suppressed because another send confirmation is pending")
                 return false
             }
+            id = nextId.getAndIncrement()
+            activeAskId = id
         }
-        val id = nextId.getAndIncrement()
+
         var attempt = 1
-        while (attempt <= 2) {
-            val item = PendingSendAsk(id, recipient, text, attempt)
-            val answer = CompletableDeferred<SendAnswer>()
-            synchronized(this) {
-                deferred = answer
-                _pending.value = item
-            }
-            AppLog.i("SendAsk", "ask #$id attempt $attempt to $recipient")
-            publish(item)
-            val result = withTimeoutOrNull(ASK_TIMEOUT_MS) { answer.await() }
-            synchronized(this) {
-                if (deferred === answer) {
-                    deferred = null
-                    _pending.value = null
+        try {
+            while (attempt <= 2) {
+                val item = PendingSendAsk(id, recipient, text, attempt)
+                val answer = CompletableDeferred<SendAnswer>()
+                synchronized(this) {
+                    // Only the ask that reserved this id can publish or
+                    // replace its prompt during the single allowed re-ask.
+                    if (activeAskId != id) return false
+                    deferred = answer
+                    _pending.value = item
                 }
-            }
-            when (result) {
-                SendAnswer.YES -> {
-                    AppLog.i("SendAsk", "ask #$id approved")
-                    return true
-                }
-                SendAnswer.NO -> {
-                    AppLog.i("SendAsk", "ask #$id denied")
-                    return false
-                }
-                SendAnswer.NON_ANSWER -> {
-                    if (attempt == 1) {
-                        AppLog.i("SendAsk", "ask #$id non-answer — re-asking once")
-                        attempt = 2
-                        continue
+                // Never log recipient or message contents.
+                AppLog.i("SendAsk", "ask #$id opened (attempt $attempt)")
+                publish(item)
+                val result = withTimeoutOrNull(ASK_TIMEOUT_MS) { answer.await() }
+                synchronized(this) {
+                    if (deferred === answer) {
+                        deferred = null
+                        if (_pending.value?.id == id) _pending.value = null
                     }
-                    AppLog.i("SendAsk", "ask #$id second non-answer — aborting")
-                    return false
                 }
-                null -> {
-                    AppLog.i("SendAsk", "ask #$id timeout (deny)")
-                    return false
+                when (result) {
+                    SendAnswer.YES -> {
+                        AppLog.i("SendAsk", "ask #$id approved")
+                        return true
+                    }
+                    SendAnswer.NO -> {
+                        AppLog.i("SendAsk", "ask #$id denied")
+                        return false
+                    }
+                    SendAnswer.NON_ANSWER -> {
+                        if (attempt == 1) {
+                            AppLog.i("SendAsk", "ask #$id non-answer; re-asking once")
+                            attempt = 2
+                            continue
+                        }
+                        AppLog.i("SendAsk", "ask #$id second non-answer; aborting")
+                        return false
+                    }
+                    null -> {
+                        AppLog.i("SendAsk", "ask #$id timed out; denied")
+                        return false
+                    }
+                }
+            }
+            return false
+        } finally {
+            // Cancellation, timeout, denial, and exceptions all release the
+            // reservation and visible prompt. No old ask can block a new send.
+            synchronized(this) {
+                if (activeAskId == id) {
+                    activeAskId = null
+                    deferred = null
+                    if (_pending.value?.id == id) _pending.value = null
                 }
             }
         }
-        return false
     }
 
     /** Publish one ask (or re-ask) to every live surface. */

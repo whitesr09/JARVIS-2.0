@@ -38,54 +38,129 @@ data class ProviderConfig(
 }
 
 /**
- * Persists provider configs in EncryptedSharedPreferences. If encrypted
- * storage cannot be created on this device (rare OEM keystore quirks), it
- * falls back to plain SharedPreferences instead of crashing — and says so in
- * logcat only. API keys are never written to logs anywhere.
+ * Persists provider configs only in EncryptedSharedPreferences. If encrypted
+ * storage cannot be initialized, provider keys are unavailable and writes
+ * fail closed; credentials are never written to plaintext preferences.
  */
 class ProviderStore(context: Context) {
+    private val appContext = context.applicationContext
 
-    private val prefs: SharedPreferences = createPrefs(context.applicationContext)
+    @Volatile
+    var storageError: String? = null
+        private set
 
-    private fun createPrefs(appContext: Context): SharedPreferences {
+    @Volatile
+    var migrationWarning: String? = null
+        private set
+
+    private val prefs: SharedPreferences? = createPrefs(appContext)
+
+    val secureStorageAvailable: Boolean
+        get() = prefs != null
+
+    private fun createPrefs(appContext: Context): SharedPreferences? {
         return try {
             val masterKey = MasterKey.Builder(appContext)
                 .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
                 .build()
-            EncryptedSharedPreferences.create(
+            val encrypted = EncryptedSharedPreferences.create(
                 appContext,
                 FILE_NAME,
                 masterKey,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
             )
+            migrateLegacyPlaintextPrefs(appContext, encrypted)
+            encrypted
         } catch (e: Exception) {
-            Log.w(TAG, "EncryptedSharedPreferences unavailable, falling back to plain prefs")
-            appContext.getSharedPreferences(FALLBACK_FILE_NAME, Context.MODE_PRIVATE)
+            val legacyPlaintextMayRemain = runCatching {
+                appContext.getSharedPreferences(FALLBACK_FILE_NAME, Context.MODE_PRIVATE)
+                    .all.isNotEmpty()
+            }.getOrDefault(false)
+            storageError = if (legacyPlaintextMayRemain) {
+                "Secure provider storage is unavailable. Jarvis did not read or write the legacy unencrypted settings, but an older plaintext copy may remain on this device."
+            } else {
+                "Secure provider storage is unavailable. API keys were not saved."
+            }
+            // Log only the exception type. Never log messages that could contain data.
+            Log.e(TAG, "Encrypted provider storage unavailable; refusing plaintext fallback (${e.javaClass.simpleName})")
+            null
+        }
+    }
+
+    /**
+     * Older builds used a plaintext fallback. Copy its string values into
+     * encrypted storage and delete the legacy file only after commit succeeds.
+     * If migration fails, do not read from or write to the plaintext file.
+     */
+    private fun migrateLegacyPlaintextPrefs(
+        appContext: Context,
+        encrypted: SharedPreferences
+    ) {
+        try {
+            val legacy = appContext.getSharedPreferences(FALLBACK_FILE_NAME, Context.MODE_PRIVATE)
+            val legacyValues = legacy.all
+            if (legacyValues.isEmpty()) return
+            val editor = encrypted.edit()
+            for ((key, value) in legacyValues) {
+                if (!encrypted.contains(key) && value is String) {
+                    editor.putString(key, value)
+                }
+            }
+            if (!editor.commit()) {
+                migrationWarning = "Old provider settings could not be migrated securely. Re-enter provider keys and save."
+                Log.e(TAG, "Legacy provider settings migration commit failed; plaintext source retained")
+                return
+            }
+            if (legacy.edit().clear().commit()) {
+                appContext.deleteSharedPreferences(FALLBACK_FILE_NAME)
+                Log.i(TAG, "Legacy plaintext provider settings migrated and source removed")
+            } else {
+                migrationWarning = "Provider settings were encrypted, but the old plaintext copy could not be removed."
+                Log.e(TAG, "Legacy provider settings migrated but plaintext source could not be cleared")
+            }
+        } catch (e: Exception) {
+            migrationWarning = "Old provider settings could not be migrated securely. Re-enter provider keys and save."
+            Log.e(TAG, "Legacy provider settings migration failed (${e.javaClass.simpleName})")
         }
     }
 
     fun loadConfig(id: String): ProviderConfig {
         val preset = ProviderPresets.byId(id)
+        val storage = prefs ?: return ProviderConfig(
+            id = preset.id,
+            label = preset.label,
+            baseUrl = preset.baseUrl,
+            apiKey = "",
+            chatModel = preset.chatModel,
+            reasoningModel = preset.reasoningModel
+        )
         return ProviderConfig(
             id = preset.id,
             label = preset.label,
-            baseUrl = prefs.getString(key(id, "base"), preset.baseUrl) ?: preset.baseUrl,
-            apiKey = prefs.getString(key(id, "key"), "") ?: "",
-            chatModel = prefs.getString(key(id, "chat_model"), preset.chatModel)
+            baseUrl = storage.getString(key(id, "base"), preset.baseUrl) ?: preset.baseUrl,
+            apiKey = storage.getString(key(id, "key"), "") ?: "",
+            chatModel = storage.getString(key(id, "chat_model"), preset.chatModel)
                 ?: preset.chatModel,
-            reasoningModel = prefs.getString(key(id, "reasoning_model"), preset.reasoningModel)
+            reasoningModel = storage.getString(key(id, "reasoning_model"), preset.reasoningModel)
                 ?: preset.reasoningModel
         )
     }
 
-    fun saveConfig(config: ProviderConfig) {
-        prefs.edit()
-            .putString(key(config.id, "base"), config.baseUrl.trim())
-            .putString(key(config.id, "key"), config.apiKey.trim())
-            .putString(key(config.id, "chat_model"), config.chatModel.trim())
-            .putString(key(config.id, "reasoning_model"), config.reasoningModel.trim())
-            .apply()
+    /** Returns false rather than persisting a key if encrypted storage is unavailable. */
+    fun saveConfig(config: ProviderConfig): Boolean {
+        val storage = prefs ?: return false
+        return try {
+            storage.edit()
+                .putString(key(config.id, "base"), config.baseUrl.trim())
+                .putString(key(config.id, "key"), config.apiKey.trim())
+                .putString(key(config.id, "chat_model"), config.chatModel.trim())
+                .putString(key(config.id, "reasoning_model"), config.reasoningModel.trim())
+                .commit()
+        } catch (e: Exception) {
+            Log.e(TAG, "Encrypted provider settings write failed (${e.javaClass.simpleName})")
+            false
+        }
     }
 
     /**
@@ -94,7 +169,7 @@ class ProviderStore(context: Context) {
      * ids; kinds are re-derived from the ids on read.
      */
     fun cachedModelIds(id: String): List<String> {
-        val raw = prefs.getString(key(id, "models"), null) ?: return emptyList()
+        val raw = prefs?.getString(key(id, "models"), null) ?: return emptyList()
         return try {
             val array = org.json.JSONArray(raw)
             (0 until array.length()).mapNotNull { i ->
@@ -105,10 +180,17 @@ class ProviderStore(context: Context) {
         }
     }
 
-    fun saveModelIds(id: String, ids: List<String>) {
+    fun saveModelIds(id: String, ids: List<String>): Boolean {
         val array = org.json.JSONArray()
         ids.forEach { array.put(it) }
-        prefs.edit().putString(key(id, "models"), array.toString()).apply()
+        val storage = prefs ?: return false
+        return try {
+            storage.edit().putString(key(id, "models"), array.toString()).apply()
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Encrypted model-cache write failed (${e.javaClass.simpleName})")
+            false
+        }
     }
 
     /**
@@ -117,7 +199,7 @@ class ProviderStore(context: Context) {
      * the last known health of every model instantly on reopen.
      */
     fun cachedProbeResults(id: String): List<ModelProbeResult> {
-        val raw = prefs.getString(key(id, "probes"), null) ?: return emptyList()
+        val raw = prefs?.getString(key(id, "probes"), null) ?: return emptyList()
         return try {
             val array = org.json.JSONArray(raw)
             val out = mutableListOf<ModelProbeResult>()
@@ -143,7 +225,7 @@ class ProviderStore(context: Context) {
         }
     }
 
-    fun saveProbeResults(id: String, results: List<ModelProbeResult>) {
+    fun saveProbeResults(id: String, results: List<ModelProbeResult>): Boolean {
         val array = org.json.JSONArray()
         results.forEach { r ->
             array.put(
@@ -155,14 +237,22 @@ class ProviderStore(context: Context) {
                     .put("ts", r.timestamp)
             )
         }
-        prefs.edit().putString(key(id, "probes"), array.toString()).apply()
+        val storage = prefs ?: return false
+        return try {
+            storage.edit().putString(key(id, "probes"), array.toString()).apply()
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Encrypted probe-cache write failed (${e.javaClass.simpleName})")
+            false
+        }
     }
 
     fun activeProviderId(): String =
-        prefs.getString(KEY_ACTIVE, ProviderPresets.GEMINI.id) ?: ProviderPresets.GEMINI.id
+        prefs?.getString(KEY_ACTIVE, ProviderPresets.GEMINI.id) ?: ProviderPresets.GEMINI.id
 
-    fun setActiveProviderId(id: String) {
-        prefs.edit().putString(KEY_ACTIVE, id).apply()
+    fun setActiveProviderId(id: String): Boolean {
+        val storage = prefs ?: return false
+        return storage.edit().putString(KEY_ACTIVE, id).commit()
     }
 
     /** All configs in preset (failover) order, active provider first. */

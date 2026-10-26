@@ -63,7 +63,9 @@ import com.nshd.jarvis2.brain.ProviderStore
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Level 2: real API & Connection screen. Per-provider base URL / key /
@@ -91,10 +93,46 @@ fun ApiConnectionScreen(
     val store = remember { ProviderStore(context) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    var storageWarning by remember {
+        mutableStateOf(store.storageError ?: store.migrationWarning)
+    }
 
     var activeId by remember { mutableStateOf(store.activeProviderId()) }
     var editId by remember { mutableStateOf(store.activeProviderId()) }
     var config by remember(editId) { mutableStateOf(store.loadConfig(editId)) }
+
+    suspend fun persistConfig(configToSave: com.nshd.jarvis2.brain.ProviderConfig = config): Boolean {
+        // EncryptedSharedPreferences commit performs disk I/O; keep it off the
+        // UI thread and surface failures rather than blocking interaction.
+        val saved = withContext(Dispatchers.IO) { store.saveConfig(configToSave) }
+        val warning = store.storageError ?: store.migrationWarning
+        storageWarning = warning
+        if (!saved) {
+            scope.launch {
+                snackbar.showSnackbar(
+                    warning ?: "Provider settings could not be saved securely. No API key was stored."
+                )
+            }
+        } else if (warning != null) {
+            scope.launch { snackbar.showSnackbar(warning) }
+        }
+        return saved
+    }
+
+    fun selectActiveProvider(id: String) {
+        scope.launch {
+            val saved = withContext(Dispatchers.IO) { store.setActiveProviderId(id) }
+            if (saved) {
+                activeId = id
+                editId = id
+            } else {
+                val warning = store.storageError ?: "Active provider could not be saved securely."
+                storageWarning = warning
+                snackbar.showSnackbar(warning)
+            }
+        }
+    }
+ 
     var showKey by remember { mutableStateOf(false) }
     var refreshTick by remember { mutableStateOf(0) } // re-read "key set" dots after save
 
@@ -109,20 +147,28 @@ fun ApiConnectionScreen(
 
     fun runConnectionTestV2() {
         if (probing) return
-        store.saveConfig(config)
-        config = store.loadConfig(editId)
-        refreshTick++
         probing = true
         probeStageError = null
         val targetId = editId
+        val configToSave = config
         scope.launch {
-            val outcome = ModelDiscovery.runConnectionTestV2(store.loadConfig(targetId))
+            if (!persistConfig(configToSave)) {
+                probing = false
+                probeStageError = storageWarning ?: "Secure provider storage is unavailable."
+                return@launch
+            }
+            val targetConfig = withContext(Dispatchers.IO) { store.loadConfig(targetId) }
+            config = targetConfig
+            refreshTick++
+            val outcome = ModelDiscovery.runConnectionTestV2(targetConfig)
             probing = false
             if (!outcome.endpointOk) {
                 // Stage 1 failed — friendly headline, no Stage 2 noise.
                 probeStageError = FriendlyErrors.map(outcome.endpointError).headline
             } else {
                 probeResults = outcome.probes
+                // These are optional caches; ProviderStore uses apply() for
+                // their disk writes so they do not block the UI thread.
                 store.saveProbeResults(targetId, outcome.probes)
                 store.saveModelIds(targetId, outcome.models.map { it.id })
                 refreshTick++
@@ -143,12 +189,20 @@ fun ApiConnectionScreen(
     }
 
     fun useAlternative(modelId: String) {
-        config = config.copy(chatModel = modelId)
-        store.saveConfig(config)
-        config = store.loadConfig(editId)
-        refreshTick++
-        showProbeDialog = false
-        scope.launch { snackbar.showSnackbar("Chat model set to $modelId") }
+        val previous = config
+        val updated = config.copy(chatModel = modelId)
+        config = updated
+        val targetId = editId
+        scope.launch {
+            if (!persistConfig(updated)) {
+                config = previous
+                return@launch
+            }
+            config = withContext(Dispatchers.IO) { store.loadConfig(targetId) }
+            refreshTick++
+            showProbeDialog = false
+            snackbar.showSnackbar("Chat model set to $modelId")
+        }
     }
 
     // ── Model discovery (F2) ───────────────────────────────────────────
@@ -177,8 +231,7 @@ fun ApiConnectionScreen(
                     // route it to AppLog and show the friendly reason.
                     com.nshd.jarvis2.core.AppLog.e(
                         "API",
-                        "fetch models failed: ${error.message ?: "unknown"}",
-                        error
+                        "fetch models failed (${error.javaClass.simpleName})"
                     )
                     modelsError = "Couldn't fetch models — check the key " +
                         "and connection. (" +
@@ -238,11 +291,7 @@ fun ApiConnectionScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable {
-                                    activeId = preset.id
-                                    store.setActiveProviderId(preset.id)
-                                    editId = preset.id
-                                }
+                                .clickable { selectActiveProvider(preset.id) }
                                 .padding(
                                     horizontal = JarvisDimens.spaceLg,
                                     vertical = JarvisDimens.spaceSm
@@ -251,11 +300,7 @@ fun ApiConnectionScreen(
                         ) {
                             RadioButton(
                                 selected = activeId == preset.id,
-                                onClick = {
-                                    activeId = preset.id
-                                    store.setActiveProviderId(preset.id)
-                                    editId = preset.id
-                                }
+                                onClick = { selectActiveProvider(preset.id) }
                             )
                             Text(
                                 text = preset.label,
@@ -452,10 +497,15 @@ fun ApiConnectionScreen(
                     Row {
                         Button(
                             onClick = {
-                                store.saveConfig(config)
-                                config = store.loadConfig(editId)
-                                refreshTick++
-                                scope.launch { snackbar.showSnackbar("Saved") }
+                                val configToSave = config
+                                val targetId = editId
+                                scope.launch {
+                                    if (persistConfig(configToSave)) {
+                                        config = withContext(Dispatchers.IO) { store.loadConfig(targetId) }
+                                        refreshTick++
+                                        snackbar.showSnackbar("Saved securely")
+                                    }
+                                }
                             },
                             modifier = Modifier.weight(1f)
                         ) { Text("Save") }

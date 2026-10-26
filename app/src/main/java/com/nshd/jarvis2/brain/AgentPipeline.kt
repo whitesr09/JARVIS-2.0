@@ -13,6 +13,7 @@ import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.core.BrainStore
 import com.nshd.jarvis2.core.MacroRecorder
 import com.nshd.jarvis2.core.ScheduledAlarms
+import com.nshd.jarvis2.hands.ActionOutcome
 import com.nshd.jarvis2.hands.ContactsResolver
 import com.nshd.jarvis2.hands.DeepIntents
 import com.nshd.jarvis2.hands.LocationHelper
@@ -188,8 +189,7 @@ object AgentPipeline {
             TaskQueue.finishRunning(success)
             AppLog.i(
                 "Queue",
-                "turn '${turnTitle.take(40)}' finished in " +
-                    "${System.currentTimeMillis() - turnStartedAt}ms " +
+                "turn finished in ${System.currentTimeMillis() - turnStartedAt}ms " +
                     "(ok=$success)"
             )
             TaskState.finish(
@@ -316,7 +316,7 @@ object AgentPipeline {
         // so future calls/messages resolve the corrected name.
         extractContactCorrection(clean)?.let { (wrong, right) ->
             saveContactAlias(memoryDb, wrong, right)
-            AppLog.i("Agent", "route=contact-correction '$wrong' -> '$right'")
+            AppLog.i("Agent", "route=contact-correction alias matched")
             return@withContext "Got it — $wrong means $right. Saved."
         }
 
@@ -430,7 +430,7 @@ object AgentPipeline {
                 memoryDb.addPendingFact(category, fact)
                 AppLog.i(
                     "Agent",
-                    "route=auto-extract → review queue: '${fact.take(50)}'"
+                    "route=auto-extract → review queue (${fact.length} chars)"
                 )
             }
         }
@@ -512,7 +512,7 @@ object AgentPipeline {
             val phrase = teachMatch.groupValues[1].trim()
             val target = teachMatch.groupValues[2].trim()
             if (phrase.length >= 2 && target.isNotBlank()) {
-                AppLog.i("Agent", "route=custom-teach '$phrase'")
+                AppLog.i("Agent", "route=custom-teach saved")
                 BrainStore.saveCustomCommand(
                     context, BrainStore.CustomCommand(phrase, target)
                 )
@@ -541,7 +541,7 @@ object AgentPipeline {
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
             if (name.isNotBlank() && steps.isNotEmpty()) {
-                AppLog.i("Agent", "route=routine-create '$name' (${steps.size} steps)")
+                AppLog.i("Agent", "route=routine-create (${steps.size} steps)")
                 BrainStore.saveRoutine(
                     context,
                     BrainStore.Routine(
@@ -576,7 +576,7 @@ object AgentPipeline {
                         known.joinToString(", ") { it.name } + "."
                 }
             }
-            AppLog.i("Agent", "route=routine-run '${routine.name}'")
+            AppLog.i("Agent", "route=routine-run requested")
             suppressMacroNote = true
             return runRoutineSteps(
                 context, routine, settings, memoryDb, providerStore,
@@ -590,7 +590,7 @@ object AgentPipeline {
                 ?.let { macro ->
                     AppLog.i(
                         "Agent",
-                        "route=macro-replay '${macro.trigger}' (${macro.steps.size} steps)"
+                        "route=macro-replay (${macro.steps.size} steps)"
                     )
                     suppressMacroNote = true
                     return runMacro(context, macro, memoryDb, hudEvent)
@@ -602,7 +602,7 @@ object AgentPipeline {
             )?.let { command ->
                 AppLog.i(
                     "Agent",
-                    "route=custom-command '${command.phrase}' → '${command.target}'"
+                    "route=custom-command dispatched"
                 )
                 suppressMacroNote = true
                 return dispatch(
@@ -660,6 +660,19 @@ object AgentPipeline {
             lines += (if (result.success) "✅ " else "❌ ") +
                 ToolEvent.prettyTool(step.tool) + " — " +
                 result.message.lineSequence().firstOrNull().orEmpty().take(90)
+            if (result.outcome in setOf(
+                    ActionOutcome.STAGED_FOR_USER,
+                    ActionOutcome.SUBMITTED_UNVERIFIED,
+                    ActionOutcome.OUTCOME_UNKNOWN
+                )
+            ) {
+                lines += "Stopped remaining steps: this external action needs user review before any retry."
+                AppLog.w(
+                    "Agent",
+                    "macro stopped after " + step.tool + " outcome=" + result.outcome
+                )
+                break
+            }
         }
         return buildString {
             append("Ran your \"${macro.trigger}\" command — ")
@@ -724,17 +737,27 @@ object AgentPipeline {
                 } catch (e: Exception) {
                     AppLog.e(
                         "Brain",
-                        "routine step '$stepText' crashed: " +
-                            (e.message ?: "error"),
-                        e
+                        "routine step failed (${e.javaClass.simpleName})"
                     )
                     "Failed: " +
                         com.nshd.jarvis2.ui.FriendlyErrors.shortReason(e.message)
                 }
-                val ok = !isFailureResult(result)
+                val requiresOutcomeReview =
+                    result.startsWith("STAGED_FOR_USER") ||
+                        result.startsWith("SUBMITTED_UNVERIFIED") ||
+                        result.startsWith("OUTCOME_UNKNOWN")
+                val ok = !requiresOutcomeReview && !isFailureResult(result)
                 if (ok) done++ else failed++
                 lines += (if (ok) "✅ " else "❌ ") + stepText + " — " +
                     result.lineSequence().firstOrNull().orEmpty().take(90)
+                if (requiresOutcomeReview) {
+                    lines += "Stopped remaining routine steps: inspect the external app before retrying this action."
+                    AppLog.w(
+                        "Agent",
+                        "routine stopped after uncertain action outcome at step " + (index + 1)
+                    )
+                    break
+                }
             }
         } finally {
             if (registerTask) TaskQueue.finishRunning(failed == 0)
@@ -1126,18 +1149,31 @@ object AgentPipeline {
                 // Raw text → AppLog; the queue summary line is friendly.
                 AppLog.e(
                     "Agent",
-                    "sub-task '${item.title.take(40)}' crashed: " +
-                        (e.message ?: "unexpected error"),
-                    e
+                    "sub-task failed (${e.javaClass.simpleName})"
                 )
                 "Failed: " + com.nshd.jarvis2.ui.FriendlyErrors.shortReason(e.message)
             }
             // #61: stop check right after this sub-task's execution.
             TaskState.throwIfStopRequested()
+            val outcomeNeedsReview = result.startsWith("STAGED_FOR_USER") ||
+                result.startsWith("SUBMITTED_UNVERIFIED") ||
+                result.startsWith("OUTCOME_UNKNOWN")
+            if (outcomeNeedsReview) {
+                // The external action may already have reached another app.
+                // Do not continue a compound request into later side effects.
+                TaskQueue.markFailed(item.id)
+                failed++
+                lines += "⚠ " + item.title + " — " +
+                    result.lineSequence().firstOrNull().orEmpty().take(90)
+                items.drop(index + 1).forEach { TaskQueue.skipTask(it.id) }
+                lines += "Stopped remaining tasks: inspect the external app before retrying."
+                AppLog.w("Agent", "task queue stopped after uncertain action outcome at step ${index + 1}")
+                break
+            }
             val ok = !isFailureResult(result)
             AppLog.d(
                 "Agent",
-                "task ${index + 1}/${items.size} '${item.title.take(40)}' → " +
+                "task ${index + 1}/${items.size} → " +
                     if (ok) "done" else "failed"
             )
             if (ok) {

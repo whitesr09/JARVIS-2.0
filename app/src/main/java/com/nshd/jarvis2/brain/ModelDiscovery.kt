@@ -1,12 +1,15 @@
 package com.nshd.jarvis2.brain
 
+import com.nshd.jarvis2.ui.FriendlyErrors
 import com.nshd.jarvis2.core.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.ResponseBody
 import org.json.JSONObject
 import java.io.IOException
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 
 /**
@@ -80,27 +83,24 @@ object ModelDiscovery {
             val fetchStartedAt = System.currentTimeMillis()
             try {
                 client.newCall(request).execute().use { response ->
-                    val bodyText = response.body?.string().orEmpty()
+                    val bodyText = readLimitedBody(response.body)
                     val fetchMs = System.currentTimeMillis() - fetchStartedAt
                     if (!response.isSuccessful) {
-                        AppLog.e(
+                        // Provider error bodies may contain request details or
+                        // server internals; keep diagnostics to status/latency.
+                        AppLog.w(
                             "API",
-                            "${config.id} GET $modelsHost/models → HTTP " +
-                                "${response.code} in ${fetchMs}ms: " +
-                                bodyText.replace('\n', ' ').take(300)
+                            "${config.id} list-models → HTTP " +
+                                "${response.code} in ${fetchMs}ms"
                         )
-                        val brief = bodyText.replace('\n', ' ').take(140)
                         return@withContext Result.failure(
-                            AiException(
-                                "HTTP ${response.code}" +
-                                    if (brief.isNotBlank()) ": $brief" else ""
-                            )
+                            AiException("HTTP ${response.code} from provider")
                         )
                     }
                     val ids = parseIds(bodyText)
                     AppLog.d(
                         "API",
-                        "${config.id} GET $modelsHost/models → 200 in " +
+                        "${config.id} list-models → 200 in " +
                             "${fetchMs}ms (${ids.size} models)"
                     )
                     if (ids.isEmpty()) {
@@ -112,14 +112,12 @@ object ModelDiscovery {
                     }
                 }
             } catch (e: IOException) {
+                val safeReason = FriendlyErrors.shortReason(e.message)
                 AppLog.e(
                     "API",
-                    "${config.id} GET $modelsHost/models network error: " +
-                        (e.message ?: "unreachable")
+                    "${config.id} list-models network error (${e.javaClass.simpleName})"
                 )
-                Result.failure(
-                    AiException("Network error: ${e.message ?: "unreachable"}")
-                )
+                Result.failure(AiException("Network error: $safeReason"))
             } catch (e: AiException) {
                 Result.failure(e)
             } catch (e: Exception) {
@@ -187,21 +185,52 @@ object ModelDiscovery {
         )
     }
 
-    /** OpenAI-shaped {"data":[{"id": …}]}; tolerates a bare array root. */
-    private fun parseIds(bodyText: String): List<String> {
+    /** OpenAI-shaped {"data":[{"id": …}]}; dedupes and caps returned identifiers. */
+    internal fun parseIds(bodyText: String): List<String> {
         val ids = sortedSetOf<String>()
         try {
             val root = JSONObject(bodyText)
             val data = root.optJSONArray("data") ?: return emptyList()
             for (i in 0 until data.length()) {
-                val id = data.optJSONObject(i)?.optString("id").orEmpty()
-                if (id.isNotBlank()) ids += id
+                val id = data.optJSONObject(i)?.optString("id").orEmpty().trim()
+                if (id.isNotBlank() && id.length <= MAX_MODEL_ID_CHARS) {
+                    ids += id
+                    if (ids.size >= MAX_DISCOVERED_MODELS) break
+                }
             }
         } catch (e: Exception) {
             return emptyList()
         }
-        return ids.toList() // sortedSet iteration = alphabetical
+        return ids.toList()
     }
+
+    private fun readLimitedBody(body: ResponseBody?): String {
+        if (body == null) return ""
+        if (body.contentLength() > MAX_MODEL_LIST_BYTES) {
+            throw AiException("Provider model list exceeded the 1 MiB response limit")
+        }
+        val output = ByteArrayOutputStream()
+        body.byteStream().use { input ->
+            val buffer = ByteArray(8_192)
+            while (true) {
+                val remaining = MAX_MODEL_LIST_BYTES + 1 - output.size()
+                if (remaining <= 0) {
+                    throw AiException("Provider model list exceeded the 1 MiB response limit")
+                }
+                val count = input.read(buffer, 0, minOf(buffer.size, remaining))
+                if (count < 0) break
+                output.write(buffer, 0, count)
+                if (output.size() > MAX_MODEL_LIST_BYTES) {
+                    throw AiException("Provider model list exceeded the 1 MiB response limit")
+                }
+            }
+        }
+        return output.toString(Charsets.UTF_8.name())
+    }
+
+    private const val MAX_MODEL_LIST_BYTES = 1_048_576
+    private const val MAX_DISCOVERED_MODELS = 500
+    private const val MAX_MODEL_ID_CHARS = 256
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()

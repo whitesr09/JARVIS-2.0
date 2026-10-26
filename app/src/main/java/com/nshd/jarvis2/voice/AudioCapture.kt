@@ -1,5 +1,8 @@
 package com.nshd.jarvis2.voice
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -7,6 +10,7 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Process
+import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.CrashLogger
 import kotlin.math.sqrt
 
@@ -22,6 +26,7 @@ import kotlin.math.sqrt
  * the mic keeps running so un-muting is instant.
  */
 class AudioCapture(
+    private val context: Context,
     private val onChunk: (ByteArray) -> Unit,
     private val onAmplitude: (Float) -> Unit,
     private val onError: (String) -> Unit = {}
@@ -39,6 +44,13 @@ class AudioCapture(
     /** @return true if capture actually started (permission + hardware OK). */
     fun start(): Boolean {
         if (running) return true
+        if (ContextCompat.checkSelfPermission(
+                context, Manifest.permission.RECORD_AUDIO
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            onError("Microphone permission is not granted")
+            return false
+        }
         val minBuffer = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
@@ -57,6 +69,10 @@ class AudioCapture(
                 // Generous internal buffer so the reader never starves.
                 maxOf(minBuffer * 4, 32_000)
             )
+        } catch (e: SecurityException) {
+            CrashLogger.logNonFatal("audio", e)
+            onError("Microphone permission is missing or was revoked")
+            return false
         } catch (e: Exception) {
             CrashLogger.logNonFatal("audio", e)
             onError("Microphone could not be opened: ${e.message ?: "unknown error"}")
