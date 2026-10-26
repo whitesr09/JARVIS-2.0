@@ -51,9 +51,18 @@ class AudioCapture(
             onError("Microphone permission is not granted")
             return false
         }
-        val minBuffer = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-        )
+        val minBuffer = try {
+            AudioRecord.getMinBufferSize(
+                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+            )
+        } catch (e: SecurityException) {
+            onError("Microphone permission was revoked before capture could start")
+            return false
+        } catch (e: Exception) {
+            CrashLogger.logNonFatal("audio", e)
+            onError("Microphone buffer could not be initialized")
+            return false
+        }
         if (minBuffer <= 0) {
             // F4.1: device refused a buffer size — fail soft, logged.
             CrashLogger.logNonFatal("audio", "getMinBufferSize returned $minBuffer")
