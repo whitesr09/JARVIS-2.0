@@ -122,14 +122,24 @@ class OpenAiCompatibleProvider(
 
     private fun endpoint(path: String): String = baseUrl.trimEnd('/') + path
 
-    /** "host/path" for AppLog lines (F5) — never contains the API key. */
+    /** Host and fixed API path only; never logs custom URL path segments or query values. */
     private fun logTarget(path: String): String = try {
         val uri = java.net.URI(baseUrl.trimEnd('/'))
-        val host = uri.host ?: "endpoint"
-        val base = uri.path.orEmpty().trimEnd('/')
-        "$host$base$path"
+        "${uri.host ?: "endpoint"}$path"
     } catch (e: Exception) {
         "endpoint$path"
+    }
+
+    private fun httpFailureSummary(code: Int): String = when (code) {
+        400 -> "The request was rejected; check provider/model compatibility."
+        401, 403 -> "Authentication was rejected by the provider."
+        404 -> "The endpoint or model was not found."
+        405 -> "The endpoint does not support this request method."
+        408 -> "The provider timed out."
+        413 -> "The request was too large."
+        429 -> "The provider rate limit was reached."
+        in 500..599 -> "The provider reported a server error."
+        else -> "The provider returned an HTTP error."
     }
 
     private fun authed(builder: Request.Builder): Request.Builder =
@@ -178,14 +188,12 @@ class OpenAiCompatibleProvider(
             val bodyText = readLimitedBody(it.body, MAX_RESPONSE_BYTES)
             val latencyMs = System.currentTimeMillis() - startedAt
             if (!it.isSuccessful) {
-                AppLog.e(
+                AppLog.w(
                     "API",
                     "$id model=$model POST ${logTarget("/chat/completions")} " +
-                        "→ HTTP ${it.code} in ${latencyMs}ms: " +
-                        bodyText.replace('\n', ' ').take(300)
+                        "→ HTTP ${it.code} in ${latencyMs}ms"
                 )
-                val brief = bodyText.replace('\n', ' ').take(160)
-                throw AiException("HTTP ${it.code}${if (brief.isNotBlank()) ": $brief" else ""}")
+                throw AiException("HTTP ${it.code}: ${httpFailureSummary(it.code)}")
             }
             AppLog.d(
                 "API",
@@ -298,13 +306,12 @@ class OpenAiCompatibleProvider(
                     if (reply.content.isNotBlank()) onDelta(reply.content)
                     return@withContext reply
                 }
-                AppLog.e(
+                AppLog.w(
                     "API",
                     "$id model=$model POST ${logTarget("/chat/completions")} " +
-                        "→ HTTP ${it.code}: " + bodyText.replace('\n', ' ').take(300)
+                        "→ HTTP ${it.code}"
                 )
-                val brief = bodyText.replace('\n', ' ').take(160)
-                throw AiException("HTTP ${it.code}${if (brief.isNotBlank()) ": $brief" else ""}")
+                throw AiException("HTTP ${it.code}: ${httpFailureSummary(it.code)}")
             }
             val source = it.body?.source()
                 ?: throw AiException("Empty streaming response")
@@ -550,15 +557,13 @@ class OpenAiCompatibleProvider(
                     )
                     TestResult(true, elapsed(), "OK")
                 } else {
-                    val brief = readLimitedBody(resp.body, MAX_RESPONSE_BYTES)
-                        .replace('\n', ' ').trim().take(120)
                     AppLog.w(
                         "API",
-                        "$id probe model=$model → HTTP ${resp.code}: $brief"
+                        "$id probe model=$model → HTTP ${resp.code}"
                     )
                     TestResult(
                         false, elapsed(),
-                        "HTTP ${resp.code}" + if (brief.isNotBlank()) ": $brief" else ""
+                        "HTTP ${resp.code}: ${httpFailureSummary(resp.code)}"
                     )
                 }
             }
@@ -611,12 +616,14 @@ class OpenAiCompatibleProvider(
                     .post(payload.toString().toRequestBody("application/json".toMediaType()))
                     .build()
                 client.newCall(req).execute().use { resp ->
-                    val brief = if (resp.isSuccessful) "" else
-                        " — " + resp.body?.string().orEmpty().replace('\n', ' ').take(120)
                     if (resp.isSuccessful) {
                         TestResult(true, elapsed(), "Connected — test completion succeeded")
                     } else {
-                        TestResult(false, elapsed(), "HTTP ${resp.code}$brief")
+                        TestResult(
+                            false,
+                            elapsed(),
+                            "HTTP ${resp.code}: ${httpFailureSummary(resp.code)}"
+                        )
                     }
                 }
             } catch (e: IOException) {
