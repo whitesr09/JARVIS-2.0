@@ -42,6 +42,15 @@ object BiometricsRecorder {
     fun countSamples(context: Context): Int =
         (1..TOTAL_SAMPLES).count { isValidWavFile(sampleFile(context, it)) }
 
+    /** First sample slot needing capture, so a corrupt earlier slot cannot block enrollment. */
+    fun nextMissingSampleIndex(context: Context): Int =
+        nextMissingSampleIndex((1..TOTAL_SAMPLES).filter {
+            isValidWavFile(sampleFile(context, it))
+        }.toSet())
+
+    internal fun nextMissingSampleIndex(validSampleIndexes: Set<Int>): Int =
+        (1..TOTAL_SAMPLES).firstOrNull { it !in validSampleIndexes } ?: TOTAL_SAMPLES
+
     fun deleteSamples(context: Context) {
         (1..TOTAL_SAMPLES).forEach { runCatching { sampleFile(context, it).delete() } }
     }
