@@ -308,9 +308,8 @@ object BackupManager {
         val providersArr = root.getJSONArray("providers")
 
         var settingsApplied = 0
-        val editor = appContext
-            .getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
-            .edit()
+        val prefs = appContext.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+        val editor = prefs.edit()
         val keys = settingsObj.keys()
         while (keys.hasNext()) {
             val key = keys.next()
@@ -322,38 +321,59 @@ object BackupManager {
                 is String -> editor.putString(key, value)
                 is Boolean -> editor.putBoolean(key, value)
                 is Int -> editor.putInt(key, value)
-                is Long -> editor.putInt(key, value.toInt())
-                is Double -> editor.putFloat(key, value.toFloat())
+                is Long -> {
+                    require(value in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) {
+                        "Setting '$key' is outside the supported integer range."
+                    }
+                    editor.putInt(key, value.toInt())
+                }
+                is Double -> {
+                    require(value.isFinite() && value.toFloat().isFinite()) {
+                        "Setting '$key' is outside the supported numeric range."
+                    }
+                    editor.putFloat(key, value.toFloat())
+                }
                 else -> throw IllegalArgumentException("Unsupported setting value type for '$key'.")
             }
             settingsApplied++
         }
-        require(editor.commit()) { "Settings could not be saved; restore was not completed." }
 
         val db = MemoryDb(appContext)
         val existing = db.allFacts(null, null)
-            .map { it.category + "" + it.text.trim().lowercase() }
+            .map { it.category + "\u0001" + it.text.trim().lowercase() }
             .toHashSet()
         var factsAdded = 0
         var factsSkipped = 0
-        for (i in 0 until factsArr.length()) {
+
+        // All new facts are one SQLite transaction. Commit settings only after
+        // all fact writes succeed, so a bad database write cannot leave the
+        // settings half of the restore applied with no memory imported.
+        db.beginTransaction()
+        try {
+            for (i in 0 until factsArr.length()) {
                 val obj = factsArr.getJSONObject(i)
                 val text = obj.getString("text").trim()
-                if (text.isEmpty()) {
-                    factsSkipped++
-                    continue
-                }
                 val category = obj.optString("category")
                     .takeIf { it in MemoryCategories.ALL }
                     ?: MemoryCategories.GENERAL
-                val dedupeKey = category + "" + text.lowercase()
-                if (dedupeKey in existing) {
+                val dedupeKey = category + "\u0001" + text.lowercase()
+                if (text.isEmpty() || dedupeKey in existing) {
                     factsSkipped++
                 } else {
-                    db.addFact(category, text)
+                    val insertedId = db.addFact(category, text)
+                    require(insertedId > 0L) {
+                        "A memory entry could not be saved; restore was not completed."
+                    }
                     existing += dedupeKey
                     factsAdded++
                 }
+            }
+            require(editor.commit()) {
+                "Settings could not be saved; restore was not completed."
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
 
         val providersListed = providersArr.length()
