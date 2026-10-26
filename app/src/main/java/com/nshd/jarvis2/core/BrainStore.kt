@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
 
 /**
  * v2.0.0 "Brain Upgrade" storage — one SharedPreferences file
@@ -39,6 +40,12 @@ object BrainStore {
     private const val KEY_NOTIF_READER = "notif_reader_enabled"
     private const val KEY_PENDING_SUMMARY = "pending_summary"
     private const val KEY_SCHEDULED_SEQ = "scheduled_seq"
+    private const val MAX_GOAL_COUNT = 1_000_000
+    private val GOAL_HASH_REGEX = Regex("^[0-9a-f]{64}$")
+
+    private val candidateLock = Any()
+    @Volatile
+    private var pendingMacroCandidate: TurnCandidate? = null
 
     // ── Data shapes ──────────────────────────────────────────────────
 
@@ -181,66 +188,78 @@ object BrainStore {
      * of times this exact goal has now succeeded (the pipeline offers
      * "save as a command" when this reaches 2).
      */
+    /**
+     * Record a successful turn's count using a one-way goal hash. The candidate
+     * arguments stay in memory only until the user explicitly saves a macro;
+     * silently persisting them could retain passwords, message contents, or
+     * clipboard data in SharedPreferences.
+     */
     fun noteSuccessfulTurn(
         context: Context,
         goal: String,
         steps: List<RecordedStep>
     ): Int {
-        val key = normalizeKey(goal)
-        if (key.isBlank() || steps.isEmpty()) return 0
-        val counts = try {
+        val normalizedGoal = normalizeKey(goal)
+        if (normalizedGoal.isBlank() || steps.isEmpty()) return 0
+
+        val counts = readSanitizedGoalCounts(context)
+        val key = goalCountStorageKey(normalizedGoal)
+        val count = (counts.optInt(key, 0) + 1).coerceAtMost(MAX_GOAL_COUNT)
+        counts.put(key, count)
+        // Also delete a legacy candidate from older builds, which persisted
+        // raw command arguments without an explicit save gesture.
+        prefs(context).edit()
+            .putString(KEY_GOAL_COUNTS, counts.toString())
+            .remove(KEY_LAST_CANDIDATE)
+            .apply()
+
+        synchronized(candidateLock) {
+            pendingMacroCandidate = TurnCandidate(
+                goal = goal,
+                goalKey = normalizedGoal,
+                steps = steps.toList()
+            )
+        }
+        return count
+    }
+
+    /** SHA-256 key for goal repetition counts; the raw user command is not persisted. */
+    internal fun goalCountStorageKey(goal: String): String {
+        val bytes = MessageDigest.getInstance("SHA-256")
+            .digest(normalizeKey(goal).toByteArray(Charsets.UTF_8))
+        return bytes.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
+    private fun readSanitizedGoalCounts(context: Context): JSONObject {
+        val parsed = try {
             JSONObject(prefs(context).getString(KEY_GOAL_COUNTS, "{}") ?: "{}")
         } catch (e: Exception) {
             JSONObject()
         }
-        val count = counts.optInt(key, 0) + 1
-        counts.put(key, count)
-        prefs(context).edit().putString(KEY_GOAL_COUNTS, counts.toString()).apply()
-        val candidate = JSONObject()
-            .put("goal", goal)
-            .put("key", key)
-            .put(
-                "steps",
-                JSONArray().apply {
-                    steps.forEach { step ->
-                        put(
-                            JSONObject()
-                                .put("tool", step.tool)
-                                .put("args", step.argsJson)
-                        )
-                    }
-                }
-            )
-        prefs(context).edit()
-            .putString(KEY_LAST_CANDIDATE, candidate.toString()).apply()
-        return count
+        val sanitized = JSONObject()
+        val keys = parsed.keys()
+        while (keys.hasNext()) {
+            val oldKey = keys.next()
+            // Older versions keyed this map with the user's normalized command.
+            // Retain only hash-shaped keys; old clear-text prompts are discarded.
+            if (!GOAL_HASH_REGEX.matches(oldKey)) continue
+            val value = parsed.optInt(oldKey, 0)
+            if (value in 0..MAX_GOAL_COUNT) sanitized.put(oldKey, value)
+        }
+        return sanitized
     }
 
+    /**
+     * Return only an in-process candidate. Remove the legacy serialized field
+     * on read so older versions' persisted raw arguments are purged as well.
+     */
     fun lastCandidate(context: Context): TurnCandidate? {
-        val raw = prefs(context).getString(KEY_LAST_CANDIDATE, null) ?: return null
-        val obj = try {
-            JSONObject(raw)
-        } catch (e: Exception) {
-            return null
-        }
-        val stepsArray = obj.optJSONArray("steps") ?: JSONArray()
-        val steps = mutableListOf<RecordedStep>()
-        for (j in 0 until stepsArray.length()) {
-            val step = stepsArray.optJSONObject(j) ?: continue
-            steps += RecordedStep(
-                tool = step.optString("tool"),
-                argsJson = step.optString("args").ifBlank { "{}" }
-            )
-        }
-        if (steps.isEmpty()) return null
-        return TurnCandidate(
-            goal = obj.optString("goal"),
-            goalKey = obj.optString("key"),
-            steps = steps
-        )
+        prefs(context).edit().remove(KEY_LAST_CANDIDATE).apply()
+        return synchronized(candidateLock) { pendingMacroCandidate }
     }
 
     fun clearCandidate(context: Context) {
+        synchronized(candidateLock) { pendingMacroCandidate = null }
         prefs(context).edit().remove(KEY_LAST_CANDIDATE).apply()
     }
 
