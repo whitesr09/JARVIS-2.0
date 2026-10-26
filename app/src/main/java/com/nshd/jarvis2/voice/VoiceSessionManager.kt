@@ -144,6 +144,9 @@ object VoiceSessionManager {
 
     private var client: GeminiLiveClient? = null
     private var capture: AudioCapture? = null
+    // Serializes late Live setup callbacks with session teardown. A callback
+    // must not acquire/start the microphone after stop has cleared ownership.
+    private val captureLifecycleLock = Any()
     private var player: AudioPlayer? = null
     private var chime: ChimePlayer? = null
 
@@ -791,8 +794,11 @@ object VoiceSessionManager {
         liveTimeWarningJob = null
         shareJob?.cancel()
         shareJob = null
-        capture?.stop()
-        capture = null
+        synchronized(captureLifecycleLock) {
+            val ownedCapture = capture
+            capture = null
+            ownedCapture?.stop()
+        }
         client?.close()
         client = null
         player?.stop()
@@ -1332,15 +1338,24 @@ object VoiceSessionManager {
                 },
                 onError = { message -> if (active) fail(message) }
             )
-            capture = captureDevice
-            CrashLogger.stage(TAG, "live: audio capture start")
-            if (captureDevice.start()) {
-                CrashLogger.stage(TAG, "live: capture running — LISTENING")
-                setStatus(VoiceStatus.LISTENING)
-            } else if (active) {
-                // AudioCapture already reported via onError; if it returns
-                // false silently, surface a generic mic failure.
-                if (_uiState.value.status != VoiceStatus.ERROR) {
+            synchronized(captureLifecycleLock) {
+                if (!active) return
+                capture = captureDevice
+                CrashLogger.stage(TAG, "live: audio capture start")
+                val started = captureDevice.start()
+                // stopInternal() marks active=false before waiting for this
+                // lock; if it raced with start(), release the newly acquired mic.
+                if (!active) {
+                    if (capture === captureDevice) capture = null
+                    captureDevice.stop()
+                    return
+                }
+                if (started) {
+                    CrashLogger.stage(TAG, "live: capture running — LISTENING")
+                    setStatus(VoiceStatus.LISTENING)
+                } else if (_uiState.value.status != VoiceStatus.ERROR) {
+                    // AudioCapture reports permission/hardware errors itself;
+                    // still surface a generic failure if it returned silently.
                     fail("Microphone could not be started")
                 }
             }
