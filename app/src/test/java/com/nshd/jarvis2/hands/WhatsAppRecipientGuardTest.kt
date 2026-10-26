@@ -54,6 +54,24 @@ class WhatsAppRecipientGuardTest {
     }
 
     @Test
+    fun rejectsSameLastSevenDigitsWithDifferentPrefix() {
+        assertFalse(
+            WhatsAppRecipientGuard.matchesApprovedChat(
+                visibleTitle = "+44 1234 9876543210",
+                approvedName = "Ahammed Nishad",
+                approvedDigits = "919876543210"
+            )
+        )
+        assertFalse(
+            WhatsAppRecipientGuard.matchesApprovedChat(
+                visibleTitle = "76543210",
+                approvedName = "Ahammed Nishad",
+                approvedDigits = "919876543210"
+            )
+        )
+    }
+
+    @Test
     fun rejectsAmbiguousShortNumber() {
         assertFalse(
             WhatsAppRecipientGuard.matchesApprovedChat(
