@@ -4,16 +4,23 @@ Baseline: v2.0.3 (e2ee360fa35120b0cb94266b62694837cdf3a8a9)
 Working branch: improvement/phase-1-release-hardening
 Target: keep main stable; deliver each phase as a reviewable change set and require CI plus device smoke tests where applicable.
 
-## Phase 1 — Release hardening and truthful diagnostics
-- Keep README/version/build instructions aligned with Gradle and the actual APK.
-- Identify builds by source commit SHA rather than comparing CI timestamps to Android's install timestamp.
-- Make update checks retryable after network/API failure and avoid reporting an update when the installed build identity is unknown.
-- Replace hard-coded Voice replies PASS with a status that distinguishes a capability/configuration check from a real audio round trip.
-- Remove plaintext API-key fallback; surface secure-storage initialization failure without silently writing credentials unencrypted.
-- Require explicit release-signing verification in release workflows; never mistake a debug artifact for a release.
-- Add tests for update response parsing, unknown build identity, HTTP failures, secure-storage failure behavior, and diagnostic statuses.
+## Phase 1 — Release hardening and truthful diagnostics (partially implemented; verification pending)
 
-Acceptance: Gradle unit tests and APK build pass; no API key is written to plaintext preferences; update status never claims a version comparison it cannot prove; README links resolve.
+Implemented on the working branch:
+- Build identity uses the source commit SHA; update checks do not claim a comparison when the embedded SHA is unknown, and transient errors remain retryable.
+- Provider storage now fails closed instead of writing API keys to plaintext preferences when encrypted storage cannot initialize.
+- If encrypted storage opens, a migration attempts to move legacy plaintext provider settings into encrypted storage and remove the old copy only after the encrypted commit succeeds.
+- Provider settings UI now reports a secure-save failure instead of claiming settings were saved.
+- The voice self-test no longer hard-codes a PASS: it reports that the audio round-trip is NOT TESTED and separately checks encrypted provider-storage availability.
+- Phase 5 workflow changes now withhold signing secrets from PR jobs and add release signature/certificate/checksum verification.
+
+Still required before Phase 1 acceptance:
+- CI verification of the current secure-storage and self-test commits.
+- Targeted verification of legacy-file migration, migration failure, keystore failure, and UI behavior on a device/emulator.
+- Unit tests for update parsing/unknown SHA/HTTP failures and secure-storage failure behavior.
+- Inspect exported diagnostics for private data and ensure users can review what will be shared.
+
+Acceptance: no new API key is written to plaintext preferences; legacy migration is verified; self-test never claims an unperformed audio check; update status is trustworthy; signed-release verification passes.
 
 ## Phase 2 — Provider, streaming, and agent correctness (in progress)
 
@@ -29,7 +36,6 @@ Still required before Phase 2 acceptance:
 - Define provider capabilities and supported modalities explicitly.
 - Add deterministic fake-provider tests for timeout, cancellation, malformed response, partial stream, and fallback behavior.
 - Make task/turn IDs explicit and isolate state between concurrent requests.
-- Add deterministic fake-provider tests for timeout, cancellation, malformed response, partial stream, and fallback behavior.
 
 Acceptance: provider tests cover all failure paths; no duplicate tool execution or mixed-provider response; user-visible failures are actionable.
 
@@ -39,7 +45,7 @@ Implemented on the working branch:
 - Track the microphone-acquisition startup coroutine as a session job; cancel it when a session is stopped or replaced.
 - Track Live setup work as a session job, check cancellation after loading memory and before connecting, and rethrow coroutine cancellation rather than converting it into a user-facing error.
 - Route unexpected microphone-acquisition and Live setup exceptions through the existing voice failure handler.
-- CI passed unit tests and APK build workflow for commit fc72e3a3c2c71fbbd895950cb75fed34bd2e705d.
+- CI passed unit tests and APK build workflow for the session-start cancellation commit fc72e3a3c2c71fbbd895950cb75fed34bd2e705d and delayed-reconnect cancellation commit eee2058bb43c6a72630e33d42ff8b749d8027b0e.
 
 Still required before Phase 3 acceptance:
 - Audit and bound all reconnect paths; prevent duplicate concurrent reconnect attempts and cancel delayed reconnect work on stop.
@@ -78,15 +84,22 @@ Still required before Phase 4 acceptance:
 
 Acceptance: no consequential action can bypass current consent; failures are reported instead of falsely marked successful; regression tests cover duplicate/replayed confirmation.
 
-## Phase 5 — Maintainability, UX, performance, and release automation
-- Split oversized UI/service/agent classes into focused components without changing behavior in the same commit.
-- Add accessibility semantics, scalable text, touch-target checks, and light/dark theme visual regression coverage.
-- Profile startup, memory growth, overlay rendering, logs, and long-running background sessions.
-- Pin/validate build tooling, run unit tests and static checks on pull requests, and produce checksummed APK artifacts.
-- Separate debug and signed-release workflows and verify the certificate fingerprint before release.
-- Update architecture docs, feature matrix, privacy notes, troubleshooting, and release notes.
+## Phase 5 — Maintainability, UX, performance, and release automation (in progress)
 
-Acceptance: PR CI is green, APK artifact and signature are verified, performance budgets are recorded, and device smoke-test results are attached to the release.
+Implemented on the working branch; latest commit still requires CI verification:
+- Added event/branch-specific workflow concurrency so newer runs cancel stale runs without merging PR and push trust contexts.
+- Signing secrets are only injected into trusted push/manual signing steps; pull-request jobs are restricted to debug builds.
+- CI now runs unit tests plus debug assembly, validates keystore/alias configuration, verifies the signed release APK and its certificate against the configured keystore, and emits SHA-256 checksums for APK artifacts.
+- Started a repository-wide audit. The full audit and prioritized backlog are available in the audit roadmap attached to this conversation; confirmed issues and remaining verification tasks are tracked separately.
+
+Still required before Phase 5 acceptance:
+- Verify the new workflow end-to-end on current HEAD and inspect the downloaded APK/artifact contents.
+- Check in a verified Gradle wrapper and distribution checksum instead of generating a wrapper in CI.
+- Establish a static-analysis/lint baseline and gate newly introduced findings.
+- Refactor oversized classes incrementally after characterization tests are added.
+- Add UI/accessibility, performance, diagnostics privacy, release notes, and device smoke-test coverage.
+
+Acceptance: PR CI is green; release APK signature/certificate/checksum verification passes; build is reproducible; critical actions have tests; device-dependent behavior is reported as device-tested or blocked rather than assumed.
 
 ## Working rules
 1. Do not push directly to main; use the phase branch and a pull request.
