@@ -812,7 +812,9 @@ object VoiceSessionManager {
     }
 
     private fun fail(message: String) {
-        CrashLogger.stage(TAG, "fail: $message")
+        // The full reason is shown in the voice UI; keep persistent stage logs
+        // free of raw server/exception text.
+        CrashLogger.stage(TAG, "fail: voice session error (details omitted)")
         unregisterCallWatch()
         pulseJob?.cancel()
         teardownLive()
