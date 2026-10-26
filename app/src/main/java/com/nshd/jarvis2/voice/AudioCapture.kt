@@ -12,6 +12,7 @@ import android.media.audiofx.NoiseSuppressor
 import android.os.Process
 import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.CrashLogger
+import java.lang.ref.WeakReference
 import kotlin.math.sqrt
 
 /**
@@ -26,11 +27,14 @@ import kotlin.math.sqrt
  * the mic keeps running so un-muting is instant.
  */
 class AudioCapture(
-    private val context: Context,
+    context: Context,
     private val onChunk: (ByteArray) -> Unit,
     private val onAmplitude: (Float) -> Unit,
     private val onError: (String) -> Unit = {}
 ) {
+    // VoiceSessionManager is a singleton; only weakly retain application
+    // context so this capture object cannot keep an Activity alive.
+    private val contextRef = WeakReference(context.applicationContext)
     private var recorder: AudioRecord? = null
     private var thread: Thread? = null
 
@@ -44,8 +48,12 @@ class AudioCapture(
     /** @return true if capture actually started (permission + hardware OK). */
     fun start(): Boolean {
         if (running) return true
+        val permissionContext = contextRef.get() ?: run {
+            onError("Application context is unavailable for microphone capture")
+            return false
+        }
         if (ContextCompat.checkSelfPermission(
-                context, Manifest.permission.RECORD_AUDIO
+                permissionContext, Manifest.permission.RECORD_AUDIO
             ) != PackageManager.PERMISSION_GRANTED
         ) {
             onError("Microphone permission is not granted")

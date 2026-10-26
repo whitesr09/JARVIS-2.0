@@ -563,16 +563,19 @@ fun HandsFreeScreen(
                 }
             )
             PermissionHealthRow(
-                title = "Battery exemption",
+                title = "Battery restrictions",
                 ok = batteryFree,
-                detail = "Unrestricted — the system won't freeze Jarvis",
+                detail = if (batteryFree) {
+                    "System reports unrestricted background access"
+                } else {
+                    "Review system battery settings; manufacturer limits vary"
+                },
+                // Open general battery settings rather than requesting a
+                // direct exemption reserved for approved use cases.
                 onFix = {
                     runCatching {
                         context.startActivity(
-                            Intent(
-                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                Uri.parse("package:${context.packageName}")
-                            )
+                            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
                         )
                     }
                 }

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -45,15 +46,22 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 
-private val RUNTIME_PERMISSIONS = arrayOf(
-    Manifest.permission.RECORD_AUDIO,
-    Manifest.permission.ACCESS_FINE_LOCATION,
-    Manifest.permission.READ_CONTACTS,
-    Manifest.permission.CALL_PHONE,
-    Manifest.permission.CAMERA,
-    Manifest.permission.BLUETOOTH_CONNECT,
-    Manifest.permission.POST_NOTIFICATIONS
-)
+/**
+ * Runtime permission requests are platform-specific. Do not request
+ * permission names on OS versions where that permission does not exist.
+ */
+internal fun runtimePermissionsForApi(apiLevel: Int): Array<String> = buildList {
+    add(Manifest.permission.RECORD_AUDIO)
+    add(Manifest.permission.ACCESS_FINE_LOCATION)
+    add(Manifest.permission.READ_CONTACTS)
+    add(Manifest.permission.CALL_PHONE)
+    add(Manifest.permission.CAMERA)
+    if (apiLevel >= Build.VERSION_CODES.S) add(Manifest.permission.BLUETOOTH_CONNECT)
+    if (apiLevel >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
+}.toTypedArray()
+
+private val RUNTIME_PERMISSIONS: Array<String>
+    get() = runtimePermissionsForApi(Build.VERSION.SDK_INT)
 
 private data class PermissionItem(
     val title: String,
@@ -87,7 +95,7 @@ fun PermissionsScreen(onBack: () -> Unit) {
     }
 
     val pkg = context.packageName
-    val items = listOf(
+    val allItems = listOf(
         PermissionItem(
             title = "Microphone",
             description = "Voice commands and the live voice loop",
@@ -213,6 +221,11 @@ fun PermissionsScreen(onBack: () -> Unit) {
             }
         )
     )
+    // Bluetooth connect is a runtime permission only on Android 12+.
+    val items = allItems.filter { item ->
+        item.title != "Nearby Bluetooth Devices" ||
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    }
 
     val grantedCount = items.count { it.granted }
 

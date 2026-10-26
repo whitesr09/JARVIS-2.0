@@ -88,6 +88,7 @@ object CrashLogger {
 
     // ── Crash report ───────────────────────────────────────────────────
 
+    @Suppress("ApplySharedPref") // Persist synchronously before the crashing process exits.
     private fun writeCrashReport(thread: Thread, throwable: Throwable) {
         val ctx = appContext ?: return
         val trace = StringWriter().also { sw ->

@@ -266,7 +266,11 @@ class FloatingOverlayService : Service() {
         windowManager = wm
         val bubbleSize = dp(56)
 
-        val bubble = ImageView(this).apply {
+        val bubble = object : ImageView(this) {
+            // This view also handles dragging; accessibility clicks must
+            // still pass through the standard View click contract.
+            override fun performClick(): Boolean = super.performClick()
+        }.apply {
             // Transparent container: the avatar drawable floats as-is,
             // with NO background drawable/disc behind it (design rule).
             setImageResource(currentAvatarRes())
@@ -433,7 +437,11 @@ class FloatingOverlayService : Service() {
         }
 
         // ── Header row: "JARVIS" bold + drag grip (drag by header) ────
-        val headerRow = LinearLayout(this).apply {
+        val headerRow = object : LinearLayout(this) {
+            // Header tap collapses the panel; preserve accessible click semantics
+            // while the same touch listener recognizes drag gestures.
+            override fun performClick(): Boolean = super.performClick()
+        }.apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
