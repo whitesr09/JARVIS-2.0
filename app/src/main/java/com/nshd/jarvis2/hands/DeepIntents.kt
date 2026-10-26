@@ -279,8 +279,7 @@ class DeepIntents(context: Context) {
                 // the user-facing sentence stays clean and complete.
                 AppLog.w(
                     "Hands",
-                    "youtube_play: no result after $attempt snapshots " +
-                        "($lastSnapshotSize nodes). Screen: ${reader.serialize(25)}"
+                    "youtube_play: no result after $attempt snapshots ($lastSnapshotSize nodes); screen contents omitted"
                 )
                 return ActionResult(
                     false,
@@ -332,13 +331,13 @@ class DeepIntents(context: Context) {
     suspend fun spotifyPlay(query: String): ActionResult {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return ActionResult(false, "The Spotify search query is blank.")
-        AppLog.i("Hands", "spotify_play: start query='$cleanQuery'")
+        AppLog.i("Hands", "spotify_play: start search (${cleanQuery.length} chars)")
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Opening Spotify…")
         // F7 plan phases: 1 Open Spotify → 2 Search → 3 Play.
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(1)
         val opened = openApp("Spotify")
         if (!opened.success) {
-            AppLog.w("Hands", "spotify_play: step=open FAILED: ${opened.message}")
+            AppLog.w("Hands", "spotify_play: step=open FAILED")
             return opened
         }
         TaskState.throwIfStopRequested() // #61: after open-app
@@ -381,7 +380,7 @@ class DeepIntents(context: Context) {
             )
         val tabClick = HandsActions.clickElement(tab.index)
         if (!tabClick.success) {
-            AppLog.w("Hands", "spotify_play: step=search-tab tap FAILED: ${tabClick.message}")
+            AppLog.w("Hands", "spotify_play: step=search-tab tap FAILED")
             return ActionResult(false, "Spotify opened, but the Search tab could not be tapped: ${tabClick.message}")
         }
         AppLog.i("Hands", "spotify_play: step=search-tab tapped")
@@ -444,7 +443,7 @@ class DeepIntents(context: Context) {
                 }
                 val barClick = HandsActions.clickElement(bar.index)
                 if (!barClick.success) {
-                    AppLog.w("Hands", "spotify_play: step=search-bar tap FAILED: ${barClick.message}")
+                    AppLog.w("Hands", "spotify_play: step=search-bar tap FAILED")
                     return ActionResult(false, "Spotify's search bar could not be tapped: ${barClick.message}")
                 }
                 if (!HandsActions.waitForEditable(SEARCH_INPUT_WAIT_MS)) {
@@ -457,7 +456,7 @@ class DeepIntents(context: Context) {
             // tap is logged, not fatal — the field may already be focused).
             val focusClick = HandsActions.clickElement(field.index)
             if (!focusClick.success) {
-                AppLog.w("Hands", "spotify_play: step=search-field focus tap FAILED: ${focusClick.message}")
+                AppLog.w("Hands", "spotify_play: step=search-field focus tap FAILED")
             }
         }
         var typed = HandsActions.setTextOnFocused(cleanQuery)
@@ -466,17 +465,17 @@ class DeepIntents(context: Context) {
             // against a fresh snapshot before reporting failure.
             AppLog.w(
                 "Hands",
-                "spotify_play: step=type SET_TEXT FAILED (${typed.message}) — retrying tap-then-type"
+                "spotify_play: step=type SET_TEXT failed — retrying tap-then-type"
             )
             val freshField = reader.snapshot().firstOrNull { it.editable }
             if (freshField != null) HandsActions.clickElement(freshField.index)
             typed = HandsActions.setTextOnFocused(cleanQuery)
         }
         if (!typed.success) {
-            AppLog.w("Hands", "spotify_play: step=type FAILED after retry: ${typed.message}")
+            AppLog.w("Hands", "spotify_play: step=type FAILED after retry")
             return ActionResult(false, "Spotify search opened, but the query could not be typed: ${typed.message}")
         }
-        AppLog.i("Hands", "spotify_play: step=type done query='$cleanQuery'")
+        AppLog.i("Hands", "spotify_play: step=type done (${cleanQuery.length} chars)")
         TaskState.throwIfStopRequested() // #61: after search-field set
 
         // 3) First song row — poll results until a pick exists.
@@ -488,7 +487,7 @@ class DeepIntents(context: Context) {
         val chosen = rows.firstOrNull() ?: run {
             AppLog.w(
                 "Hands",
-                "spotify_play: no song row after waiting. Screen: ${reader.serialize(25)}"
+                "spotify_play: no song row after waiting; screen contents omitted"
             )
             return ActionResult(
                 false,
@@ -497,19 +496,19 @@ class DeepIntents(context: Context) {
                     "Spotify is showing a different layout."
             )
         }
-        AppLog.i("Hands", "spotify_play: step=results picked '${chosen.title}' (${rows.size} rows)")
+        AppLog.i("Hands", "spotify_play: step=results picked row 1 of ${rows.size}")
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Playing…")
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
         TaskState.throwIfStopRequested() // #61: before final tap
         val rowClick = HandsActions.clickElement(chosen.element.index)
         if (!rowClick.success) {
-            AppLog.w("Hands", "spotify_play: step=row-tap FAILED: ${rowClick.message}")
+            AppLog.w("Hands", "spotify_play: step=row-tap FAILED")
             return ActionResult(
                 false,
                 "Spotify results were shown, but the song could not be tapped: ${rowClick.message}"
             )
         }
-        AppLog.i("Hands", "spotify_play: step=row-tap done '${chosen.title}'")
+        AppLog.i("Hands", "spotify_play: step=row-tap done")
 
         // 4) Verify playback: a Pause affordance means audio is
         // playing. If a track/album page opened instead of playing,
@@ -521,7 +520,7 @@ class DeepIntents(context: Context) {
         TaskState.throwIfStopRequested() // #61: before playback verify
         if (awaitPauseAffordance(PAUSE_VERIFY_MS)) {
             markWarm(SPOTIFY_PACKAGE) // #23
-            AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED '${chosen.title}'")
+            AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED")
             return ActionResult(true, "Playing '${chosen.title}' on Spotify.")
         }
         val nextRow = rows.getOrNull(1)
@@ -529,12 +528,12 @@ class DeepIntents(context: Context) {
             AppLog.w(
                 "Hands",
                 "spotify_play: step=verify no Pause after first row — " +
-                    "retrying tap once on next row '${nextRow.title}'"
+                    "retrying tap once on next candidate row"
             )
             val retryClick = HandsActions.clickElement(nextRow.element.index)
             if (retryClick.success && awaitPauseAffordance(PAUSE_VERIFY_MS)) {
                 markWarm(SPOTIFY_PACKAGE) // #23
-                AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED on retry '${nextRow.title}'")
+                AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED on retry")
                 return ActionResult(true, "Playing '${nextRow.title}' on Spotify.")
             }
             AppLog.w(
@@ -647,7 +646,7 @@ class DeepIntents(context: Context) {
         AppLog.d(
             "Hands",
             "spotify_play pick: ${rows.size} rows considered (ads skipped=$skippedAds), " +
-                "first index=${rows.first().index} label='${rows.first().label.take(60)}'"
+                "first index=${rows.first().index}; labels omitted"
         )
         return rows.map { SpotifyPick(it, spotifyTitle(it.label)) }
     }
@@ -730,7 +729,7 @@ class DeepIntents(context: Context) {
                 "Hands",
                 "youtube_play pick: ${cards.size} cards considered " +
                     "(skipped ads=$skippedAds shorts=$skippedShorts chrome=$skippedChrome), " +
-                    "tapped index=${primary.index} label='${primary.label.take(60)}'"
+                    "tapped index=${primary.index}; label omitted"
             )
             return YoutubePick(primary, youtubeTitle(primary.label), viaFallback = false)
         }
@@ -1241,7 +1240,7 @@ class DeepIntents(context: Context) {
             }
         }
     } catch (e: Exception) {
-        AppLog.w("Hands", "latest photo lookup failed: ${e.message}")
+        AppLog.w("Hands", "latest photo lookup failed (${e.javaClass.simpleName})")
         null
     }
 
