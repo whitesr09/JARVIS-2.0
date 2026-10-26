@@ -262,9 +262,17 @@ fun ApiConnectionScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    activeId = preset.id
-                                    store.setActiveProviderId(preset.id)
-                                    editId = preset.id
+                                    if (store.setActiveProviderId(preset.id)) {
+                                        activeId = preset.id
+                                        editId = preset.id
+                                    } else {
+                                        scope.launch {
+                                            snackbar.showSnackbar(
+                                                store.storageError
+                                                    ?: "Active provider could not be saved securely."
+                                            )
+                                        }
+                                    }
                                 }
                                 .padding(
                                     horizontal = JarvisDimens.spaceLg,
@@ -275,9 +283,17 @@ fun ApiConnectionScreen(
                             RadioButton(
                                 selected = activeId == preset.id,
                                 onClick = {
-                                    activeId = preset.id
-                                    store.setActiveProviderId(preset.id)
-                                    editId = preset.id
+                                    if (store.setActiveProviderId(preset.id)) {
+                                        activeId = preset.id
+                                        editId = preset.id
+                                    } else {
+                                        scope.launch {
+                                            snackbar.showSnackbar(
+                                                store.storageError
+                                                    ?: "Active provider could not be saved securely."
+                                            )
+                                        }
+                                    }
                                 }
                             )
                             Text(
