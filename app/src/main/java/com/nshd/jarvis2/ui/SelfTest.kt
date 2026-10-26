@@ -29,7 +29,7 @@ data class SelfTestResult(
 )
 
 /**
- * F8 (#106): the in-app self-test — eight sequential LIVE checks of
+ * F8 (#106): the in-app self-test — nine checks of
  * everything a hands-free session depends on, each with a one-line
  * verdict and a "Fix" deep link where one exists. No network calls:
  * the provider check reads only the cached probe results. Every
