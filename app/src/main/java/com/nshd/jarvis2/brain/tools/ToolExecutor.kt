@@ -1376,7 +1376,7 @@ class ToolExecutor(
         } catch (e: Exception) {
             ToolResult(
                 false,
-                "The download couldn't start: ${e.message ?: "unknown error"}"
+                "The download couldn't start (${e.javaClass.simpleName}). Check the link and available storage."
             )
         }
     }
@@ -1430,7 +1430,7 @@ class ToolExecutor(
                 if (answer) {
                     "No ringing call to answer right now."
                 } else {
-                    "The call couldn't be rejected: ${e.message ?: "unknown error"}"
+                    "The call couldn't be rejected (${e.javaClass.simpleName})."
                 }
             )
         }
@@ -1512,8 +1512,15 @@ class ToolExecutor(
         } else {
             message
         }
+        val outcomeIsTerminal = outcome in setOf(
+            ActionOutcome.STAGED_FOR_USER,
+            ActionOutcome.SUBMITTED_UNVERIFIED,
+            ActionOutcome.OUTCOME_UNKNOWN
+        )
         return ToolResult(
-            success = success,
+            // A staged/uncertain result can never be promoted to success
+            // merely because an underlying helper returned an optimistic bool.
+            success = success && !outcomeIsTerminal,
             message = resultMessage,
             outcome = outcome
         )
