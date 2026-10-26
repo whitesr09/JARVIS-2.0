@@ -95,24 +95,26 @@ fun ApiConnectionScreen(
         mutableStateOf(store.storageError ?: store.migrationWarning)
     }
 
-    fun persistConfig(): Boolean {
-        val saved = store.saveConfig(config)
-        storageWarning = store.storageError ?: store.migrationWarning
-        if (!saved) {
-            scope.launch {
-                snackbar.showSnackbar(
-                    storageWarning ?: "Provider settings could not be saved securely. No API key was stored."
-                )
-            }
-        } else if (store.migrationWarning != null) {
-            scope.launch { snackbar.showSnackbar(store.migrationWarning!!) }
-        }
-        return saved
-    }
-
     var activeId by remember { mutableStateOf(store.activeProviderId()) }
     var editId by remember { mutableStateOf(store.activeProviderId()) }
     var config by remember(editId) { mutableStateOf(store.loadConfig(editId)) }
+
+    fun persistConfig(): Boolean {
+        val saved = store.saveConfig(config)
+        val warning = store.storageError ?: store.migrationWarning
+        storageWarning = warning
+        if (!saved) {
+            scope.launch {
+                snackbar.showSnackbar(
+                    warning ?: "Provider settings could not be saved securely. No API key was stored."
+                )
+            }
+        } else if (warning != null) {
+            scope.launch { snackbar.showSnackbar(warning)
+        }
+        return saved
+    }
+ 
     var showKey by remember { mutableStateOf(false) }
     var refreshTick by remember { mutableStateOf(0) } // re-read "key set" dots after save
 
