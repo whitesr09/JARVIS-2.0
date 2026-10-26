@@ -193,6 +193,7 @@ class ProviderStore(context: Context) {
      * ids; kinds are re-derived from the ids on read.
      */
     fun cachedModelIds(id: String): List<String> {
+        if (ProviderPresets.ALL.none { it.id == id }) return emptyList()
         val raw = prefs?.getString(key(id, "models"), null) ?: return emptyList()
         return try {
             val array = org.json.JSONArray(raw)
@@ -205,6 +206,10 @@ class ProviderStore(context: Context) {
     }
 
     fun saveModelIds(id: String, ids: List<String>): Boolean {
+        if (ProviderPresets.ALL.none { it.id == id }) {
+            storageError = "Unknown provider configuration. Nothing was saved."
+            return false
+        }
         val array = org.json.JSONArray()
         ids.forEach { array.put(it) }
         val storage = prefs ?: return false
@@ -223,6 +228,7 @@ class ProviderStore(context: Context) {
      * the last known health of every model instantly on reopen.
      */
     fun cachedProbeResults(id: String): List<ModelProbeResult> {
+        if (ProviderPresets.ALL.none { it.id == id }) return emptyList()
         val raw = prefs?.getString(key(id, "probes"), null) ?: return emptyList()
         return try {
             val array = org.json.JSONArray(raw)
@@ -250,6 +256,10 @@ class ProviderStore(context: Context) {
     }
 
     fun saveProbeResults(id: String, results: List<ModelProbeResult>): Boolean {
+        if (ProviderPresets.ALL.none { it.id == id }) {
+            storageError = "Unknown provider configuration. Nothing was saved."
+            return false
+        }
         val array = org.json.JSONArray()
         results.forEach { r ->
             array.put(
@@ -273,13 +283,14 @@ class ProviderStore(context: Context) {
 
     fun activeProviderId(): String {
         val storage = prefs ?: return ProviderPresets.GEMINI.id
-        return try {
+        val stored = try {
             storage.getString(KEY_ACTIVE, ProviderPresets.GEMINI.id) ?: ProviderPresets.GEMINI.id
         } catch (e: Exception) {
             storageError = "Secure provider settings could not be read. The default provider is selected until storage is repaired."
             Log.e(TAG, "Encrypted active-provider read failed (" + e.javaClass.simpleName + ")")
-            ProviderPresets.GEMINI.id
+            return ProviderPresets.GEMINI.id
         }
+        return if (ProviderPresets.ALL.any { it.id == stored }) stored else ProviderPresets.GEMINI.id
     }
 
     fun setActiveProviderId(id: String): Boolean {
