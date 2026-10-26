@@ -68,9 +68,13 @@ object BiometricsRecorder {
             runCatching { file.delete() }
             currentCoroutineContext().ensureActive()
 
-            val minBuffer = AudioRecord.getMinBufferSize(
-                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-            )
+            val minBuffer = try {
+                AudioRecord.getMinBufferSize(
+                    SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+                )
+            } catch (e: Exception) {
+                return@withContext false
+            }
             if (minBuffer <= 0) return@withContext false
             val record = try {
                 AudioRecord(
@@ -108,8 +112,16 @@ object BiometricsRecorder {
             }
             currentCoroutineContext().ensureActive()
             if (filled != targetBytes) return@withContext false
-            writeWav(file, pcm)
-            isValidWavFile(file)
+            try {
+                writeWav(file, pcm)
+                isValidWavFile(file)
+            } catch (e: CancellationException) {
+                runCatching { file.delete() }
+                throw e
+            } catch (e: Exception) {
+                runCatching { file.delete() }
+                false
+            }
         }
 
     /** Minimal RIFF/WAVE writer: 44-byte header + PCM16 mono data. */
