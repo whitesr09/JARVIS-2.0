@@ -1,5 +1,6 @@
 package com.nshd.jarvis2.brain
 
+import com.nshd.jarvis2.ui.FriendlyErrors
 import com.nshd.jarvis2.core.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -111,14 +112,13 @@ object ModelDiscovery {
                     }
                 }
             } catch (e: IOException) {
+                val safeReason = FriendlyErrors.shortReason(e.message)
                 AppLog.e(
                     "API",
-                    "${config.id} GET $modelsHost/models network error: " +
-                        (e.message ?: "unreachable")
+                    "${config.id} GET $modelsHost/models network error " +
+                        "(${e.javaClass.simpleName}; $safeReason)"
                 )
-                Result.failure(
-                    AiException("Network error: ${e.message ?: "unreachable"}")
-                )
+                Result.failure(AiException("Network error: $safeReason"))
             } catch (e: AiException) {
                 Result.failure(e)
             } catch (e: Exception) {
