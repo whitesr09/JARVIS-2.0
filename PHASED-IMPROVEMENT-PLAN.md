@@ -17,8 +17,8 @@ Implemented on the working branch:
 
 Still required before Phase 1 acceptance:
 - Targeted verification of legacy-file migration, migration failure, keystore failure, and UI behavior on a device/emulator.
-- Unit tests for update parsing/unknown SHA/HTTP failures and secure-storage failure behavior.
-- Inspect exported diagnostics for private data and ensure users can review what will be shared.
+- Unit tests for secure-storage initialization/migration failure behavior.
+- Review the default diagnostics export on-device; code now filters/redacts by default, but common phone/email masking is not a complete PII detector.
 
 Acceptance: no new API key is written to plaintext preferences; legacy migration is verified; self-test never claims an unperformed audio check; update status is trustworthy; signed-release verification passes.
 
@@ -87,18 +87,22 @@ Acceptance: no consequential action can bypass current consent; failures are rep
 
 ## Phase 5 — Maintainability, UX, performance, and release automation (in progress)
 
-Implemented on the working branch; code commit `d3ac8160a9d092a07e2f5df173d551af516c2ba1` passed both push and PR workflows:
+The initial release-workflow hardening passed on commit `d3ac8160a9d092a07e2f5df173d551af516c2ba1`. Newer audit-driven code changes (backup restore transactions, diagnostic redaction, update response limits, and voice-biometric sample validation) are on the same branch and must pass CI at the latest HEAD before they are marked verified.
 - Added event/branch-specific workflow concurrency so newer runs cancel stale runs without merging PR and push trust contexts.
 - Signing secrets are only injected into trusted push/manual signing steps; pull-request jobs are restricted to debug builds.
 - CI now runs unit tests plus debug assembly, validates keystore/alias configuration, verifies the signed release APK and its certificate against the configured keystore, and emits SHA-256 checksums for APK artifacts.
-- Started a repository-wide audit. The full audit and prioritized backlog are available in the audit roadmap attached to this conversation; confirmed issues and remaining verification tasks are tracked separately.
+- Started a repository-wide audit; `REPOSITORY-AUDIT-ROADMAP.md` tracks confirmed issues, unverified risks, and a 55-item prioritized backlog.
+- Added a 1 MiB response cap and pure unit-test seam for UpdateChecker's workflow metadata parser.
+- Default diagnostics exports omit raw action/provider/clipboard/memory logs and crash stacks/messages, and redact common phone/email patterns; this is risk reduction, not a guarantee of complete PII removal.
+- Backup restore validates schema and bounds before writes, groups fact additions in one SQLite transaction, and commits settings only after fact writes succeed.
+- Voice-biometric files are validated as exact three-second PCM16 mono WAVs; corrupted/missing slots can be re-recorded, and disk-write failures return failure rather than escaping the recorder.
 
 Still required before Phase 5 acceptance:
 - Continue reviewing artifact metadata and retain the signing certificate fingerprint/checksum with release notes; current CI verifies the certificate and computes the checksum, but physical-device install/upgrade smoke tests remain open.
 - Check in a verified Gradle wrapper and distribution checksum instead of generating a wrapper in CI.
 - Establish a static-analysis/lint baseline and gate newly introduced findings.
 - Refactor oversized classes incrementally after characterization tests are added.
-- Add UI/accessibility, performance, diagnostics privacy, release notes, and device smoke-test coverage.
+- Add UI/accessibility and performance coverage, a verified Gradle wrapper, release notes, and device smoke tests; inspect default diagnostics exports on-device.
 
 Acceptance: PR CI is green; release APK signature/certificate/checksum verification passes; build is reproducible; critical actions have tests; device-dependent behavior is reported as device-tested or blocked rather than assumed.
 
