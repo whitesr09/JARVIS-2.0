@@ -3,9 +3,6 @@ package com.nshd.jarvis2.voice
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.Manifest
-import android.content.Context
-import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -13,7 +10,6 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Process
-import androidx.core.content.ContextCompat
 import androidx.core.content.ContextCompat
 import com.nshd.jarvis2.CrashLogger
 import kotlin.math.sqrt
