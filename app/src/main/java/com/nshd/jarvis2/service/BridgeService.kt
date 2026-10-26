@@ -44,7 +44,8 @@ class BridgeService : Service() {
         runCatching { server?.stop() }
         server = null
         val prefs = applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val port = prefs.getInt(KEY_PORT, 8765)        var token = prefs.getString(KEY_TOKEN, "") ?: ""
+        val port = prefs.getInt(KEY_PORT, 8765)
+        var token = prefs.getString(KEY_TOKEN, "") ?: ""
         if (token.isBlank()) {
             // Belt and braces: MainActivity generates on enable, but a
             // service started by any other path must never serve with

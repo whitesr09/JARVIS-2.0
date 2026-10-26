@@ -214,7 +214,7 @@ class BridgeServer(private val appContext: Context) {
             AppLog.w("Bridge", "$method $path -> 401")
             return
         }
-        val code: Int
+        var code = 0
         val payload: String = try {
             when {
                 method == "GET" && path == "/health" -> {
