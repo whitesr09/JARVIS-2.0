@@ -318,6 +318,7 @@ object BackupManager {
         var settingsApplied = 0
         val prefs = appContext.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
         val editor = prefs.edit()
+        val previousSettings = linkedMapOf<String, Any?>()
         val keys = settingsObj.keys()
         while (keys.hasNext()) {
             val key = keys.next()
@@ -325,6 +326,10 @@ object BackupManager {
             // WAV samples are not portable. Never restore a stale enrolled
             // flag on another device; leave local enrollment state untouched.
             if (key in DEVICE_LOCAL_SETTING_KEYS) continue
+            // Save previous typed values so a failed SQLite commit can undo
+            // the SharedPreferences write; these stores cannot share a single
+            // platform transaction.
+            previousSettings[key] = prefs.all[key]
             when (val value = settingsObj.get(key)) {
                 is String -> editor.putString(key, value)
                 is Boolean -> editor.putBoolean(key, value)
@@ -353,8 +358,9 @@ object BackupManager {
         // Read the dedupe set inside the same transaction as the inserts.
         // A concurrent memory write cannot slip between the snapshot and import.
         // Commit settings only after all fact writes succeed.
-        db.withTransaction {
-            val existing = db.allFacts(null, null)
+        try {
+            db.withTransaction {
+                val existing = db.allFacts(null, null)
                 .map { it.category + "\u0001" + it.text.trim().lowercase() }
                 .toHashSet()
             for (i in 0 until factsArr.length()) {
@@ -375,9 +381,37 @@ object BackupManager {
                     factsAdded++
                 }
             }
-            require(editor.commit()) {
-                "Settings could not be saved; restore was not completed."
+                require(editor.commit()) {
+                    "Settings could not be saved; restore was not completed."
+                }
             }
+        } catch (failure: Exception) {
+            val rollback = prefs.edit()
+            previousSettings.forEach { (key, value) ->
+                when (value) {
+                    null -> rollback.remove(key)
+                    is String -> rollback.putString(key, value)
+                    is Boolean -> rollback.putBoolean(key, value)
+                    is Int -> rollback.putInt(key, value)
+                    is Long -> rollback.putLong(key, value)
+                    is Float -> rollback.putFloat(key, value)
+                    is Set<*> -> {
+                        val strings = value.filterIsInstance<String>().toSet()
+                        if (strings.size == value.size) rollback.putStringSet(key, strings)
+                        else rollback.remove(key)
+                    }
+                    else -> rollback.remove(key)
+                }
+            }
+            val rolledBack = runCatching { rollback.commit() }.getOrDefault(false)
+            if (!rolledBack) {
+                AppLog.e("App", "Backup restore failed and previous settings rollback failed")
+                throw IllegalStateException(
+                    "Restore failed and Jarvis could not fully restore the previous settings. Review settings before continuing.",
+                    failure
+                )
+            }
+            throw failure
         }
 
         val providersListed = providersArr.length()
