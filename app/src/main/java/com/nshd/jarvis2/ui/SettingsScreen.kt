@@ -296,6 +296,15 @@ fun SettingsScreen(
             bioCount = BiometricsRecorder.countSamples(context)
             if (!ok) {
                 bioError = "Recording failed — check the microphone and try again."
+                // A failed re-record may have deleted an older sample. Keep
+                // persisted enrollment state consistent with the valid files.
+                onSettingsChange(
+                    settings.copy(
+                        biometricsEnrolled = false,
+                        biometricsSampleCount = bioCount,
+                        biometricsEnrolledDate = ""
+                    )
+                )
             } else if (bioCount >= BiometricsRecorder.TOTAL_SAMPLES) {
                 val date = SimpleDateFormat("d MMM yyyy", Locale.ENGLISH).format(Date())
                 onSettingsChange(
@@ -615,7 +624,7 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }
-                } else if (!settings.biometricsEnrolled) {
+                } else if (!settings.biometricsEnrolled || bioCount < BiometricsRecorder.TOTAL_SAMPLES) {
                     Text(
                         text = "When you tap record, say the wake phrase clearly: " +
                             "\"${BiometricsRecorder.WAKE_PHRASE}\" " +
