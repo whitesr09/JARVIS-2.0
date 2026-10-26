@@ -328,16 +328,9 @@ class FailoverRouter(
                         // the turn right here — the tool result's first
                         // line is the final summary. No more model round
                         // trips (extra trips were replaying the request).
-                        if (result.success && call.name in ToolRegistry.TERMINAL_TOOLS) {
-                            terminalReply = result.message.lineSequence()
-                                .firstOrNull()?.trim().orEmpty()
-                                .ifBlank { "Done." }
-                            break
-                        }
-                        // A staged or uncertain consequential action ends this
-                        // turn. Never ask the model to retry a send/click when it
-                        // may already have reached the external app; duplicate
-                        // submissions can be irreversible. User must inspect state.
+                        // Staged/uncertain outcome is authoritative even if a
+                        // helper accidentally sets success=true. Never let the
+                        // terminal-tool shortcut mask retry protection.
                         if (result.outcome in setOf(
                                 ActionOutcome.STAGED_FOR_USER,
                                 ActionOutcome.SUBMITTED_UNVERIFIED,
@@ -349,6 +342,12 @@ class FailoverRouter(
                                 "Agent",
                                 "turn stopped after " + call.name + " outcome=" + result.outcome
                             )
+                            break
+                        }
+                        if (result.success && call.name in ToolRegistry.TERMINAL_TOOLS) {
+                            terminalReply = result.message.lineSequence()
+                                .firstOrNull()?.trim().orEmpty()
+                                .ifBlank { "Done." }
                             break
                         }
                         // Vision tools (see_screen) attach a screenshot:
