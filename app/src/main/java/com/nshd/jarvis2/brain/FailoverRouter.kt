@@ -226,8 +226,12 @@ class FailoverRouter(
                         // a model can still burn every step asking for
                         // the same action — the third identical ask is
                         // refused and the turn wraps up with a summary.
-                        val signature = call.name + "|" +
-                            call.argumentsJson.ifBlank { "{}" }
+                        // F18: normalized signature (sorted keys,
+                        // trimmed strings, integral numbers) so a
+                        // re-emission with different key order or
+                        // number formatting (500 vs 500.0) cannot
+                        // bypass the refusal.
+                        val signature = ExecutionLedger().keyFor(call.name, args)
                         val signatureCount = (signatureCounts[signature] ?: 0) + 1
                         signatureCounts[signature] = signatureCount
                         if (signatureCount > 2) {

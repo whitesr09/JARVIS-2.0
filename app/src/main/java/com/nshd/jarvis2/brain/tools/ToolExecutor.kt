@@ -101,6 +101,19 @@ class ToolExecutor(
         // "delete_last_line" twice in one turn must delete two lines,
         // not replay the first result. (insert_code stays ledgered:
         // inserting the same code twice is never intended.)
+        // F18: type_text is NOT fully exempt anymore — it uses the
+        // capped repeatable gate instead (identical text appended
+        // unboundedly is a loop, and the Live path has no loop guard
+        // of its own). edit_text stays exempt (state-relative).
+        if (name == "type_text") {
+            ledger?.gateRepeatable(name, args)?.let { cached ->
+                if (!cached.success) MacroRecorder.markFailure()
+                com.nshd.jarvis2.core.AppLog.d(
+                    "Agent", "tool $name — repeatable gate hit, not re-executed"
+                )
+                return cached
+            }
+        }
         val activeLedger = ledger?.takeUnless {
             name in OBSERVATION_TOOLS || name in REPEATABLE_TOOLS
         }
@@ -112,6 +125,18 @@ class ToolExecutor(
                 "Agent", "tool $name — ledger cache hit, not re-executed"
             )
             return cached
+        }
+        // F18: cross-turn duplicate-send guard — the per-turn ledger
+        // cannot see retries in a NEW turn, so an identical send that
+        // already happened (or likely happened) is refused here,
+        // before any JIT ask or phone action.
+        val sendGuardKey = sendGuardKey(name, args)
+        if (sendGuardKey != null && RecentSends.wasRecentlySent(appContext, sendGuardKey)) {
+            return ToolResult(
+                false,
+                "Duplicate-send guard: an identical message to this recipient was already sent (or likely sent) within the last 30 minutes — check the chat before sending again. This is a refusal, not a failure; reword the message or wait to send it again.",
+                ActionOutcome.OUTCOME_UNKNOWN
+            )
         }
         // F7: plan bookkeeping for the floating task panel — a real
         // execution marks the running item as tool-backed (chat-only
@@ -238,7 +263,20 @@ class ToolExecutor(
             "tool $name ${if (raw.success) "ok" else "FAILED"} " +
                 "in ${System.currentTimeMillis() - startedAt}ms"
         )
-        activeLedger?.record(name, args, raw)
+        // F18: type_text went through the repeatable gate, so its
+        // record must still run to clear the in-flight mark
+        // (activeLedger is null for repeatables).
+        (activeLedger ?: ledger?.takeIf { name == "type_text" })?.record(name, args, raw)
+        // F18: record sends that happened (or likely happened) so a
+        // cross-turn retry of the identical message is refused above.
+        // FAILED (no evidence of submission) is never recorded — a
+        // failed send must stay retryable.
+        if (sendGuardKey != null &&
+            (raw.success || raw.outcome == ActionOutcome.SUBMITTED_UNVERIFIED ||
+                raw.outcome == ActionOutcome.OUTCOME_UNKNOWN)
+        ) {
+            RecentSends.record(appContext, sendGuardKey)
+        }
         if (!includeScreenSummary || name == "inspect_screen" ||
             name == "see_screen" || name == "vision_tap" ||
             name == "take_screenshot" || name == "read_page" ||
@@ -449,8 +487,20 @@ class ToolExecutor(
             "click_element" -> clickElement(args)
             "click_text" -> clickText(args)
             "type_text" -> typeText(args)
-            "scroll" -> args.requiredString("direction")?.let {
-                HandsActions.scroll(it).toToolResult()
+            "scroll" -> args.requiredString("direction")?.let { direction ->
+                // F18: default is exactly ONE swipe. count > 1 only
+                // when the user explicitly said a number — one tool
+                // call, so the ledger can't double-fire it and the
+                // model never needs a second scroll call for it.
+                val count = args.optInt("count", 1).coerceIn(1, 5)
+                var result = HandsActions.scroll(direction).toToolResult()
+                var done = 1
+                while (done < count && result.success) {
+                    HandsActions.waitForSettle(600)
+                    result = HandsActions.scroll(direction).toToolResult()
+                    done++
+                }
+                result
             } ?: missing("direction")
             "press_key" -> args.requiredString("key")?.let {
                 HandsActions.pressKey(it).toToolResult()
@@ -888,6 +938,45 @@ class ToolExecutor(
             "insert_code" -> "Inserting code…"
             "vision_tap" -> "Finding the tap target…"
             else -> com.nshd.jarvis2.brain.ToolEvent.prettyTool(name) + "…"
+        }
+    }
+
+    /**
+     * F18: cross-turn duplicate-send guard key, or null for non-send
+     * tools. Channel is part of the key (same text via WhatsApp and
+     * SMS are different sends); recipient is normalized, and only a
+     * SHA-256 of the normalized text is kept — message text itself
+     * is never stored (see [RecentSends]).
+     */
+    private fun sendGuardKey(name: String, args: JSONObject): String? {
+        fun norm(s: String) = s.trim().lowercase().replace(Regex("\\s+"), " ")
+        fun hash(s: String) = RecentSends.sha256(s)
+        return when (name) {
+            "whatsapp_message", "instagram_message", "telegram_message", "sms_message" -> {
+                val contact = args.optString("contact").takeIf { it.isNotBlank() } ?: return null
+                val message = args.optString("message").takeIf { it.isNotBlank() } ?: return null
+                "$name|${norm(contact)}|${hash(norm(message))}"
+            }
+            "whatsapp_group_message" -> {
+                val group = args.optString("group").takeIf { it.isNotBlank() } ?: return null
+                val message = args.optString("message").takeIf { it.isNotBlank() } ?: return null
+                "$name|${norm(group)}|${hash(norm(message))}"
+            }
+            "whatsapp_reply_current" -> {
+                val message = args.optString("message").takeIf { it.isNotBlank() } ?: return null
+                "$name|current|${hash(norm(message))}"
+            }
+            "whatsapp_photo" -> {
+                val contact = args.optString("contact").takeIf { it.isNotBlank() } ?: return null
+                "$name|${norm(contact)}|photo"
+            }
+            "gmail_send" -> {
+                val to = args.optString("to").takeIf { it.isNotBlank() } ?: return null
+                val subject = args.optString("subject") ?: ""
+                val body = args.optString("body").takeIf { it.isNotBlank() } ?: return null
+                "$name|${norm(to)}|${hash(norm(subject) + "\n\n" + norm(body))}"
+            }
+            else -> null
         }
     }
 

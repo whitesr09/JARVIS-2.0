@@ -78,7 +78,13 @@ class JarvisAccessibilityService : AccessibilityService() {
             type != AccessibilityEvent.TYPE_VIEW_SCROLLED
         ) return
         if (event.packageName?.toString() == packageName) return
-        if (System.currentTimeMillis() - lastAutomationActionMs < USER_TAKEOVER_QUIET_MS) return
+        // F18: scroll echoes get the longer scroll grace — a fling's
+        // trailing events past 1.5 s are still ours, not a takeover.
+        // Clicks keep the short window: a real user tap during a
+        // scroll must still stop the task immediately.
+        if (type == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+            if (System.currentTimeMillis() - lastAutomationScrollMs < SCROLL_TAKEOVER_QUIET_MS) return
+        } else if (System.currentTimeMillis() - lastAutomationActionMs < USER_TAKEOVER_QUIET_MS) return
         if (SendAsk.pending.value != null || ConfirmGate.pending.value != null) return
         AppLog.i("Hands", "User took over the screen — stopping pending task")
         TaskState.step("✋ You took over — task stopped.")
@@ -290,13 +296,33 @@ class JarvisAccessibilityService : AccessibilityService() {
         var lastAutomationActionMs: Long = 0L
             private set
 
+        /**
+         * F18: separate stamp for our own SCROLL gestures. A scroll's
+         * fling keeps emitting TYPE_VIEW_SCROLLED for well past the
+         * 1.5 s general quiet window (slow device, reel transition),
+         * and F16 read those trailing echoes as the user grabbing
+         * the phone — which aborted the task right after a scroll
+         * ("task stopped"). Scroll echoes get their own longer grace.
+         */
+        @Volatile
+        var lastAutomationScrollMs: Long = 0L
+            private set
+
         /** F16: stamp one automation action (call at every dispatch site). */
         fun noteAutomationAction() {
             lastAutomationActionMs = System.currentTimeMillis()
         }
 
+        /** F18: stamp one automation scroll (call after every scroll dispatch). */
+        fun noteAutomationScroll() {
+            lastAutomationScrollMs = System.currentTimeMillis()
+        }
+
         /** F16: quiet window after our own action (echo suppression). */
         private const val USER_TAKEOVER_QUIET_MS = 1_500L
+
+        /** F18: quiet window for our own scrolls' trailing events. */
+        private const val SCROLL_TAKEOVER_QUIET_MS = 3_500L
 
         /** #34: packages whose dialogs are system dialogs. */
         private val SYSTEM_DIALOG_PACKAGES = setOf(

@@ -272,6 +272,15 @@ object VoiceSessionManager {
      */
     private val liveToolJobs = mutableSetOf<Job>()
 
+    /**
+     * F18: second words that turn a leading yes/no into thinking
+     * aloud, not an answer ("yes wait not yet", "no hold on").
+     */
+    private val hesitationWords = setOf(
+        "wait", "not", "no", "hold", "stop", "don't", "dont",
+        "but", "actually", "hmm", "umm"
+    )
+
     // F4.1 stage-log one-shot flags (reset per engine start).
     @Volatile
     private var liveFirstFrameLogged = false
@@ -817,6 +826,12 @@ object VoiceSessionManager {
     private fun teardownLive() {
         // F6: tearing Live down (stop, or a failure)
         // closes the task window. Idempotent — see stopInternal.
+        // F18: session teardown (stop AND failure paths) cancels
+        // every in-flight Live tool job — stopInternal did this, but
+        // fail() reaches teardownLive directly and left tools running
+        // after the session died. Double-cancel is harmless.
+        synchronized(liveToolJobs) { liveToolJobs.toList() }.forEach { it.cancel() }
+        synchronized(liveToolJobs) { liveToolJobs.clear() }
         closeLiveTaskWindow()
         liveTimeWarningJob?.cancel()
         liveTimeWarningJob = null
@@ -1252,6 +1267,12 @@ object VoiceSessionManager {
         }
         val words = normalized.split(Regex("\\s+"))
         if (words.size <= 4) {
+            // F18: a leading yes/no followed by a hesitation word is
+            // thinking aloud, not an answer — "yes wait not yet" must
+            // never confirm a send. The ask stays pending; the next
+            // chunk (or the single re-ask) resolves it. "yes send it"
+            // still confirms, as before.
+            if (words.size > 1 && words[1] in hesitationWords) return true
             when (words.first()) {
                 "yes", "yeah", "send", "confirm", "ok", "okay" -> {
                     com.nshd.jarvis2.brain.tools.SendAsk.answer(words.first())
@@ -1271,7 +1292,12 @@ object VoiceSessionManager {
         val normalized = chunk.trim().lowercase()
             .trimEnd('.', '!', '?', ' ').trim()
         if (normalized.isBlank()) return true
-        val first = normalized.split(Regex("\\s+")).first()
+        val words = normalized.split(Regex("\\s+"))
+        // F18: same hesitation rule as the send ask — "yes wait"
+        // is thinking aloud, not approval of a payment/destructive
+        // action.
+        if (words.size > 1 && words[1] in hesitationWords) return true
+        val first = words.first()
         val approved = when (first) {
             "yes", "yeah", "send", "confirm", "ok", "okay" -> true
             "no", "cancel", "stop", "don't", "dont" -> false

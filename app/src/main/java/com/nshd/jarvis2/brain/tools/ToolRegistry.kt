@@ -57,11 +57,14 @@ object ToolRegistry {
         ),
         ToolSpec(
             "scroll",
-            "Scroll the current screen in one direction and report whether the screen changed.",
+            "Scroll the current screen in one direction. ONE call scrolls ONCE by default — pass count only when the user explicitly asks for multiple scrolls (e.g. 'scroll down 2 times'). Never scroll twice for a single 'scroll' request.",
             schema(
                 properties = JSONObject().put(
                     "direction",
                     stringProperty("Scroll direction", listOf("up", "down", "left", "right"))
+                ).put(
+                    "count",
+                    integerProperty("Number of swipes, default 1. Only more than 1 when the user explicitly says a number.")
                 ),
                 required = listOf("direction")
             )

@@ -52,6 +52,9 @@ class ExecutionLedger {
      */
     private val inFlight = mutableSetOf<String>()
 
+    /** F18: per-key execution counts for [gateRepeatable]. */
+    private val repeatExecutions = mutableMapOf<String, Int>()
+
     fun keyFor(toolName: String, args: JSONObject): String =
         toolName + "|" + normalize(args)
 
@@ -94,6 +97,40 @@ class ExecutionLedger {
         return null
     }
 
+    /**
+     * F18: capped gate for repeatable typing (type_text only).
+     * edit_text stays exempt at the ToolExecutor level (its actions
+     * are state-relative — delete_last_line twice must delete two
+     * lines). type_text with identical args appends identical text,
+     * so beyond [REPEATABLE_MAX_EXECUTIONS] executions in one turn
+     * it is a loop, not intent — and the Live path has no loop guard
+     * of its own, so the ledger must enforce it. In-flight identical
+     * calls are refused like the normal gate; [record] clears the
+     * in-flight mark (its success/terminal bookkeeping is unused for
+     * repeatables, which never consult [entries]).
+     */
+    @Synchronized
+    fun gateRepeatable(toolName: String, args: JSONObject): ToolResult? {
+        val key = keyFor(toolName, args)
+        if (key in inFlight) {
+            return ToolResult(
+                false,
+                IN_FLIGHT_PREFIX +
+                    "This exact action is already running — wait for its result instead of repeating it."
+            )
+        }
+        val count = (repeatExecutions[key] ?: 0) + 1
+        if (count > REPEATABLE_MAX_EXECUTIONS) {
+            return ToolResult(
+                false,
+                "This exact typing was already performed $REPEATABLE_MAX_EXECUTIONS times this turn — refusing a further repeat to avoid duplicated text. If the user really wants it again, rephrase the request."
+            )
+        }
+        repeatExecutions[key] = count
+        inFlight += key
+        return null
+    }
+
     /** Call AFTER executing with the raw (pre-screen-summary) result. */
     @Synchronized
     fun record(toolName: String, args: JSONObject, result: ToolResult) {
@@ -123,6 +160,8 @@ class ExecutionLedger {
 
     companion object {
         const val MAX_ATTEMPTS = 2
+        /** F18: identical type_text executions allowed per turn. */
+        const val REPEATABLE_MAX_EXECUTIONS = 3
         const val ALREADY_DONE_PREFIX = "Already done this turn — do not repeat. "
         private const val NO_REPEAT_PREFIX =
             "This action's outcome is staged or uncertain. Do not retry until the user checks it. "
@@ -149,6 +188,12 @@ class ExecutionLedger {
                 separator = ",", prefix = "[", postfix = "]"
             ) { index -> normalize(value.opt(index)) }
             is String -> "\"" + value.trim() + "\""
+            // F18: integral numbers render identically regardless of
+            // JSON formatting — 500 and 500.0 must share one ledger
+            // key (and one loop-guard signature), or a model varying
+            // its number format gets a fresh attempt budget.
+            is Double -> if (value % 1.0 == 0.0) value.toLong().toString() else value.toString()
+            is Float -> if (value % 1.0f == 0.0f) value.toLong().toString() else value.toString()
             else -> value.toString()
         }
     }

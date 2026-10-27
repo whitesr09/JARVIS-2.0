@@ -627,15 +627,26 @@ object HandsActions {
         }
         val dispatched = dispatchSwipe(service, startX, startY, endX, endY, durationMs = 600)
         if (!dispatched) return ActionResult(false, "The scroll gesture was not dispatched.")
+        // F18: stamp the scroll window — the fling's trailing
+        // TYPE_VIEW_SCROLLED events must not read as a user takeover.
+        JarvisAccessibilityService.noteAutomationScroll()
         // F6: 450 ms → 250 ms — the signature comparison right below
         // is the real change detector; the pause only lets the fling
-        // animation start.
+        // animation start. F18: wait for the tree to settle before
+        // comparing — a reel transition takes longer than 250 ms, and
+        // the old "did not change" verdict made the model scroll
+        // again, skipping a second reel.
         delay(250)
+        waitForSettle(900)
         val changed = reader.signature() != before
+        // F18: success means the gesture was dispatched. A scroll
+        // whose screen hasn't updated yet is NOT a failure — saying
+        // so invited a retry scroll. The message tells the model to
+        // check the new snapshot before scrolling again.
         return ActionResult(
-            changed,
+            true,
             if (changed) "Scrolled ${direction.lowercase()} and the screen changed."
-            else "Scroll gesture completed, but the screen did not change (possibly the end of the content)."
+            else "Scrolled ${direction.lowercase()} (gesture sent). The screen hasn't updated yet — it may still be loading, so check the new snapshot before scrolling again."
         )
     }
 
@@ -1047,6 +1058,10 @@ object HandsActions {
         var previous = reader.signature()
         var stableSamples = 0
         while (System.currentTimeMillis() < deadline) {
+            // F18: Stop must bite inside waits, not only at
+            // DeepIntents step boundaries — otherwise a pressed Stop
+            // does nothing visible until the wait's full timeout.
+            TaskState.throwIfStopRequested()
             delay(SETTLE_POLL_MS)
             val current = reader.signature()
             if (current == previous) {
@@ -1070,6 +1085,8 @@ object HandsActions {
         val reader = service.screenReader()
         val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(100, 10_000)
         while (System.currentTimeMillis() < deadline) {
+            // F18: see waitForSettle.
+            TaskState.throwIfStopRequested()
             if (reader.currentPackage() == packageName) return true
             delay(SETTLE_POLL_MS)
         }
@@ -1082,6 +1099,8 @@ object HandsActions {
         val reader = service.screenReader()
         val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(100, 10_000)
         while (System.currentTimeMillis() < deadline) {
+            // F18: see waitForSettle.
+            TaskState.throwIfStopRequested()
             if (reader.snapshot().any { it.editable }) return true
             delay(SETTLE_POLL_MS)
         }
@@ -1097,6 +1116,8 @@ object HandsActions {
         val reader = service.screenReader()
         val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(100, 10_000)
         while (true) {
+            // F18: see waitForSettle.
+            TaskState.throwIfStopRequested()
             val snapshot = reader.snapshot()
             if (predicate(snapshot)) return snapshot
             if (System.currentTimeMillis() >= deadline) return null
@@ -1446,6 +1467,7 @@ object HandsActions {
         )
         // F16: stamp before our own scroll (quiet window for its echo).
         JarvisAccessibilityService.noteAutomationAction()
+        JarvisAccessibilityService.noteAutomationScroll()
         var scrolled = target.node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
         if (!scrolled) {
             var ancestor = target.node.parent
