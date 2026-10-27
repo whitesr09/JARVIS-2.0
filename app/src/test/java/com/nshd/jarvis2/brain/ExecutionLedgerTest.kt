@@ -93,4 +93,41 @@ class ExecutionLedgerTest {
         assertEquals(ActionOutcome.COMPLETED, cached.outcome)
         assertTrue(cached.message.startsWith(ExecutionLedger.ALREADY_DONE_PREFIX))
     }
+
+    @Test
+    fun concurrentIdenticalCallIsRefusedWhileFirstIsInFlight() {
+        // F16: the Live path launches one coroutine per tool call, so
+        // two identical calls can race past the gate before either
+        // records. The second must be refused, not executed.
+        val ledger = ExecutionLedger()
+        val args = args()
+
+        assertNull(ledger.gate("whatsapp_message", args))
+        val racing = ledger.gate("whatsapp_message", args)
+        assertNotNull(racing)
+        assertFalse(racing!!.success)
+        assertTrue(racing.message.contains("already running"))
+
+        // Once the first execution records, the normal cached-success
+        // path takes over (not the in-flight refusal).
+        ledger.record(
+            "whatsapp_message", args,
+            ToolResult(true, "Sent.", outcome = ActionOutcome.COMPLETED)
+        )
+        val cached = ledger.gate("whatsapp_message", args)
+        assertTrue(cached!!.success)
+        assertTrue(cached.message.startsWith(ExecutionLedger.ALREADY_DONE_PREFIX))
+    }
+
+    @Test
+    fun cancelledInFlightCallReleasesItsKeyForRetry() {
+        // F16: a cancelled execution never reaches record() — without
+        // release(), its key would stay blocked for the whole turn.
+        val ledger = ExecutionLedger()
+        val args = args()
+
+        assertNull(ledger.gate("whatsapp_message", args))
+        ledger.release("whatsapp_message", args)
+        assertNull(ledger.gate("whatsapp_message", args))
+    }
 }

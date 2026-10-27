@@ -653,6 +653,8 @@ object HandsActions {
                 "Locking the screen needs Android 9 or newer."
             )
         }
+        // F16: stamp before our own global action (quiet window).
+        JarvisAccessibilityService.noteAutomationAction()
         val ok = service.performGlobalAction(
             AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN
         )
@@ -758,6 +760,9 @@ object HandsActions {
                 }
             }
             val accepted = try {
+                // F16: our own gesture — its echo events must not
+                // read as a user takeover (quiet window).
+                JarvisAccessibilityService.noteAutomationAction()
                 service.dispatchGesture(gesture, callback, null)
             } catch (e: Exception) {
                 false
@@ -978,6 +983,8 @@ object HandsActions {
                 "Key must be back, home, recents, notifications or quickSettings."
             )
         }
+        // F16: stamp before our own global action (quiet window).
+        JarvisAccessibilityService.noteAutomationAction()
         ActionResult(service.performGlobalAction(action), "Pressed ${key.lowercase()}.")
     }
 
@@ -1278,11 +1285,16 @@ object HandsActions {
             var candidate: AccessibilityNodeInfo? = node
             var steps = 0
             while (candidate != null && steps <= 8) {
-                if (candidate.isClickable && candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    com.nshd.jarvis2.core.AppLog.i(
-                        "Hands", "click strategy=a11y-click succeeded"
-                    )
-                    return ActionResult(true, "Clicked $targetDescription.")
+                if (candidate.isClickable) {
+                    // F16: stamp before our own click so its echo
+                    // event falls in the takeover quiet window.
+                    JarvisAccessibilityService.noteAutomationAction()
+                    if (candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                        com.nshd.jarvis2.core.AppLog.i(
+                            "Hands", "click strategy=a11y-click succeeded"
+                        )
+                        return ActionResult(true, "Clicked $targetDescription.")
+                    }
                 }
                 candidate = candidate.parent
                 steps++
@@ -1432,6 +1444,8 @@ object HandsActions {
         com.nshd.jarvis2.core.AppLog.i(
             "Hands", "editable field in bottom zone (IME cover risk) — scrolling into view"
         )
+        // F16: stamp before our own scroll (quiet window for its echo).
+        JarvisAccessibilityService.noteAutomationAction()
         var scrolled = target.node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
         if (!scrolled) {
             var ancestor = target.node.parent
@@ -1551,6 +1565,9 @@ object HandsActions {
                 }
             }
             val accepted = try {
+                // F16: our own gesture — its echo events must not
+                // read as a user takeover (quiet window).
+                JarvisAccessibilityService.noteAutomationAction()
                 service.dispatchGesture(gesture, callback, null)
             } catch (e: Exception) {
                 false

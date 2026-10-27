@@ -42,17 +42,36 @@ class ExecutionLedger {
 
     private val entries = mutableMapOf<String, Entry>()
 
+    /**
+     * F16: keys whose execution is currently IN FLIGHT. [gate] only
+     * dedupes COMPLETED entries — two identical tool calls racing in
+     * separate coroutines (the Gemini Live path launches one coroutine
+     * per tool call) both passed the gate before either recorded, so
+     * the same phone action ran twice at once. A key in this set is
+     * refused until [record] (or [release] on cancellation) clears it.
+     */
+    private val inFlight = mutableSetOf<String>()
+
     fun keyFor(toolName: String, args: JSONObject): String =
         toolName + "|" + normalize(args)
 
     /**
      * Call BEFORE executing. Returns a cached result when the call must
-     * NOT execute (already succeeded, or failure-attempt budget spent);
-     * returns null and records one attempt when execution may proceed.
+     * NOT execute (already succeeded, already running, or
+     * failure-attempt budget spent); returns null and records one
+     * attempt when execution may proceed.
      */
     @Synchronized
     fun gate(toolName: String, args: JSONObject): ToolResult? {
-        val entry = entries.getOrPut(keyFor(toolName, args)) { Entry() }
+        val key = keyFor(toolName, args)
+        val entry = entries.getOrPut(key) { Entry() }
+        if (key in inFlight) {
+            return ToolResult(
+                false,
+                IN_FLIGHT_PREFIX +
+                    "This exact action is already running — wait for its result instead of repeating it."
+            )
+        }
         entry.terminalOutcome?.let { terminal ->
             return terminal.copy(
                 success = false,
@@ -71,13 +90,16 @@ class ExecutionLedger {
             }
         }
         entry.attempts++
+        inFlight += key
         return null
     }
 
     /** Call AFTER executing with the raw (pre-screen-summary) result. */
     @Synchronized
     fun record(toolName: String, args: JSONObject, result: ToolResult) {
-        val entry = entries.getOrPut(keyFor(toolName, args)) { Entry() }
+        val key = keyFor(toolName, args)
+        inFlight -= key
+        val entry = entries.getOrPut(key) { Entry() }
         if (result.outcome in TERMINAL_OUTCOMES) {
             entry.terminalOutcome = result
             entry.lastFailure = null
@@ -88,11 +110,24 @@ class ExecutionLedger {
         }
     }
 
+    /**
+     * F16: release an in-flight key WITHOUT recording a result — for
+     * cancellation paths (coroutine cancelled / user stop) where
+     * [record] never runs. Without this, a cancelled action would
+     * block its identical retry for the rest of the turn.
+     */
+    @Synchronized
+    fun release(toolName: String, args: JSONObject) {
+        inFlight -= keyFor(toolName, args)
+    }
+
     companion object {
         const val MAX_ATTEMPTS = 2
         const val ALREADY_DONE_PREFIX = "Already done this turn — do not repeat. "
         private const val NO_REPEAT_PREFIX =
             "This action's outcome is staged or uncertain. Do not retry until the user checks it. "
+        private const val IN_FLIGHT_PREFIX =
+            "Already running this turn — do not repeat. "
         private val TERMINAL_OUTCOMES = setOf(
             ActionOutcome.STAGED_FOR_USER,
             ActionOutcome.SUBMITTED_UNVERIFIED,

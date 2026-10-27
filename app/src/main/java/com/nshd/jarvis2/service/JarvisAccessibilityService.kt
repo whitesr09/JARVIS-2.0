@@ -8,6 +8,8 @@ import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.nshd.jarvis2.brain.tools.ConfirmGate
+import com.nshd.jarvis2.brain.tools.SendAsk
 import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.hands.ScreenReader
 import com.nshd.jarvis2.hands.TaskState
@@ -42,6 +44,45 @@ class JarvisAccessibilityService : AccessibilityService() {
         } catch (e: Exception) {
             // Dialog detection must never crash the service.
         }
+        // F16: user takeover — a real tap/scroll while a task runs
+        // stops the pending task (see handlePossibleUserTakeover).
+        try {
+            handlePossibleUserTakeover(event)
+        } catch (e: Exception) {
+            // Takeover detection must never crash the service.
+        }
+    }
+
+    /**
+     * F16: the user took over the screen. While a task is active, a
+     * genuine tap (VIEW_CLICKED) or scroll (VIEW_SCROLLED) on another
+     * app's UI means the user grabbed control — the pending task
+     * stops instead of fighting them for the screen.
+     *
+     * Deliberately NOT triggered by:
+     * - window state/content changes (automation causes these constantly);
+     * - focus changes (too noisy: delayed focus after app loads);
+     * - taps on Jarvis's own package (panel buttons already abort
+     *   directly; the chat send path stops the old turn itself);
+     * - events inside [USER_TAKEOVER_QUIET_MS] after our own last
+     *   automation action (our own taps/clicks echo back as events);
+     * - moments when a just-in-time ask is pending (SendAsk /
+     *   ConfirmGate): the turn is suspended waiting for the user's
+     *   answer, and cancelling it would orphan the ask — answering
+     *   "yes" would then report a send that never happens.
+     */
+    private fun handlePossibleUserTakeover(event: AccessibilityEvent?) {
+        if (event == null || !TaskState.active.value) return
+        val type = event.eventType
+        if (type != AccessibilityEvent.TYPE_VIEW_CLICKED &&
+            type != AccessibilityEvent.TYPE_VIEW_SCROLLED
+        ) return
+        if (event.packageName?.toString() == packageName) return
+        if (System.currentTimeMillis() - lastAutomationActionMs < USER_TAKEOVER_QUIET_MS) return
+        if (SendAsk.pending.value != null || ConfirmGate.pending.value != null) return
+        AppLog.i("Hands", "User took over the screen — stopping pending task")
+        TaskState.step("✋ You took over — task stopped.")
+        TaskState.abort()
     }
 
     /**
@@ -237,6 +278,25 @@ class JarvisAccessibilityService : AccessibilityService() {
         /** #34: text of the most recent system dialog seen (report-only). */
         @Volatile
         var lastSystemDialog: String? = null
+
+        /**
+         * F16: wall-clock of the automation's own last dispatched
+         * action (tap / click / scroll / gesture / global action),
+         * stamped by HandsActions. User-tap/scroll events arriving
+         * within [USER_TAKEOVER_QUIET_MS] after this are treated as
+         * echoes of our own actions, not a user takeover.
+         */
+        @Volatile
+        var lastAutomationActionMs: Long = 0L
+            private set
+
+        /** F16: stamp one automation action (call at every dispatch site). */
+        fun noteAutomationAction() {
+            lastAutomationActionMs = System.currentTimeMillis()
+        }
+
+        /** F16: quiet window after our own action (echo suppression). */
+        private const val USER_TAKEOVER_QUIET_MS = 1_500L
 
         /** #34: packages whose dialogs are system dialogs. */
         private val SYSTEM_DIALOG_PACKAGES = setOf(

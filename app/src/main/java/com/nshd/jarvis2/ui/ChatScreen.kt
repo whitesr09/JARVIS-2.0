@@ -81,6 +81,8 @@ import com.nshd.jarvis2.brain.AgentPipeline
 import com.nshd.jarvis2.brain.ProviderStore
 import com.nshd.jarvis2.brain.ToolEvent
 import com.nshd.jarvis2.brain.ToolEventKind
+import com.nshd.jarvis2.brain.tools.ConfirmGate
+import com.nshd.jarvis2.brain.tools.SendAsk
 import com.nshd.jarvis2.hands.TaskState
 import com.nshd.jarvis2.hands.TaskStoppedException
 import com.nshd.jarvis2.memory.MemoryCategories
@@ -342,6 +344,17 @@ fun ChatScreen(
      * Shared pipeline: memory commands → quick phone commands → agent loop.
      */
     fun launchPipeline(text: String, imageBase64: String? = null) {
+        // F16: a new message stops the pending task — the user took
+        // over. Skipped while a just-in-time ask is pending, because
+        // then this message IS the answer and the suspended turn must
+        // stay alive to act on it (aborting would orphan the ask and
+        // a "yes" would report a send that never happens).
+        if (TaskState.active.value &&
+            SendAsk.pending.value == null &&
+            ConfirmGate.pending.value == null
+        ) {
+            TaskState.abort()
+        }
         sending = true
         resetStream()
         streamStartedAt = System.currentTimeMillis()

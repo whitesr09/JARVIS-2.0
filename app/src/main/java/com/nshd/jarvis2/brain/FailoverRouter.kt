@@ -115,6 +115,14 @@ class FailoverRouter(
         val executor = toolExecutor ?: return "Phone tools are not available in this session."
         val failures = mutableListOf<Pair<String, String>>()
 
+        // F16: loop guard — exact (tool, arguments) signatures
+        // executed this turn; a third identical execution is a spin,
+        // not progress, and is refused. Declared OUTSIDE the provider
+        // loop on purpose: it used to reset on every provider
+        // failover, so the same action could run twice per provider
+        // and reach 3+ executions in one turn.
+        val signatureCounts = mutableMapOf<String, Int>()
+
         for (config in configured) {
             val model = selectModel(config, preferReasoningModel)
             if (model.isBlank()) {
@@ -147,10 +155,6 @@ class FailoverRouter(
             // the response tail arrived) — execution below must not
             // fire a duplicate STARTED event for them.
             val earlyAnnounced = mutableSetOf<String>()
-            // v2.0.0: loop guard — exact (tool, arguments) signatures
-            // executed this turn; a third identical execution is a
-            // spin, not progress, and is refused.
-            val signatureCounts = mutableMapOf<String, Int>()
             // v2.0.0: dynamic step budget — a turn that keeps making
             // successful progress earns more steps (up to HARD_CAP);
             // a stalled or failing turn keeps the configured budget.

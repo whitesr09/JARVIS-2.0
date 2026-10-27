@@ -135,9 +135,13 @@ class ToolExecutor(
             dispatch(name, args)
         } catch (e: CancellationException) {
             // Coroutine cancellation must stop device actions immediately.
+            // F16: release the in-flight ledger key so a later identical
+            // call this turn is not blocked by the cancelled execution.
+            ledger?.release(name, args)
             throw e
         } catch (e: TaskStoppedException) {
             // The explicit user stop control is not an ordinary tool failure.
+            ledger?.release(name, args)
             throw e
         } catch (e: Exception) {
             // An exception can happen after a tap or send has already reached
