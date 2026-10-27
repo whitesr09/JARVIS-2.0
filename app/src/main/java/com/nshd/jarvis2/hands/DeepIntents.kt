@@ -228,7 +228,10 @@ class DeepIntents(context: Context) {
         // or read receipt remains outside what the accessibility tree can prove.
         var entryCleared = false
         var bubbleFound = false
-        val deadline = System.currentTimeMillis() + 2_000
+        // F18: 2 s → 5 s — slow devices / large chats often need more
+        // than 2 s for the bubble to appear; the loop already exits
+        // early on success, so this only widens the failure tail.
+        val deadline = System.currentTimeMillis() + 5_000
         while (System.currentTimeMillis() < deadline && !(entryCleared && bubbleFound)) {
             TaskState.throwIfStopRequested() // #61: verify loop
             delay(200)
@@ -1502,7 +1505,8 @@ class DeepIntents(context: Context) {
         // are useful submission signals, but neither proves delivery/read status.
         var composerCleared = false
         var newMessageObserved = false
-        val deadline = System.currentTimeMillis() + 2_000
+        // F18: 2 s → 5 s, same reason as the WhatsApp verify loop above.
+        val deadline = System.currentTimeMillis() + 5_000
         while (System.currentTimeMillis() < deadline &&
             !(composerCleared && newMessageObserved)
         ) {

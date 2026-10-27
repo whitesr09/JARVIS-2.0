@@ -1559,11 +1559,26 @@ object VoiceSessionManager {
                         if (active) client?.sendToolResponse(id, name, cached)
                         return@launch
                     }
-                // F17: a stop requested (overlay tap, screen takeover,
-                // new chat message) must stop Live tools too — the Live
-                // path never consulted the flag before, so voice tasks
-                // ran on after Stop.
+                // F6: first REAL execution of this Live turn opens the
+                // TaskQueue/TaskState window (cached duplicates above
+                // don't). The window's TaskState job is THIS coroutine,
+                // so an overlay abort cancels the in-flight tool work
+                // without killing the voice session.
+                // F18 FIX: the window MUST open before the stop check.
+                // begin() is what clears a previous turn's stop flag,
+                // and the old order (check first, open after) meant a
+                // stopped turn poisoned every later Live turn in the
+                // session: the next turn's first tool answered
+                // "stopped" before any action ran, and the window never
+                // opened to clear the flag — so it never recovered.
+                val myJob = currentCoroutineContext()[Job] ?: Job()
+                openLiveTaskWindow(myJob)
+                // F17: a stop requested DURING this turn (overlay tap,
+                // screen takeover, new chat message) must stop Live
+                // tools too — checked after the window opens, so only
+                // a fresh stop refuses, never a stale one.
                 if (TaskState.isStopRequested()) {
+                    liveTaskFailed = true
                     if (active) {
                         client?.sendToolResponse(
                             id, name,
@@ -1574,13 +1589,6 @@ object VoiceSessionManager {
                     }
                     return@launch
                 }
-                // F6: first REAL execution of this Live turn opens the
-                // TaskQueue/TaskState window (cached duplicates above
-                // don't). The window's TaskState job is THIS coroutine,
-                // so an overlay abort cancels the in-flight tool work
-                // without killing the voice session.
-                val myJob = currentCoroutineContext()[Job] ?: Job()
-                openLiveTaskWindow(myJob)
                 TaskState.step("🔧 $name")
                 // v2.0.3: a send tool's just-in-time ask must reach
                 // this Live session as a plain caption (the typed-chat
