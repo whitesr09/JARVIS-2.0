@@ -135,7 +135,7 @@ class ToolExecutor(
             return ToolResult(
                 false,
                 "Duplicate-send guard: an identical message to this recipient was already sent (or likely sent) within the last 30 minutes — check the chat before sending again. This is a refusal, not a failure; reword the message or wait to send it again.",
-                ActionOutcome.OUTCOME_UNKNOWN
+                outcome = ActionOutcome.OUTCOME_UNKNOWN
             )
         }
         // F7: plan bookkeeping for the floating task panel — a real
