@@ -25,6 +25,7 @@ import com.nshd.jarvis2.brain.ToolEvent
 import com.nshd.jarvis2.brain.ToolEventKind
 import com.nshd.jarvis2.hands.DeepIntents
 import com.nshd.jarvis2.hands.TaskState
+import com.nshd.jarvis2.hands.TaskStoppedException
 import com.nshd.jarvis2.brain.tools.ToolExecutor
 import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.brain.tools.SendAnswer
@@ -262,6 +263,14 @@ object VoiceSessionManager {
 
     @Volatile
     private var liveTaskJob: Job? = null
+
+    /**
+     * F17: EVERY Live tool-call coroutine, not just the first tool's
+     * window job. stopInternal cancels all of these; without this set,
+     * overlay Stop cancelled exactly one job and every other in-flight
+     * Live tool ran to completion, phone action included.
+     */
+    private val liveToolJobs = mutableSetOf<Job>()
 
     // F4.1 stage-log one-shot flags (reset per engine start).
     @Volatile
@@ -768,6 +777,19 @@ object VoiceSessionManager {
 
     private fun stopInternal(resetUi: Boolean) {
         active = false
+        // F17: cancel EVERY in-flight Live tool job (not just the
+        // session/reconnect jobs below) and release any tool suspended
+        // in a just-in-time ask — otherwise a tap/send can still land
+        // after Stop, and a stale ask could swallow the next session's
+        // first words (a later "yes" answering a dead ask's context).
+        synchronized(liveToolJobs) { liveToolJobs.toList() }.forEach { it.cancel() }
+        synchronized(liveToolJobs) { liveToolJobs.clear() }
+        runCatching { SendAsk.answer("no") }
+        runCatching {
+            com.nshd.jarvis2.brain.tools.ConfirmGate.pending.value?.let {
+                com.nshd.jarvis2.brain.tools.ConfirmGate.dismiss(it.id)
+            }
+        }
         sessionJob?.cancel()
         sessionJob = null
         reconnectJob?.cancel()
@@ -1448,7 +1470,12 @@ object VoiceSessionManager {
             // the in-memory handle from this same session so the
             // conversation survives the ~10-minute session limit
             // instead of losing context (F5.1: never a stored one).
-            if (reconnectAttempts >= MAX_RECONNECTS) return
+            // F17: attempts exhausted must NOT die silently leaving
+            // the UI stuck on LISTENING/CONNECTING — surface it.
+            if (reconnectAttempts >= MAX_RECONNECTS) {
+                fail("Live session ended after several reconnects — tap Retry to start again.")
+                return
+            }
             reconnecting = true
             reconnectAttempts++
             capture?.stop()
@@ -1498,7 +1525,7 @@ object VoiceSessionManager {
                 client?.sendToolResponse(id, name, cached)
                 return
             }
-            scope.launch(Dispatchers.IO) {
+            val toolJob = scope.launch(Dispatchers.IO) {
                 // Re-check inside the coroutine: a racing duplicate may
                 // have completed while this one was queued.
                 synchronized(liveProcessedToolCalls) { liveProcessedToolCalls[id] }
@@ -1506,6 +1533,21 @@ object VoiceSessionManager {
                         if (active) client?.sendToolResponse(id, name, cached)
                         return@launch
                     }
+                // F17: a stop requested (overlay tap, screen takeover,
+                // new chat message) must stop Live tools too — the Live
+                // path never consulted the flag before, so voice tasks
+                // ran on after Stop.
+                if (TaskState.isStopRequested()) {
+                    if (active) {
+                        client?.sendToolResponse(
+                            id, name,
+                            JSONObject()
+                                .put("success", false)
+                                .put("message", "Task stopped by user.")
+                        )
+                    }
+                    return@launch
+                }
                 // F6: first REAL execution of this Live turn opens the
                 // TaskQueue/TaskState window (cached duplicates above
                 // don't). The window's TaskState job is THIS coroutine,
@@ -1531,9 +1573,26 @@ object VoiceSessionManager {
                 val result: ToolResult = try {
                     // Per-turn ledger: identical repeat calls inside this
                     // Live turn return the cached result (F3).
+                    // F17: stop check at the execution boundary too —
+                    // the flag may have been set after the check above.
+                    TaskState.throwIfStopRequested()
                     ToolExecutor(ctx, db, liveLedger).execute(name, args)
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
+                } catch (e: TaskStoppedException) {
+                    // Never feed a stop to the model as a failure (it
+                    // would re-issue the tool); answer "stopped" and end
+                    // this tool coroutine. The ask-sink finally below
+                    // still runs.
+                    if (active) {
+                        client?.sendToolResponse(
+                            id, name,
+                            JSONObject()
+                                .put("success", false)
+                                .put("message", "Task stopped by user.")
+                        )
+                    }
+                    return@launch
                 } catch (e: Exception) {
                     ToolResult(
                         false,
@@ -1585,6 +1644,12 @@ object VoiceSessionManager {
                     )
                     client?.sendToolResponse(id, name, response)
                 }
+            }
+            // F17: track every Live tool job so session stop cancels
+            // all of them, not just the first tool's window job.
+            synchronized(liveToolJobs) { liveToolJobs += toolJob }
+            toolJob.invokeOnCompletion {
+                synchronized(liveToolJobs) { liveToolJobs -= toolJob }
             }
         }
     }

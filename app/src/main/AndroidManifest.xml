@@ -127,6 +127,17 @@
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
+        <!-- F17 port of main v2.0.4 "Live Bridge": token-authenticated
+             debug HTTP server for the jarvis-cli (tailnet/loopback only). -->
+        <service
+            android:name=".service.BridgeService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Debug bridge server for the owner's CLI over Tailscale" />
+        </service>
+
         <!-- v2.0.0 (#86/#50): opt-in notification listener — powers
              the unread reader ("read my WhatsApp messages" / "who
              messaged me?"). Inert until the user both flips the

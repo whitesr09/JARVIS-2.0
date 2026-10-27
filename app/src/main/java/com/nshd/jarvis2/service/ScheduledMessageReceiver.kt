@@ -27,10 +27,7 @@ class ScheduledMessageReceiver : BroadcastReceiver() {
         if (id < 0) return
         val item = BrainStore.getScheduled(context, id) ?: return
         BrainStore.markScheduledDue(context, id)
-        AppLog.i(
-            "Brain",
-            "scheduled message #$id due (to '${item.contact}')"
-        )
+        AppLog.i("Brain", "scheduled message #$id due")
         postDueNotification(context, item)
     }
 
@@ -67,6 +64,9 @@ class ScheduledMessageReceiver : BroadcastReceiver() {
         val notification = Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
             .setContentTitle("Scheduled message due")
+            // F17: lock-screen privacy — the full draft must not sit
+            // on the lock screen; it stays readable once unlocked.
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setContentText("To ${item.contact}: \"${item.message.take(60)}\"")
             .setStyle(
                 Notification.BigTextStyle()

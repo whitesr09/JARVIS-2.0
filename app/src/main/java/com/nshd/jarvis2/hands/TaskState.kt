@@ -125,6 +125,13 @@ object TaskState {
 
     /** Overlay single-tap: cancel the running pipeline coroutine. */
     fun abort() {
+        // F17: abort = stop, everywhere. Panel/chat Stop already
+        // called requestStop() first, but bubble-tap abort did not —
+        // a step blocked inside an accessibility call that later
+        // resumed would never trip a throwIfStopRequested() check.
+        // Setting the flag here makes all abort paths equal, and
+        // makes the F16 screen-takeover abort stop Live tools too.
+        requestStop()
         // F3: aborting also aborts the whole multitask queue (running
         // sub-task → FAILED, queued ones → SKIPPED, nothing runnable).
         TaskQueue.abortAll()

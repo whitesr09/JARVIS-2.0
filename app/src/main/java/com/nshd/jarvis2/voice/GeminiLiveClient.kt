@@ -2,6 +2,7 @@ package com.nshd.jarvis2.voice
 
 import android.util.Base64
 import com.nshd.jarvis2.CrashLogger
+import com.nshd.jarvis2.brain.tools.ToolRegistry
 import com.nshd.jarvis2.core.AppLog
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -715,6 +716,14 @@ class GeminiLiveClient(
             val name = call.optString("name")
                 .ifBlank { function?.optString("name").orEmpty() }
             if (name.isBlank()) continue
+            // F17: defence in depth at the Live boundary — a confused
+            // or prompt-injected model must not invoke tools outside
+            // the declared set; ToolExecutor is no longer the only
+            // thing standing between the model and the phone.
+            if (ToolRegistry.specs.none { it.name == name }) {
+                AppLog.w("Live", "dropping unknown Live tool call: $name")
+                continue
+            }
             val rawArgs = call.opt("args")
                 ?: call.opt("arguments")
                 ?: function?.opt("args")

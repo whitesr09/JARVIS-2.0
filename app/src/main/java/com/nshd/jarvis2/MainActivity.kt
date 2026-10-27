@@ -89,7 +89,19 @@ data class JarvisSettings(
      * v2.0.1: floating task-panel background opacity (0.35–1.0). The
      * default matches the shipped palette fill (PANEL_ALPHA 0xF7 ≈ 0.97).
      */
-    val panelBgOpacity: Float = 0.97f
+    val panelBgOpacity: Float = 0.97f,
+    /** F17 port of main v2.0.4 "Live Bridge": debug HTTP server for the jarvis-cli. */
+    val bridgeEnabled: Boolean = false,
+    /** Bridge listen port (default 8765). */
+    val bridgePort: Int = 8765,
+    /** Bridge bearer token (auto-generated on first enable, "" = none yet). */
+    val bridgeToken: String = "",
+    /**
+     * F17: lets the CLI answer a pending send confirmation
+     * (POST /answer). OFF by default — sends must then be confirmed
+     * on the phone.
+     */
+    val bridgeRemoteConfirm: Boolean = false
 )
 
 class MainActivity : ComponentActivity() {
@@ -128,6 +140,12 @@ class MainActivity : ComponentActivity() {
         handleNavIntent(intent)
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         settings = loadSettings()
+        // F17 (main v2.0.4): a bridge left ON restarts with the app
+        // (the toggle is the switch — the service never starts on
+        // its own).
+        if (settings.bridgeEnabled) {
+            runCatching { com.nshd.jarvis2.service.BridgeService.start(this) }
+        }
         // Plan #102 (safe mode): after 3 boot crashes in a row, wake word
         // and overlay auto-starts stay OFF until the user exits safe
         // mode from the banner JarvisApp shows.
@@ -187,6 +205,18 @@ class MainActivity : ComponentActivity() {
                         effective.overlayAvatarOpacity != settings.overlayAvatarOpacity ||
                             effective.panelSizePercent != settings.panelSizePercent ||
                             effective.panelBgOpacity != settings.panelBgOpacity
+                    // F17 (main v2.0.4): Live Bridge — a token is
+                    // minted the first time the toggle goes ON
+                    // (blank = none yet).
+                    if (effective.bridgeEnabled && effective.bridgeToken.isBlank()) {
+                        effective = effective.copy(
+                            bridgeToken = com.nshd.jarvis2.service.BridgeServer.generateToken()
+                        )
+                    }
+                    val bridgeConfigChanged =
+                        effective.bridgePort != settings.bridgePort ||
+                            effective.bridgeToken != settings.bridgeToken
+                    val wasBridgeEnabled = settings.bridgeEnabled
                     settings = effective
                     saveSettings(effective)
                     // D3: a running overlay re-reads its HUD palette on
@@ -195,6 +225,18 @@ class MainActivity : ComponentActivity() {
                         FloatingOverlayService.isRunning()
                     ) {
                         runCatching { FloatingOverlayService.start(this) }
+                    }
+                    // F17: bridge follows its toggle; a port/token
+                    // change restarts it so the new config binds.
+                    if (effective.bridgeEnabled) {
+                        if (!com.nshd.jarvis2.service.BridgeService.isRunning() ||
+                            bridgeConfigChanged
+                        ) {
+                            com.nshd.jarvis2.service.BridgeService.stop(this)
+                            com.nshd.jarvis2.service.BridgeService.start(this)
+                        }
+                    } else if (wasBridgeEnabled) {
+                        com.nshd.jarvis2.service.BridgeService.stop(this)
                     }
                 }
             )
@@ -319,7 +361,11 @@ class MainActivity : ComponentActivity() {
             panelSizePercent = prefs.getInt(KEY_PANEL_SIZE_PERCENT, 100)
                 .coerceIn(80, 120),
             panelBgOpacity = prefs.getFloat(KEY_PANEL_BG_OPACITY, 0.97f)
-                .coerceIn(0.35f, 1.0f)
+                .coerceIn(0.35f, 1.0f),
+            bridgeEnabled = prefs.getBoolean(KEY_BRIDGE_ENABLED, false),
+            bridgePort = prefs.getInt(KEY_BRIDGE_PORT, 8765).coerceIn(1, 65535),
+            bridgeToken = prefs.getString(KEY_BRIDGE_TOKEN, "") ?: "",
+            bridgeRemoteConfirm = prefs.getBoolean(KEY_BRIDGE_REMOTE_CONFIRM, false)
         )
     }
 
@@ -362,6 +408,10 @@ class MainActivity : ComponentActivity() {
             .putFloat(KEY_OVERLAY_AVATAR_OPACITY, s.overlayAvatarOpacity)
             .putInt(KEY_PANEL_SIZE_PERCENT, s.panelSizePercent)
             .putFloat(KEY_PANEL_BG_OPACITY, s.panelBgOpacity)
+            .putBoolean(KEY_BRIDGE_ENABLED, s.bridgeEnabled)
+            .putInt(KEY_BRIDGE_PORT, s.bridgePort)
+            .putString(KEY_BRIDGE_TOKEN, s.bridgeToken)
+            .putBoolean(KEY_BRIDGE_REMOTE_CONFIRM, s.bridgeRemoteConfirm)
             .apply()
     }
 
@@ -413,5 +463,10 @@ class MainActivity : ComponentActivity() {
         private const val KEY_OVERLAY_AVATAR_OPACITY = "overlay_avatar_opacity"
         private const val KEY_PANEL_SIZE_PERCENT = "panel_size_percent"
         private const val KEY_PANEL_BG_OPACITY = "panel_bg_opacity"
+        /** F17: Live Bridge prefs (same keys as main v2.0.4). */
+        private const val KEY_BRIDGE_ENABLED = "bridge_enabled"
+        private const val KEY_BRIDGE_PORT = "bridge_port"
+        private const val KEY_BRIDGE_TOKEN = "bridge_token"
+        private const val KEY_BRIDGE_REMOTE_CONFIRM = "bridge_remote_confirm"
     }
 }
