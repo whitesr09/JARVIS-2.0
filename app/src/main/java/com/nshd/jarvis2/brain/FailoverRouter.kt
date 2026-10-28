@@ -10,6 +10,7 @@ import com.nshd.jarvis2.core.AppLog
 import com.nshd.jarvis2.ui.FriendlyErrors
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -161,16 +162,29 @@ class FailoverRouter(
             // Keep callers from disabling the loop guard with an excessive
             // budget. Successful progress can still extend this to HARD_STEP_CAP.
             var stepBudget = maxSteps.coerceIn(1, HARD_STEP_CAP)
+            // Hang-proofing: wall-clock deadline + stall flags for this turn.
+            val turnStartedAt = System.currentTimeMillis()
+            var turnDeadlineExceeded = false
+            var modelTimedOut = false
             try {
                 var step = 0
                 while (step < stepBudget) {
+                    // Hang-proofing: a stalled turn ends at the deadline
+                    // instead of burning steps on a dead connection.
+                    if (System.currentTimeMillis() - turnStartedAt > TURN_DEADLINE_MS) {
+                        turnDeadlineExceeded = true
+                        break
+                    }
                     // F6: keep the step prompt lean — tool results
                     // older than the last 6 steps collapse to their
                     // first line (the model rarely re-reads an old
                     // screen dump, but pays tokens for it every step).
                     compactOldToolResults(conversation, keepSteps = 6)
                     val modelStartedAt = System.currentTimeMillis()
-                    val reply = chatStreamRetrying(
+                    // Hang-proofing: a trickling-but-dead stream cannot
+                    // stall this step forever (readTimeout alone does
+                    // not bound it); null means timed out, handled below.
+                    val reply = withTimeoutOrNull(MODEL_CALL_TIMEOUT_MS) { chatStreamRetrying(
                         provider = provider,
                         messages = conversation,
                         model = stepModel,
@@ -190,7 +204,11 @@ class FailoverRouter(
                                 onEvent(ToolEvent(ToolEventKind.STARTED, call.name))
                             }
                         }
-                    )
+                    ) }
+                    if (reply == null) {
+                        modelTimedOut = true
+                        break
+                    }
                     val modelMs = System.currentTimeMillis() - modelStartedAt
                     if (reply.toolCalls.isEmpty()) {
                         AppLog.d(
@@ -386,6 +404,14 @@ class FailoverRouter(
                     }
                 }
 
+                // Hang-proofing: a timed-out or deadline-hit turn ends
+                // honestly here — no summary call on a dead connection.
+                if (modelTimedOut) {
+                    return "The model stopped responding (slow network) — I stopped the task instead of repeating actions. Nothing further was run; try again when the connection is steadier."
+                }
+                if (turnDeadlineExceeded) {
+                    return "I stopped the task at the 5-minute limit — it was stalling on a slow connection. Nothing further was run; check what already happened and try again."
+                }
                 onEvent(
                     ToolEvent(
                         ToolEventKind.INFO,
@@ -393,7 +419,7 @@ class FailoverRouter(
                         "Tool step limit reached — asking ${config.label} for a summary"
                     )
                 )
-                val summary = chatStreamRetrying(
+                val summary = withTimeoutOrNull(SUMMARY_CALL_TIMEOUT_MS) { chatStreamRetrying(
                     provider = provider,
                     messages = conversation + ChatMsg(
                         "user",
@@ -404,10 +430,9 @@ class FailoverRouter(
                     providerLabel = config.label,
                     toolsExecuted = { executedAnyTool },
                     onDelta = onAssistantDelta
-                )
-                return summary.content.ifBlank {
-                    "I reached the tool-step limit. The actions and results above show what was completed."
-                }
+                ) }
+                return summary?.content?.takeIf { it.isNotBlank() }
+                    ?: "I reached the tool-step limit. The actions and results above show what was completed."
             } catch (e: CancellationException) {
                 // User aborts and lifecycle cancellation must propagate to the
                 // owning coroutine; never turn cancellation into a chat reply.
@@ -635,6 +660,13 @@ class FailoverRouter(
     companion object {
         /** v2.0.0: dynamic step budget hard cap (see agentLoop). */
         private const val HARD_STEP_CAP = 16
+
+        /** Hang-proofing: one model call may never stall a turn past this. */
+        private const val MODEL_CALL_TIMEOUT_MS = 120_000L
+        /** Hang-proofing: a whole turn ends honestly past this wall-clock budget. */
+        private const val TURN_DEADLINE_MS = 300_000L
+        /** Hang-proofing: the step-limit summary call gets this long, then a static fallback. */
+        private const val SUMMARY_CALL_TIMEOUT_MS = 60_000L
 
         /** F6: suffix marking an already-compacted old tool result. */
         private const val COMPACTED_MARKER = " […]"

@@ -307,6 +307,11 @@ object ToolRegistry {
             )
         ),
         ToolSpec(
+            "instagram_inbox",
+            "Open the Instagram messages (DM) inbox and confirm it actually opened — never guess from the feed or notifications screen.",
+            schema(properties = JSONObject())
+        ),
+        ToolSpec(
             "telegram_message",
             "Send a Telegram message to a contact (name or username). Always confirmed with the user first.",
             schema(

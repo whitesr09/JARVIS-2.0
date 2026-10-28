@@ -1643,6 +1643,69 @@ class DeepIntents(context: Context) {
         return typeAndSendInOpenChat(pkg, message, askBeforeSend)
     }
 
+    /**
+     * Hang-proofing: open the Instagram messages inbox deterministically
+     * (no model free-navigation). The inbox tap is verified against the
+     * live snapshot: success ONLY when a node reads exactly "Messages"
+     * and no node reads exactly "Notifications" (the heart icon lands
+     * there — the exact confusion users reported). Landing on
+     * notifications goes back and retries the other control once, then
+     * fails honestly instead of wandering through feed and reels.
+     */
+    suspend fun instagramInbox(): ActionResult {
+        val pkg = Playbooks.INSTAGRAM_PACKAGE
+        if (!isPackageInstalled(pkg)) {
+            return ActionResult(false, "Instagram is not installed.")
+        }
+        val opened = openApp("Instagram")
+        if (!opened.success) return opened
+        HandsActions.waitForPackage(pkg, 3_000)
+        HandsActions.waitForSettle(1_200)
+        val service = JarvisAccessibilityService.instance
+            ?: return ActionResult(false, "Accessibility is not enabled.")
+        val reader = service.screenReader()
+        fun inboxVerified(): Boolean {
+            val nodes = reader.snapshot()
+            val hasMessages = nodes.any {
+                it.text.trim().equals("Messages", ignoreCase = true)
+            }
+            val hasNotifications = nodes.any {
+                it.text.trim().equals("Notifications", ignoreCase = true)
+            }
+            return hasMessages && !hasNotifications
+        }
+        fun onNotifications(): Boolean =
+            reader.snapshot().any {
+                it.text.trim().equals("Notifications", ignoreCase = true)
+            }
+        // First attempt: the same control order as instagramDm.
+        val tapped = HandsActions.clickText("Messages").takeIf { it.success }
+            ?: HandsActions.clickText("Direct").takeIf { it.success }
+        HandsActions.waitForSettle(1_000)
+        TaskState.throwIfStopRequested()
+        if (tapped != null && inboxVerified()) {
+            return ActionResult(true, "Instagram messages opened.")
+        }
+        // Wrong landing (notifications) or unverified: back out and try
+        // the other control once, then stop honestly.
+        if (tapped != null && onNotifications()) {
+            HandsActions.pressKey("back")
+            HandsActions.waitForSettle(1_000)
+            val retry = HandsActions.clickText("Direct").takeIf { it.success }
+                ?: HandsActions.clickText("Messages").takeIf { it.success }
+            HandsActions.waitForSettle(1_000)
+            TaskState.throwIfStopRequested()
+            if (retry != null && inboxVerified()) {
+                return ActionResult(true, "Instagram messages opened.")
+            }
+        }
+        return ActionResult(
+            false,
+            "Instagram opened, but I couldn't confirm the messages inbox — " +
+                "I stopped instead of tapping around. Open it manually and tell me what you see."
+        )
+    }
+
     /** #46: Telegram message — same staged pattern as Instagram. */
     suspend fun telegramMessage(
         contactQuery: String,

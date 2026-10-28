@@ -271,6 +271,14 @@ object VoiceSessionManager {
      * Live tool ran to completion, phone action included.
      */
     private val liveToolJobs = mutableSetOf<Job>()
+    // Hang-proofing: identical Live tool calls inside one minute are
+    // capped at 2 executions — the 3rd is refused. The per-turn ledger
+    // resets every turn, so without this a stalled/slow session could
+    // re-fire the same action turn after turn. Observation + repeatable
+    // tools are exempt (reads must stay fresh, edits are state-relative).
+    private val liveRepeatWindow = mutableMapOf<String, MutableList<Long>>()
+    private val liveRepeatWindowMs = 60_000L
+    private val liveRepeatMax = 2
 
     /**
      * F18: second words that turn a leading yes/no into thinking
@@ -433,6 +441,7 @@ object VoiceSessionManager {
         }
         synchronized(liveProcessedToolCalls) { liveProcessedToolCalls.clear() }
         liveLedger = ExecutionLedger()
+        synchronized(liveRepeatWindow) { liveRepeatWindow.clear() }
         mediaListenBlocked = false
         readingSuppressed = false
         callPaused = false
@@ -1550,6 +1559,36 @@ object VoiceSessionManager {
             synchronized(liveProcessedToolCalls) { liveProcessedToolCalls[id] }?.let { cached ->
                 client?.sendToolResponse(id, name, cached)
                 return
+            }
+            // Hang-proofing: windowed repeat guard for this session.
+            if (name !in ToolExecutor.OBSERVATION_TOOLS &&
+                name !in ToolExecutor.REPEATABLE_TOOLS
+            ) {
+                val key = ExecutionLedger().keyFor(name, args)
+                val now = System.currentTimeMillis()
+                val times = synchronized(liveRepeatWindow) {
+                    val list = liveRepeatWindow.getOrPut(key) { mutableListOf() }
+                    list.removeAll { now - it > liveRepeatWindowMs }
+                    list
+                }
+                if (times.size >= liveRepeatMax) {
+                    if (active) {
+                        client?.sendToolResponse(
+                            id, name,
+                            JSONObject()
+                                .put("success", false)
+                                .put(
+                                    "message",
+                                    "Repeat guard: this exact action already ran " +
+                                        "twice in the last minute — I refused a further " +
+                                        "repeat so a stalled session can't fire it again. " +
+                                        "If you really want it again, rephrase the request."
+                                )
+                        )
+                    }
+                    return
+                }
+                synchronized(liveRepeatWindow) { times += now }
             }
             val toolJob = scope.launch(Dispatchers.IO) {
                 // Re-check inside the coroutine: a racing duplicate may

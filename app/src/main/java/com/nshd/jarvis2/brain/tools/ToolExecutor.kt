@@ -24,6 +24,7 @@ import com.nshd.jarvis2.memory.MemoryDb
 import com.nshd.jarvis2.service.JarvisAccessibilityService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 data class ToolResult(
@@ -157,7 +158,16 @@ class ToolExecutor(
             null
         }
         val dispatched = try {
-            dispatch(name, args)
+            // Hang-proofing: a tool that stalls on a slow device or
+            // network ends as OUTCOME_UNKNOWN (terminal: same-turn
+            // retry blocked, sends cross-turn guarded) instead of
+            // hanging the turn until the user kills it.
+            withTimeoutOrNull(TOOL_TIMEOUT_MS) { dispatch(name, args) }
+                ?: ToolResult(
+                    false,
+                    "Tool $name timed out after 60 seconds — the action may or may not have reached the app. Check the app before retrying.",
+                    outcome = ActionOutcome.OUTCOME_UNKNOWN
+                )
         } catch (e: CancellationException) {
             // Coroutine cancellation must stop device actions immediately.
             // F16: release the in-flight ledger key so a later identical
@@ -570,6 +580,7 @@ class ToolExecutor(
             "whatsapp_photo" -> whatsappPhoto(args)
             "whatsapp_reply_current" -> whatsappReplyCurrent(args)
             "instagram_message" -> instagramMessage(args)
+            "instagram_inbox" -> intents.instagramInbox().toToolResult()
             "telegram_message" -> telegramMessage(args)
             "sms_message" -> smsMessage(args)
             "gmail_send" -> gmailSend(args)
@@ -1654,6 +1665,8 @@ class ToolExecutor(
             CARD_NUMBER_REGEX.containsMatchIn(text)
 
     companion object {
+        /** Hang-proofing: one tool dispatch may never hang a turn past this. */
+        private const val TOOL_TIMEOUT_MS = 60_000L
         private const val MAX_UNCONFIRMED_BULK = 5
         /** F8 (#21): a bigger diff than this falls back to full compact. */
         private const val DIFF_ENTRY_CAP = 40
@@ -1661,7 +1674,7 @@ class ToolExecutor(
         private const val MAX_VISION_ASSISTS = 2
         private const val QUICKEDIT_PACKAGE = "com.rhmsoft.edit"
         /** Read-only screen observation — exempt from the F3 ledger. */
-        private val OBSERVATION_TOOLS = setOf(
+        internal val OBSERVATION_TOOLS = setOf(
             "inspect_screen", "see_screen", "take_screenshot",
             // v1.9.0: SAFE reads (page text / clipboard) — always fresh.
             "read_page", "clipboard_get",
@@ -1691,7 +1704,7 @@ class ToolExecutor(
          * one-shot action. One-shot tools (sends, plays, opens) stay
          * ledgered — the anti-replay protection the ledger exists for.
          */
-        private val REPEATABLE_TOOLS = setOf("edit_text", "type_text")
+        internal val REPEATABLE_TOOLS = setOf("edit_text", "type_text")
         // External side effects not already covered by UI_MUTATION_TOOLS.
         // Exceptions from these actions must not enable same-turn replay.
         private val EXTERNAL_SIDE_EFFECT_TOOLS = setOf(

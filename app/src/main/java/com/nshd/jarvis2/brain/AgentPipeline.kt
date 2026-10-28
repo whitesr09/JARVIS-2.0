@@ -977,6 +977,7 @@ object AgentPipeline {
                 val action = when (quick.toolName) {
                     "open_app" ->
                         "Open ${quick.args.optString("app").ifBlank { "app" }}"
+                    "instagram_inbox" -> "Open Instagram messages"
                     "toggle_torch" -> "Toggle the torch"
                     "set_volume" -> "Set the volume"
                     "set_brightness" -> "Set the brightness"
@@ -1896,6 +1897,14 @@ object AgentPipeline {
                 JSONObject().put("query", stripVideoSuffix(match.groupValues[1]))
             )
         }
+        // Hang-proofing: "open instagram messages" is a deterministic
+        // inbox playbook, NOT the generic open_app (which cannot navigate
+        // past the feed) and NOT model free-navigation. Must precede the
+        // generic "^open" below.
+        Regex("(?i)^open\\s+instagram\\s+(messages?|dms?|inbox|chats?)$")
+            .find(text)?.let {
+                return QuickCommand("instagram_inbox", JSONObject())
+            }
         Regex("(?i)^open\\s+youtube\\s+and\\s+play\\s+(.+)$").find(text)?.let { match ->
             return QuickCommand(
                 "youtube_play",
