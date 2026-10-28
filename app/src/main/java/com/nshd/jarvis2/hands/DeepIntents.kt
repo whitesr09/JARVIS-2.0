@@ -999,9 +999,14 @@ class DeepIntents(context: Context) {
             appContext,
             Manifest.permission.CALL_PHONE
         ) == PackageManager.PERMISSION_GRANTED
+        // Dial fix: normalizePhone returns digits-only international form
+        // (919876543210). A tel: URI without '+' is read as a 12-digit
+        // DOMESTIC number and carriers reject it ("number not available").
+        // The '+' is dial-only: contact matching and wa.me keep digits-only.
+        val dial = if (digits.length > 10) "+$digits" else digits
         val intent = Intent(
             if (hasCallPermission) Intent.ACTION_CALL else Intent.ACTION_DIAL,
-            Uri.parse("tel:$digits")
+            Uri.parse("tel:$dial")
         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val launched = launch(intent)
         return when {

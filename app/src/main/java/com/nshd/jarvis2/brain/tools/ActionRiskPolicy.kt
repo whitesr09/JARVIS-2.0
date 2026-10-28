@@ -29,7 +29,7 @@ object ActionRiskPolicy {
     )
 
     private val reversibleMutations = setOf(
-        "open_app", "click_element", "click_text", "type_text", "scroll",
+        "open_app", "instagram_inbox", "click_element", "click_text", "type_text", "scroll",
         "press_key", "tap_percent", "edit_text", "insert_code",
         "long_press", "double_tap", "drag", "pinch_zoom", "set_slider",
         "copy_selection", "youtube_play", "spotify_play", "vision_tap",
