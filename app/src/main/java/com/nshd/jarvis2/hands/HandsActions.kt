@@ -582,10 +582,18 @@ object HandsActions {
         val isSearch = viewId.contains("search", ignoreCase = true) ||
             hint.contains("search", ignoreCase = true) ||
             className.contains("Search", ignoreCase = true)
+        // F18 FIX: WhatsApp's composer (and similar fields) exposes
+        // its hint ("Message") as node text while empty/unfocused.
+        // Treating that as existing content put setTextOnFocused
+        // into INSERT mode, producing "MessageHi, how are you?"
+        // and verifying it as correct. A field whose text is exactly
+        // its hint is empty for every purpose (type, delete, paste).
+        val rawText = node.text?.toString().orEmpty()
+        val text = if (rawText.isNotEmpty() && rawText == hint) "" else rawText
         return EditableTarget(
             node = node,
             descriptor = node.toDescriptor(),
-            text = node.text?.toString().orEmpty(),
+            text = text,
             selectionStart = node.textSelectionStart,
             selectionEnd = node.textSelectionEnd,
             isSearchField = isSearch
