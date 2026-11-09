@@ -130,4 +130,100 @@ class ExecutionLedgerTest {
         ledger.release("whatsapp_message", args)
         assertNull(ledger.gate("whatsapp_message", args))
     }
+
+    @Test
+    fun integralDoublesShareKeysWithLongs() {
+        // F18: normalize() renders integral doubles as longs, so 500
+        // and 500.0 share one ledger key (and one loop-guard budget)
+        // instead of giving a model that varies its number format a
+        // fresh attempt budget.
+        val ledger = ExecutionLedger()
+        val asLong = JSONObject().put("x", 500).put("y", 250)
+        val asDouble = JSONObject().put("x", 500.0).put("y", 250.0)
+        assertEquals(
+            ledger.keyFor("tap_percent", asLong),
+            ledger.keyFor("tap_percent", asDouble)
+        )
+
+        // Behaviour: the second gate on the same logical call is an
+        // in-flight refusal, not a fresh attempt.
+        assertNull(ledger.gate("tap_percent", asDouble))
+        val refused = ledger.gate("tap_percent", asLong)
+        assertNotNull(refused)
+        assertFalse(refused!!.success)
+        assertTrue(refused.message.contains("already running"))
+
+        // A genuinely different value (500.5) is a different key.
+        val other = JSONObject().put("x", 500.5).put("y", 250.0)
+        assertNull(ledger.gate("tap_percent", other))
+    }
+
+    @Test
+    fun keysAreCanonicalRegardlessOfArgumentOrder() {
+        // normalize() sorts object keys recursively, so the same
+        // logical call with reordered keys (or reordered nested keys)
+        // produces one key.
+        val ledger = ExecutionLedger()
+        val a = JSONObject().put("b", 1)
+            .put("a", JSONObject().put("y", 2).put("x", 1))
+        val b = JSONObject().put("a", JSONObject().put("x", 1).put("y", 2))
+            .put("b", 1)
+        assertEquals(ledger.keyFor("some_tool", a), ledger.keyFor("some_tool", b))
+    }
+
+    @Test
+    fun gateRepeatableCapsIdenticalTypingAtThree() {
+        // F18: type_text with identical args appends identical text —
+        // beyond REPEATABLE_MAX_EXECUTIONS executions in one turn it
+        // is a loop, not intent.
+        val ledger = ExecutionLedger()
+        val args = JSONObject().put("text", "hello")
+        repeat(ExecutionLedger.REPEATABLE_MAX_EXECUTIONS) {
+            assertNull(ledger.gateRepeatable("type_text", args))
+            ledger.record(
+                "type_text", args,
+                ToolResult(true, "Typed.", outcome = ActionOutcome.COMPLETED)
+            )
+        }
+        val refused = ledger.gateRepeatable("type_text", args)
+        assertNotNull(refused)
+        assertFalse(refused!!.success)
+        assertTrue(
+            refused.message.contains(
+                "${ExecutionLedger.REPEATABLE_MAX_EXECUTIONS} times"
+            )
+        )
+    }
+
+    @Test
+    fun gateRepeatableRefusesConcurrentIdenticalCall() {
+        // Same in-flight rule as the normal gate: two identical
+        // type_text calls racing in separate coroutines must not
+        // both execute.
+        val ledger = ExecutionLedger()
+        val args = JSONObject().put("text", "hello")
+        assertNull(ledger.gateRepeatable("type_text", args))
+        val racing = ledger.gateRepeatable("type_text", args)
+        assertNotNull(racing)
+        assertFalse(racing!!.success)
+        assertTrue(racing.message.contains("already running"))
+    }
+
+    @Test
+    fun gateRepeatableCountsDistinctArgsSeparately() {
+        // The cap is per exact key — different text gets its own
+        // budget, so legitimate repeated typing of different
+        // strings is untouched.
+        val ledger = ExecutionLedger()
+        val first = JSONObject().put("text", "hello")
+        val second = JSONObject().put("text", "world")
+        repeat(ExecutionLedger.REPEATABLE_MAX_EXECUTIONS) {
+            assertNull(ledger.gateRepeatable("type_text", first))
+            ledger.record(
+                "type_text", first,
+                ToolResult(true, "Typed.", outcome = ActionOutcome.COMPLETED)
+            )
+        }
+        assertNull(ledger.gateRepeatable("type_text", second))
+    }
 }

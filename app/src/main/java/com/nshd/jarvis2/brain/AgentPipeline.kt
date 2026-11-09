@@ -1132,13 +1132,27 @@ object AgentPipeline {
             currentCoroutineContext().ensureActive()
             // v1.9.0 (#62): an item skipped/cancelled from the panel
             // while it waited never executes.
-            val liveStatus = TaskQueue.tasks.value
-                .firstOrNull { it.id == item.id }?.status
+            val liveItem = TaskQueue.tasks.value
+                .firstOrNull { it.id == item.id }
+            val liveStatus = liveItem?.status
             if (liveStatus == TaskStatus.SKIPPED) {
                 AppLog.i("Agent", "task ${index + 1}/${items.size} skipped from panel")
                 lines += "⏭ " + item.title + " — skipped"
                 continue
             }
+            // F18 leftovers (S3): a QUEUED item older than ~10 min is
+            // stale — the user has moved on and the screen/state it
+            // was planned against is gone. Drop it, never run it.
+            if (liveItem != null && TaskQueue.isExpired(liveItem)) {
+                TaskQueue.expireTask(item.id)
+                AppLog.i("Agent", "task ${index + 1}/${items.size} expired (queued over 10 min ago)")
+                lines += "⏭ " + item.title + " — expired (queued over 10 min ago)"
+                continue
+            }
+            // Re-check the stop flag right before promoting: the
+            // panel-skip/expiry checks above take time, and a stop
+            // issued while waiting must not start a new sub-task.
+            TaskState.throwIfStopRequested()
             TaskQueue.markRunning(item.id)
             // TaskState mirrors the running sub-task's goal + steps.
             TaskState.begin(goal = item.title.take(60), job = job, maxSteps = 10)

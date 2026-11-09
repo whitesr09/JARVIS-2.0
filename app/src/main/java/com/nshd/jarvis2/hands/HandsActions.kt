@@ -219,6 +219,50 @@ object HandsActions {
     }
 
     /**
+     * F18 leftovers: tap an element by IDENTITY (viewId + bounds +
+     * label), not by snapshot index. Flows that hold a UiElement
+     * from an older snapshot (Spotify row picks) must use this — the
+     * stored index may point at a different row by the time the tap
+     * runs, because ScreenReader re-selects the top-75 per snapshot.
+     * [clickResolved] re-resolves the identity from a fresh snapshot
+     * and aborts if it is gone.
+     */
+    suspend fun clickElementByIdentity(element: UiElement): ActionResult = serializedLong {
+        val service = serviceOrNull() ?: return@serializedLong disabled()
+        sensitiveTapDenial(service, element, element.label)?.let { return@serializedLong it }
+        clickResolved(service, element, "\"${element.label.ifBlank { "element" }}\"")
+    }
+
+    /**
+     * F18 leftovers: re-resolve [element] by identity from a FRESH
+     * snapshot. The identity is viewId + bounds + label: an exact
+     * match needs all three (viewId/label skipped when blank), and a
+     * re-layout shift is still caught by same viewId + same label at
+     * overlapping bounds. Label alone never matches — two rows can
+     * share a label ("Play"). Returns the FRESH element (current
+     * bounds) or null when the element is gone from the screen.
+     */
+    private fun reResolveFromFreshSnapshot(
+        service: JarvisAccessibilityService,
+        element: UiElement
+    ): UiElement? {
+        val fresh = service.screenReader().snapshot()
+        fresh.firstOrNull { candidate ->
+            (element.viewId.isBlank() || candidate.viewId == element.viewId) &&
+                boundsMatch(candidate.bounds, element.bounds) &&
+                (element.label.isBlank() || candidate.label == element.label)
+        }?.let { return it }
+        if (element.viewId.isNotBlank() && element.label.isNotBlank()) {
+            fresh.firstOrNull { candidate ->
+                candidate.viewId == element.viewId &&
+                    candidate.label == element.label &&
+                    Rect.intersects(candidate.bounds, element.bounds)
+            }?.let { return it }
+        }
+        return null
+    }
+
+    /**
      * F6 (Part D): dictation semantics. Before F6 this REPLACED the
      * whole field (SET_TEXT with the chunk alone, verified by exact
      * equality) — dictating into an editor destroyed what was already
@@ -1293,9 +1337,16 @@ object HandsActions {
      *
      * Order: (primary) clickable-ancestor ACTION_CLICK, then node
      * centre; (retry 1) clickable parent centre; (retry 2) a point at
-     * 25% from the node's left edge, centre-height. A vanished node
-     * skips straight to the coordinate strategies from the snapshot
-     * bounds. The winning strategy is logged.
+     * 25% from the node's left edge, centre-height.
+     *
+     * F18 leftovers — identity re-resolve: before any of that, the
+     * handed-in element is re-resolved by viewId + bounds + label
+     * from a FRESH snapshot. An element from a stale snapshot (or a
+     * Spotify row held across a tap + verify wait) that is no longer
+     * on screen aborts here with an honest failure — the old code
+     * fell through to blind coordinate taps on stale bounds. When
+     * the element IS still there, the strategies below run exactly
+     * as before, on fresh bounds.
      */
     private suspend fun clickResolved(
         service: JarvisAccessibilityService,
@@ -1304,9 +1355,17 @@ object HandsActions {
     ): ActionResult {
         val root = service.activeRoot()
             ?: return ActionResult(false, "No active window is available for the click.")
-        val node = resolveNode(root, element)
-        val centerX = element.bounds.exactCenterX()
-        val centerY = element.bounds.exactCenterY()
+        val fresh = reResolveFromFreshSnapshot(service, element)
+            ?: return ActionResult(
+                false,
+                "The element I was about to tap ($targetDescription) is " +
+                    "no longer on screen — the screen changed, so I stopped " +
+                    "instead of tapping a stale position. Ask me to look at " +
+                    "the screen again first."
+            )
+        val node = resolveNode(root, fresh)
+        val centerX = fresh.bounds.exactCenterX()
+        val centerY = fresh.bounds.exactCenterY()
         var lastX = centerX
         var lastY = centerY
 
@@ -1330,7 +1389,7 @@ object HandsActions {
             }
         } else {
             com.nshd.jarvis2.core.AppLog.w(
-                "Hands", "click target vanished, using snapshot bounds"
+                "Hands", "click target not found in live tree, using fresh snapshot bounds"
             )
         }
 
@@ -1361,7 +1420,7 @@ object HandsActions {
         }
 
         // Retry 2: 25% from the node's left edge, centre-height.
-        val edgeX = element.bounds.left + element.bounds.width() * 0.25f
+        val edgeX = fresh.bounds.left + fresh.bounds.width() * 0.25f
         val edgeY = centerY
         lastX = edgeX
         lastY = edgeY
@@ -1532,10 +1591,15 @@ object HandsActions {
 
     private fun boundsMatch(node: AccessibilityNodeInfo, expected: Rect): Boolean {
         val bounds = Rect().also { node.getBoundsInScreen(it) }
-        return abs(bounds.left - expected.left) <= 4 &&
-            abs(bounds.top - expected.top) <= 4 &&
-            abs(bounds.right - expected.right) <= 4 &&
-            abs(bounds.bottom - expected.bottom) <= 4
+        return boundsMatch(bounds, expected)
+    }
+
+    /** Same ±4px tolerance, Rect vs Rect (fresh-snapshot identity). */
+    private fun boundsMatch(a: Rect, b: Rect): Boolean {
+        return abs(a.left - b.left) <= 4 &&
+            abs(a.top - b.top) <= 4 &&
+            abs(a.right - b.right) <= 4 &&
+            abs(a.bottom - b.bottom) <= 4
     }
 
     private fun findEditable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {

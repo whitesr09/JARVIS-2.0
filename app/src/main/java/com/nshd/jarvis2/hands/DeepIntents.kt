@@ -568,7 +568,10 @@ class DeepIntents(context: Context) {
         com.nshd.jarvis2.brain.TaskQueue.setStepForRunning("Playing…")
         com.nshd.jarvis2.brain.TaskQueue.advancePlanForRunning(3)
         TaskState.throwIfStopRequested() // #61: before final tap
-        val rowClick = HandsActions.clickElement(chosen.element.index)
+        // F18 leftovers: tap the row by IDENTITY, not by its stored
+        // snapshot index — the index may point at a different row by
+        // now (snapshots re-select per poll).
+        val rowClick = HandsActions.clickElementByIdentity(chosen.element)
         if (!rowClick.success) {
             AppLog.w("Hands", "spotify_play: step=row-tap FAILED")
             return ActionResult(
@@ -598,7 +601,9 @@ class DeepIntents(context: Context) {
                 "spotify_play: step=verify no Pause after first row — " +
                     "retrying tap once on next candidate row"
             )
-            val retryClick = HandsActions.clickElement(nextRow.element.index)
+            // F18 leftovers: the retry row comes from the pre-tap
+            // snapshot — tap it by IDENTITY, never by stale index.
+            val retryClick = HandsActions.clickElementByIdentity(nextRow.element)
             if (retryClick.success && awaitPauseAffordance(PAUSE_VERIFY_MS)) {
                 markWarm(SPOTIFY_PACKAGE) // #23
                 AppLog.i("Hands", "spotify_play: step=verify playback VERIFIED on retry")

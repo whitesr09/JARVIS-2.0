@@ -9,6 +9,14 @@ import java.util.concurrent.atomic.AtomicLong
 /** v1.8.0 (#54): the panel history keeps at most this many finished tasks. */
 private const val HISTORY_MAX = 5
 
+/**
+ * F18 leftovers (brain audit S3): a QUEUED sub-task older than this
+ * never runs — the user has moved on and the screen/state it was
+ * planned against is gone. Promotion drops it instead (see
+ * [TaskQueue.expireTask] and the runTaskQueue loop).
+ */
+private const val QUEUE_ITEM_MAX_AGE_MS = 10 * 60 * 1000L
+
 /** Lifecycle of one queued sub-task (F3 multitask queue). */
 enum class TaskStatus { QUEUED, RUNNING, DONE, FAILED, SKIPPED }
 
@@ -27,6 +35,12 @@ data class TaskItem(
     val status: TaskStatus = TaskStatus.QUEUED,
     val startedAt: Long? = null,
     val endedAt: Long? = null,
+    /**
+     * F18 leftovers (S3): when this item was queued (submit time).
+     * A QUEUED item older than [QUEUE_ITEM_MAX_AGE_MS] is expired
+     * at promotion and never runs.
+     */
+    val queuedAt: Long = System.currentTimeMillis(),
     /** F6: live step line for the RUNNING item ("Searching 'One Name'…"). */
     val step: String = "",
     /**
@@ -405,6 +419,38 @@ object TaskQueue {
     /** v1.9.0 (#62): cancel = skip for a QUEUED item (same contract). */
     @Synchronized
     fun cancelTask(id: Long) = skipTask(id)
+
+    /**
+     * F18 leftovers (brain audit S3): true when a QUEUED item has
+     * waited longer than [QUEUE_ITEM_MAX_AGE_MS]. RUNNING/DONE/
+     * FAILED/SKIPPED items never expire — only items still waiting
+     * for promotion.
+     */
+    fun isExpired(item: TaskItem, now: Long = System.currentTimeMillis()): Boolean =
+        item.status == TaskStatus.QUEUED &&
+            now - item.queuedAt > QUEUE_ITEM_MAX_AGE_MS
+
+    /**
+     * F18 leftovers (S3): drop ONE stale QUEUED item — it becomes
+     * SKIPPED and never executes. Only QUEUED items can expire; a
+     * RUNNING item is stopped via the panel Stop (TaskState abort),
+     * never from here.
+     */
+    @Synchronized
+    fun expireTask(id: Long) {
+        val item = _tasks.value.firstOrNull { it.id == id } ?: return
+        if (item.status != TaskStatus.QUEUED) {
+            AppLog.d("Queue", "expire ignored for task #$id (status=${item.status})")
+            return
+        }
+        if (!isExpired(item)) {
+            AppLog.d("Queue", "expire ignored for task #$id (not stale yet)")
+            return
+        }
+        val ageMs = System.currentTimeMillis() - item.queuedAt
+        AppLog.i("Queue", "task #$id EXPIRED (queued ${ageMs}ms ago) — dropped, never runs")
+        update(id, TaskStatus.SKIPPED)
+    }
 
     /** Empty the queue entirely (finished queues stay visible until then). */
     @Synchronized
